@@ -1,0 +1,111 @@
+# Cargo.toml is Rust's project manifest — it plays the role that
+# package.json (Node), pyproject.toml (Python), or a Makefile + go.mod
+# combined would play elsewhere. It declares the package itself and every
+# external crate (Rust's word for "library" or "package") the project
+# depends on. `cargo build` reads this, resolves a compatible version of
+# each dependency, downloads them from crates.io (Rust's package registry,
+# analogous to npm/PyPI), and compiles everything together.
+
+[package]
+name = "tuxwire"
+version = "0.1.0"
+# The "edition" is Rust's mechanism for introducing breaking language
+# changes without breaking old code: every crate picks an edition, and the
+# compiler behaves accordingly, so crates on different editions can still
+# be compiled together in the same project. `cargo init` picked the newest
+# one available (2024) — there's no reason to use an older edition on a
+# brand new project.
+edition = "2024"
+
+[dependencies]
+# --- Error handling --------------------------------------------------
+# `anyhow` gives us a single catch-all error type (`anyhow::Error`, often
+# used via the `anyhow::Result<T>` alias) for application-level code. Rust
+# has no exceptions — functions that can fail return `Result<T, E>`, and
+# you're forced to acknowledge that explicitly (see the comments in
+# fetchers/rss.rs for what that looks like day to day). Writing a bespoke
+# error `enum` for every module is the more "idiomatic library" approach,
+# but for an application (as opposed to a crate other people import) it's
+# usually overkill — anyhow lets any error type be converted into one
+# common `anyhow::Error` via `?`, with a message you can attach via
+# `.context(...)`.
+anyhow = "1.0.104"
+
+# --- Timestamps --------------------------------------------------------
+# `chrono` provides `DateTime<Utc>` and friends, matching the `timestamp:
+# DateTime<Utc>` field on the `Article` struct in ARCHITECTURE.md. The
+# "serde" feature teaches chrono's types how to serialize/deserialize
+# themselves via serde (see below) — we need that for both SQLite storage
+# and any future JSON/TOML round-tripping.
+chrono = { version = "0.4.45", features = ["serde"] }
+
+# --- Terminal control ---------------------------------------------------
+# `crossterm` is the low-level library that puts the terminal into "raw
+# mode" (reading keys immediately instead of line-by-line), draws to
+# arbitrary screen positions, and reads keyboard/mouse events. `ratatui`
+# (below) is built on top of it — ratatui handles *layout and widgets*,
+# crossterm handles *talking to the actual terminal*.
+crossterm = "0.29.0"
+
+# --- Feed parsing --------------------------------------------------------
+# `feed-rs` parses RSS *and* Atom feeds into one unified `Feed`/`Entry`
+# model, so our fetcher code doesn't need to care which format a given
+# source publishes — per ARCHITECTURE.md, source type is "RSS/Atom" as a
+# single category. The alternative (the plain `rss` crate) only handles
+# RSS and would force us to special-case Atom sources later.
+feed-rs = "2.4.0"
+
+# --- TUI framework -------------------------------------------------------
+# `ratatui` is the widget/layout toolkit named directly in
+# ARCHITECTURE.md's tech stack (List, Tabs, Paragraph, Block, etc.). Not
+# used yet in this first milestone — the RSS fetcher stands alone — but
+# declared now so the dependency set matches the architecture doc, and the
+# `ui/` module below is scaffolded as a placeholder for it.
+ratatui = "0.30.2"
+
+# --- HTTP client -----------------------------------------------------
+# `reqwest` performs the actual network requests fetchers make (RSS feeds,
+# and later Reddit's/HN's JSON APIs). It's built on `tokio` (below) and is
+# async by default, which is why fetching a feed involves `.await`.
+reqwest = "0.13.4"
+
+# --- Embedded database ----------------------------------------------
+# `rusqlite` is a Rust binding to SQLite, matching ARCHITECTURE.md's
+# storage layer choice: an embedded `.db` file, no separate database
+# server/process to run. The "bundled" feature compiles SQLite's C source
+# directly into our binary instead of requiring a system-installed SQLite
+# library — this keeps the "single static binary, fast startup" property
+# the architecture doc calls out as the whole reason for choosing Rust.
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+
+# --- Serialization -------------------------------------------------------
+# `serde` ("SERialize/DEserialize") is the standard framework Rust code
+# uses to convert between in-memory structs and external formats like JSON
+# or TOML. The "derive" feature enables `#[derive(Serialize,
+# Deserialize)]` — annotating a struct with that macro auto-generates the
+# conversion code for it, instead of writing it by hand.
+serde = { version = "1.0.229", features = ["derive"] }
+# `serde_json` is the JSON backend for serde — used for talking to APIs
+# that respond in JSON (Reddit, HN/Algolia).
+serde_json = "1.0.151"
+
+# --- Async runtime -------------------------------------------------------
+# Rust's `async fn` / `.await` syntax describes *what* should happen
+# concurrently, but the language itself ships no async executor — you pick
+# one as a library. `tokio` is the de facto standard, and is what actually
+# schedules and runs our async fetches (including running multiple
+# fetchers concurrently, per ARCHITECTURE.md). The "full" feature enables
+# its whole toolkit (multi-threaded scheduler, timers, etc.) rather than
+# making us opt into pieces individually — reasonable for an application,
+# more restraint is generally used in a library.
+tokio = { version = "1.53.1", features = ["full"] }
+
+# --- Config file format -----------------------------------------------
+# `toml` reads/writes `sources.toml` and `theme.toml`. Note:
+# ARCHITECTURE.md specifically calls for `toml_edit` (not plain `toml`)
+# for the *writing* side of the in-app "add a source" flow, because
+# `toml_edit` preserves existing formatting/comments on write instead of
+# rewriting the whole file from scratch. Plain `toml` is kept here for the
+# simpler *read* paths (e.g. loading `theme.toml` at startup); `toml_edit`
+# will be added when the source-adding feature is actually built.
+toml = "1.1.4"
