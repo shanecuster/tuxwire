@@ -1,12 +1,16 @@
 //! tuxwire — a terminal-based Linux news aggregator.
 //!
 //! See `docs/ARCHITECTURE.md` for the full design. This file is currently
-//! just enough to prove the first milestone works end to end: fetch one
-//! real RSS feed and print what came back. The TUI, storage, and
-//! skip-weighting layers described in the architecture doc aren't wired
-//! up yet — their modules exist as documented placeholders (see
-//! `storage/mod.rs`, `scoring.rs`, `theme.rs`, `ui/mod.rs`) so the project
-//! layout matches the plan from the start.
+//! just enough to prove the first two milestones work end to end: fetch
+//! one real RSS feed and print what came back, then open the real, real
+//! on-disk database (creating and migrating it if necessary). Those two
+//! steps are deliberately not wired together yet -- fetched articles
+//! aren't inserted into storage -- since that's fetcher/TUI integration
+//! work that hasn't been built. The TUI and skip-weighting layers
+//! described in the architecture doc aren't wired up at all yet -- their
+//! modules exist as documented placeholders (see `scoring.rs`,
+//! `theme.rs`, `ui/mod.rs`) so the project layout matches the plan from
+//! the start.
 //!
 //! ## The module tree, and why these lines have to be here
 //!
@@ -34,6 +38,7 @@ mod ui;
 // every trait providing methods you use has to be named explicitly.
 use fetchers::Fetcher;
 use fetchers::rss::RssFetcher;
+use storage::Storage;
 
 /// `#[tokio::main]` is a *macro* that rewrites this function at compile
 /// time. Rust's real `fn main()` can't be `async` — something has to own
@@ -82,6 +87,19 @@ async fn main() -> anyhow::Result<()> {
         println!("- {}", article.title);
         println!("  {}", article.url);
     }
+
+    // Second milestone: prove `storage/mod.rs` works end to end against
+    // the real database, not just the in-memory one its own test suite
+    // uses. `Storage::open()` resolves `~/.local/share/tuxwire` (creating
+    // it if this is the first run), opens (or creates) `tuxwire.db`
+    // inside it, and runs every migration in `storage/migrations.rs`
+    // against it -- all of which either succeeds silently or returns an
+    // `Err` that the `?` below propagates out of `main`, same as the
+    // fetch above. Nothing fetched above is inserted into it yet; see the
+    // module doc comment for why.
+    println!("\nOpening storage...");
+    Storage::open()?;
+    println!("Storage ready at ~/.local/share/tuxwire/tuxwire.db (migrations up to date).");
 
     Ok(())
 }
