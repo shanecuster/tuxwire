@@ -88,18 +88,28 @@ async fn main() -> anyhow::Result<()> {
         println!("  {}", article.url);
     }
 
-    // Second milestone: prove `storage/mod.rs` works end to end against
-    // the real database, not just the in-memory one its own test suite
-    // uses. `Storage::open()` resolves `~/.local/share/tuxwire` (creating
-    // it if this is the first run), opens (or creates) `tuxwire.db`
-    // inside it, and runs every migration in `storage/migrations.rs`
-    // against it -- all of which either succeeds silently or returns an
-    // `Err` that the `?` below propagates out of `main`, same as the
-    // fetch above. Nothing fetched above is inserted into it yet; see the
-    // module doc comment for why.
+    // Third milestone: persist what was fetched above. `Storage::open()`
+    // resolves `~/.local/share/tuxwire` (creating it if this is the first
+    // run), opens (or creates) `tuxwire.db` inside it, and runs every
+    // migration in `storage/migrations.rs` against it -- all of which
+    // either succeeds silently or returns an `Err` that the `?` below
+    // propagates out of `main`, same as the fetch above.
     println!("\nOpening storage...");
-    Storage::open()?;
+    let storage = Storage::open()?;
     println!("Storage ready at ~/.local/share/tuxwire/tuxwire.db (migrations up to date).");
+
+    // `insert_article` is idempotent on `url` (see its doc comment in
+    // `storage/mod.rs`), so running this binary again against the same
+    // feed re-inserts nothing -- every article that was already on disk
+    // just gets its existing row's ID handed back instead of a new row.
+    for article in &articles {
+        storage.insert_article(article)?;
+    }
+
+    println!(
+        "Storage now holds {} article(s) total.",
+        storage.article_count()?
+    );
 
     Ok(())
 }

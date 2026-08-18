@@ -42,11 +42,18 @@ struct Migration {
 /// Adding a new migration later means: write `migrations/00N_whatever.sql`,
 /// then add one more `Migration { .. }` entry here with the next version
 /// number. Nothing about *this* function (`run`, below) needs to change.
-const MIGRATIONS: &[Migration] = &[Migration {
-    version: 1,
-    name: "001_init",
-    sql: include_str!("../../migrations/001_init.sql"),
-}];
+const MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        name: "001_init",
+        sql: include_str!("../../migrations/001_init.sql"),
+    },
+    Migration {
+        version: 2,
+        name: "002_unique_article_url",
+        sql: include_str!("../../migrations/002_unique_article_url.sql"),
+    },
+];
 
 /// Brings `conn`'s schema up to date by running every migration whose
 /// version is greater than the database's current `PRAGMA user_version`,

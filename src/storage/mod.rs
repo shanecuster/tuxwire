@@ -87,8 +87,18 @@ impl Storage {
     // --- articles ---------------------------------------------------
 
     /// Inserts a freshly-fetched `Article` (one with the placeholder
-    /// `id: 0` `Article::new` assigns -- see `models.rs`) and returns the
-    /// real row ID SQLite assigned it.
+    /// `id: 0` `Article::new` assigns -- see `models.rs`) and returns its
+    /// row ID.
+    ///
+    /// Re-running the fetcher sees the same feed entries every time, so
+    /// this has to be idempotent on `url`: if a row with this URL already
+    /// exists, nothing is inserted and the *existing* row's ID is returned
+    /// instead of a fresh one. `ON CONFLICT(url) DO NOTHING` is what
+    /// actually guarantees that at the database level (backed by the
+    /// unique index migration 002 adds on `articles.url`) -- the same
+    /// atomic insert-or-else pattern `increment_skip_weight` below uses for
+    /// `skip_weights`, just discarding the conflicting write instead of
+    /// updating it.
     ///
     /// `article: &Article` borrows rather than takes ownership: inserting
     /// a row only needs to *read* the article's fields, and a fetcher
@@ -107,7 +117,8 @@ impl Storage {
         // is never mistaken for part of the query itself.
         self.conn.execute(
             "INSERT INTO articles (title, url, source, topic, timestamp, read, skipped, saved, note)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             ON CONFLICT(url) DO NOTHING",
             params![
                 article.title,
                 article.url,
@@ -121,11 +132,28 @@ impl Storage {
             ],
         )?;
 
-        // `last_insert_rowid` reports the rowid SQLite just assigned on
-        // *this* connection -- safe to rely on here because `Storage`
-        // isn't shared across threads/connections; each `Storage` owns
-        // exactly one `Connection` all to itself.
-        Ok(self.conn.last_insert_rowid())
+        // Looking the ID up by URL (rather than trusting
+        // `last_insert_rowid`) is what makes this correct in both cases:
+        // `last_insert_rowid` doesn't advance when `DO NOTHING` discards a
+        // conflicting insert, so it would silently return some *other*
+        // row's ID instead of this article's.
+        self.conn
+            .query_row(
+                "SELECT id FROM articles WHERE url = ?1",
+                params![article.url],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
+    }
+
+    /// Total number of rows in `articles`, across every topic and source --
+    /// the simplest possible signal that re-running the fetcher didn't
+    /// create duplicates: this should stay the same across a second run
+    /// against a feed whose entries haven't changed.
+    pub fn article_count(&self) -> anyhow::Result<i64> {
+        self.conn
+            .query_row("SELECT COUNT(*) FROM articles", [], |row| row.get(0))
+            .map_err(Into::into)
     }
 
     /// All articles filed under `topic`, most recent first -- the query
@@ -426,6 +454,33 @@ mod tests {
     }
 
     #[test]
+    fn inserting_duplicate_url_does_not_create_duplicate() {
+        let storage = test_storage();
+        let article = Article::new(
+            "Btrfs send/receive got faster".to_string(),
+            "https://example.com/btrfs".to_string(),
+            "LWN.net".to_string(),
+            "linux-news".to_string(),
+            Utc::now(),
+        );
+
+        let first_id = storage.insert_article(&article).unwrap();
+        // Simulates re-running the fetcher against the same feed: same
+        // URL, but a distinct `Article` value (e.g. the title casing
+        // changed upstream) -- the row already on disk should win either
+        // way.
+        let mut refetched = article.clone();
+        refetched.title = "Btrfs send/receive got even faster".to_string();
+        let second_id = storage.insert_article(&refetched).unwrap();
+
+        assert_eq!(first_id, second_id, "re-inserting an existing URL must return its existing id");
+
+        let articles = storage.articles_by_topic("linux-news").unwrap();
+        assert_eq!(articles.len(), 1, "duplicate URL must not create a second row");
+        assert_eq!(articles[0].title, "Btrfs send/receive got faster", "the original row must be left untouched");
+    }
+
+    #[test]
     fn saving_marks_read_too() {
         let storage = test_storage();
         let article = Article::new(
@@ -490,10 +545,13 @@ mod tests {
     #[test]
     fn topics_lists_distinct_topics_alphabetically() {
         let storage = test_storage();
-        for topic in ["linux-news", "gaming", "linux-news"] {
+        for (i, topic) in ["linux-news", "gaming", "linux-news"].into_iter().enumerate() {
+            // Distinct `url`s per row -- `url` is unique now (migration
+            // 002), and this test wants three real rows, not one row two
+            // of these inserts silently collide into.
             let article = Article::new(
                 "t".to_string(),
-                "u".to_string(),
+                format!("u{i}"),
                 "s".to_string(),
                 topic.to_string(),
                 Utc::now(),
