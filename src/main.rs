@@ -32,12 +32,12 @@ mod ui;
 // Bringing `Fetcher` into scope is what makes `.fetch()` callable below.
 // This is a Rust-specific quirk worth calling out: trait *methods* are
 // only usable on a value if the trait itself is `use`d somewhere in the
-// current file, even though the concrete type (`RssFetcher`) is already
-// imported. It's a deliberate design choice — it means a method call
-// can never silently come from some trait you didn't know was in play;
-// every trait providing methods you use has to be named explicitly.
+// current file, even though the concrete type (`RssFetcher`, built inside
+// `fetchers::configured_sources`) is already imported via `fetchers`
+// itself. It's a deliberate design choice — it means a method call can
+// never silently come from some trait you didn't know was in play; every
+// trait providing methods you use has to be named explicitly.
 use fetchers::Fetcher;
-use fetchers::rss::RssFetcher;
 use storage::Storage;
 use theme::Theme;
 
@@ -56,22 +56,22 @@ use theme::Theme;
 /// and exits with a non-zero status instead of panicking.
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // For this milestone, the source is hardcoded rather than loaded from
-    // `sources.toml` (config loading isn't built yet). This mirrors
-    // exactly one `[[source]]` entry from the example in
-    // ARCHITECTURE.md's Configuration section.
-    let phoronix = RssFetcher {
-        name: String::from("Phoronix"),
-        url: String::from("https://www.phoronix.com/rss.php"),
-        topic: String::from("linux-news"),
-    };
+    // The source list is hardcoded rather than loaded from `sources.toml`
+    // (config loading isn't built yet) — see
+    // `fetchers::configured_sources` for the one place that list lives,
+    // shared with the TUI's `r` refresh keybind.
+    let sources = fetchers::configured_sources();
+    let mut articles = Vec::new();
 
-    println!("Fetching {}...", phoronix.name);
+    for source in &sources {
+        println!("Fetching {}...", source.name);
 
-    // `.fetch().await?` — call the async method, wait for it to finish,
-    // and propagate any error up out of `main` (which is what triggers
-    // the "print the error and exit non-zero" behavior mentioned above).
-    let articles = phoronix.fetch().await?;
+        // `.fetch().await?` — call the async method, wait for it to
+        // finish, and propagate any error up out of `main` (which is
+        // what triggers the "print the error and exit non-zero" behavior
+        // mentioned above).
+        articles.extend(source.fetch().await?);
+    }
 
     println!("Got {} articles:\n", articles.len());
 

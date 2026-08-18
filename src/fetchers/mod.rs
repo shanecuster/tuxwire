@@ -72,3 +72,19 @@ pub trait Fetcher {
 // both into one shape — from the app's perspective they're the same
 // source type.
 pub mod rss;
+
+/// The source list, standing in for `sources.toml` until config-file
+/// loading is built (see ARCHITECTURE.md's Configuration section — this
+/// is the same one-entry set `main.rs` used to build inline before this
+/// function existed). Pulled out here, rather than left inline in
+/// `main.rs`, so it's the single place both the app's initial fetch
+/// (`main.rs`) and the TUI's `r` refresh keybind (`ui/mod.rs`) read
+/// from — adding a second hardcoded source later means editing this list
+/// once, not two call sites that would otherwise be free to drift apart.
+pub fn configured_sources() -> Vec<rss::RssFetcher> {
+    vec![rss::RssFetcher {
+        name: String::from("Phoronix"),
+        url: String::from("https://www.phoronix.com/rss.php"),
+        topic: String::from("linux-news"),
+    }]
+}

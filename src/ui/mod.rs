@@ -1,19 +1,23 @@
 //! ratatui views/widgets (`docs/ARCHITECTURE.md` § 3. TUI).
 //!
-//! Second milestone: navigation and opening links. `j`/`k` move the
+//! Third milestone: state-changing keybinds. `j`/`k` move the
 //! article-list selection, `Up`/`Down`/`Tab` move the topic-sidebar
 //! selection (reloading the article list from `storage` whenever the
-//! topic changes), and `Enter` opens the selected article's URL in
-//! `$BROWSER`. State-changing keybinds -- `x` skip, `s` save, `n` note,
-//! `r` refresh, `S` saved view, `a` add source -- are all still to come,
-//! and none of them run yet, including the "opening an article marks it
-//! read" behavior ARCHITECTURE.md describes; `Enter` here only opens the
-//! link. This module owns the terminal setup/teardown, the draw loop, and
-//! (starting with this milestone) the small bit of navigation state that
-//! selection requires -- which topic and which article are highlighted,
-//! and the current topic's article list, since that has to be reloaded
-//! from `storage` on every topic change rather than loaded once upfront.
+//! topic changes), `Enter` opens the selected article's URL in
+//! `$BROWSER`, `x` marks the selected article skipped, and `r` re-fetches
+//! the current topic's sources (via `fetchers::configured_sources`),
+//! inserts whatever's new into `storage`, and reloads the article list.
+//! `s` save, `n` note, `S` saved view, and `a` add source are still to
+//! come, and none of them run yet -- same for the "opening an article
+//! marks it read" behavior ARCHITECTURE.md describes; `Enter` here only
+//! opens the link. This module owns the terminal setup/teardown, the draw
+//! loop, and the small bit of navigation state that selection requires --
+//! which topic and which article are highlighted, and the current topic's
+//! article list, since that has to be reloaded from `storage` on every
+//! topic change (and now every `r` refresh) rather than loaded once
+//! upfront.
 
+use crate::fetchers::{self, Fetcher};
 use crate::models::Article;
 use crate::storage::Storage;
 use crate::theme::Theme;
@@ -25,14 +29,14 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 
 /// Keybind hints for the footer. Only the keys actually wired up so far --
-/// the rest of ARCHITECTURE.md's v1 keybind table (`x` skip, `s` save, `n`
-/// note, `r` refresh, `S` saved view, `a` add source) isn't implemented
-/// yet, so it doesn't belong in the footer yet either; showing a hint for
-/// a key that does nothing would be worse than showing no hint at all.
-/// Kept as one `const` (rather than inlined into `footer` below) so
-/// there's exactly one place this has to stay in sync with the match in
-/// `draw_until_quit` below.
-const KEYBIND_HINTS: &str = "j/k move · ↑/↓/Tab topic · Enter open · q quit";
+/// `s` save, `n` note, `S` saved view, and `a` add source, the rest of
+/// ARCHITECTURE.md's v1 keybind table, aren't implemented yet, so they
+/// don't belong in the footer yet either; showing a hint for a key that
+/// does nothing would be worse than showing no hint at all. Kept as one
+/// `const` (rather than inlined into `footer` below) so there's exactly
+/// one place this has to stay in sync with the match in `draw_until_quit`
+/// below.
+const KEYBIND_HINTS: &str = "j/k move · ↑/↓/Tab topic · Enter open · x skip · r refresh · q quit";
 
 /// Runs the TUI shell until the user presses `q`.
 ///
@@ -148,6 +152,36 @@ fn draw_until_quit(
                 }
             }
 
+            // `x` marks the selected article skipped, both on disk and in
+            // the in-memory `articles` list -- mutating the list entry
+            // directly (rather than reloading the whole topic from
+            // `storage`, as the topic-switch arms above do) is enough
+            // here, since skipping doesn't change *which* rows belong in
+            // the list, only the `skipped` flag `article_item` reads to
+            // color this one. This only records the skip itself; deriving
+            // keyword(s) from the article to feed into
+            // `increment_skip_weight` is skip-*weighting* logic that
+            // belongs in `scoring.rs` (not built yet -- see its module doc
+            // comment), so that part is deliberately not done here.
+            KeyCode::Char('x') => {
+                if let Some(article) = articles.get_mut(article_index) {
+                    storage.mark_skipped(article.id)?;
+                    article.skipped = true;
+                }
+            }
+
+            // `r` re-fetches the current topic's sources and reloads its
+            // article list -- see `refresh_topic` below. Clamping
+            // `article_index` afterwards matters because a refresh can
+            // only ever grow or hold steady the list (nothing here
+            // removes rows), but doing it unconditionally is simpler than
+            // reasoning about which case applies, and is a no-op when the
+            // list grew or stayed the same length.
+            KeyCode::Char('r') if !topics.is_empty() => {
+                articles = refresh_topic(storage, &topics[topic_index])?;
+                article_index = article_index.min(articles.len().saturating_sub(1));
+            }
+
             _ => {}
         }
     }
@@ -179,6 +213,37 @@ fn open_in_browser(url: &str) {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn();
+}
+
+/// Re-fetches every source in `fetchers::configured_sources` filed under
+/// `topic`, inserts whatever comes back into `storage` (idempotently, on
+/// `url` -- see `Storage::insert_article`), and returns the reloaded
+/// article list for `topic` -- the `r` keybind.
+///
+/// `draw_until_quit` runs synchronously (it's the body of a plain,
+/// blocking draw loop, not an `async fn`), but `Fetcher::fetch` is async
+/// -- it does real network I/O. `main` already put us inside a `tokio`
+/// runtime (`#[tokio::main]`), so `tokio::task::block_in_place` +
+/// `Handle::current().block_on(...)` is how a synchronous call site
+/// inside that runtime drives an `async` call to completion: rather than
+/// panicking (which is what trying to enter a *second*, independent
+/// runtime from here would do), `block_in_place` hands this task's worker
+/// thread over to `tokio`'s blocking-task pool for the duration of the
+/// call, so the runtime's other workers are free to keep making progress
+/// while this one fetch is in flight. This only works because
+/// `#[tokio::main]`'s default multi-threaded runtime has more than one
+/// worker thread to hand off to.
+fn refresh_topic(storage: &Storage, topic: &str) -> anyhow::Result<Vec<Article>> {
+    for source in fetchers::configured_sources().into_iter().filter(|source| source.topic == topic) {
+        let fetched =
+            tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(source.fetch()))?;
+
+        for article in &fetched {
+            storage.insert_article(article)?;
+        }
+    }
+
+    storage.articles_by_topic(topic)
 }
 
 /// Draws one frame: the topic sidebar + article list side by side, with

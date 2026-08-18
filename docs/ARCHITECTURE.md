@@ -115,7 +115,7 @@ saved articles are meant to persist indefinitely until manually removed.
 | `x`       | skip article (feeds skip-weighting) |
 | `s`       | save article (auto-marks as read) |
 | `n`       | edit note on a saved article     |
-| `r`       | refresh all sources               |
+| `r`       | refresh current topic's sources   |
 | `S`       | view saved articles               |
 | `a`       | add a new source                  |
 | `q`       | quit                             |
