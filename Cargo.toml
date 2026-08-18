@@ -76,7 +76,11 @@ reqwest = "0.13.4"
 # directly into our binary instead of requiring a system-installed SQLite
 # library — this keeps the "single static binary, fast startup" property
 # the architecture doc calls out as the whole reason for choosing Rust.
-rusqlite = { version = "0.40.2", features = ["bundled"] }
+# The "chrono" feature teaches `rusqlite` to convert `chrono::DateTime<Utc>`
+# (the type `Article::timestamp` uses, see models.rs) to and from a SQLite
+# column automatically, so `storage/mod.rs` never has to hand-write that
+# conversion — the same reasoning as chrono's own "serde" feature above.
+rusqlite = { version = "0.40.2", features = ["bundled", "chrono"] }
 
 # --- Serialization -------------------------------------------------------
 # `serde` ("SERialize/DEserialize") is the standard framework Rust code
