@@ -39,6 +39,7 @@ mod ui;
 use fetchers::Fetcher;
 use fetchers::rss::RssFetcher;
 use storage::Storage;
+use theme::Theme;
 
 /// `#[tokio::main]` is a *macro* that rewrites this function at compile
 /// time. Rust's real `fn main()` can't be `async` — something has to own
@@ -110,6 +111,19 @@ async fn main() -> anyhow::Result<()> {
         "Storage now holds {} article(s) total.",
         storage.article_count()?
     );
+
+    // Fourth milestone: the TUI shell itself. `Theme::load` reads
+    // `~/.config/tuxwire/theme.toml` (falling back to the bundled
+    // Catppuccin Macchiato default if that file doesn't exist yet -- see
+    // `theme.rs`), and `ui::run` takes it from there: raw mode, the
+    // alternate screen, and the two-pane layout + footer, all restored
+    // back to a normal terminal the moment this returns. Everything
+    // printed above (the fetch log, the storage summary) will already have
+    // scrolled off by the time this happens, since entering the alternate
+    // screen swaps to a blank buffer -- that's expected, not a bug losing
+    // that output.
+    let theme = Theme::load()?;
+    ui::run(&storage, &theme)?;
 
     Ok(())
 }

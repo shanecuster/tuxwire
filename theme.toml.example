@@ -1,0 +1,24 @@
+# tuxwire theme — Catppuccin Macchiato (docs/ARCHITECTURE.md § theme.toml).
+#
+# Copy this file to ~/.config/tuxwire/theme.toml and edit freely; the app
+# never hardcodes colors, so any value below can be swapped without
+# touching Rust. Mocha and Frappé are easy drop-in swaps (same accent
+# hues, different base/text shades) if Macchiato isn't to taste.
+#
+# This exact file is also compiled directly into the tuxwire binary
+# (src/theme.rs) as the fallback used before ~/.config/tuxwire/theme.toml
+# exists, so a first run always has a themed UI.
+
+[theme]
+background   = "#24273a"  # Catppuccin Macchiato — base
+panel_border = "#363a4f"  # surface0
+text_primary = "#cad3f5"  # text (unread)
+text_muted   = "#6e738d"  # overlay0 (read)
+text_dim     = "#494d64"  # surface1 (skipped)
+
+accent_unread   = "#f5a97f"  # peach
+accent_read     = "#8bd5ca"  # teal
+accent_skipped  = "#c6a0f6"  # mauve
+accent_saved    = "#eed49f"  # yellow
+accent_breaking = "#ed8796"  # red
+accent_selected = "#8aadf4"  # blue
