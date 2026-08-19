@@ -110,6 +110,21 @@ tokio = { version = "1.53.1", features = ["full"] }
 # for the *writing* side of the in-app "add a source" flow, because
 # `toml_edit` preserves existing formatting/comments on write instead of
 # rewriting the whole file from scratch. Plain `toml` is kept here for the
-# simpler *read* paths (e.g. loading `theme.toml` at startup); `toml_edit`
-# will be added when the source-adding feature is actually built.
+# simpler *read* paths (e.g. loading `theme.toml` at startup).
 toml = "1.1.4"
+
+# `toml_edit` is `toml`'s lower-level sibling: instead of round-tripping
+# through a `serde` struct (which only knows the *fields* it was told
+# about, and would silently drop every comment/blank line in the file on
+# write), it parses into a mutable "document" that remembers the file's
+# exact formatting and lets us surgically append one new `[[source]]`
+# block. That's what the in-app "add a source" flow
+# (`fetchers::config::add_source`, wired up from `ui`'s `a` keybind) needs
+# -- a user's hand-written comments in `sources.toml` (see the topic
+# groupings left in the real config file) must survive tuxwire writing to
+# it. Only the "parse" and "display" features are enabled (the defaults
+# minus "serde"/"debug"/"unbounded") -- this project only ever reads and
+# writes plain TOML text, never converts a document to/from a serde type
+# via this crate (plain `toml`, above, already covers that), so there's no
+# reason to pull in the rest.
+toml_edit = "0.25.13"

@@ -100,11 +100,28 @@ saved articles are meant to persist indefinitely until manually removed.
 
 ### 3. TUI (ratatui)
 
-- **Left pane:** topic list, toggle/select topics
-- **Right pane:** article list for the selected topic, sorted by recency
-- **Footer:** keybind hints + last-refresh timestamp
-- **Saved view:** a dedicated view/pane filtering to `saved = true` across
-  all topics, independent of the topic sidebar
+- **Left pane (topic sidebar):** three stacked sections, always visible
+  regardless of topic or view selected:
+  1. **Topics** — the topic list itself, toggle/select as before
+  2. **Keys** — a static reference list of the active v1 keybinds (`s`
+     save, `x` close, `n` note, `S` saved view, `r` refresh, `a` add
+     source). Exists specifically because the person using this has no
+     prior Rust/TUI-app experience and shouldn't need to memorize the
+     keybind table before the app is usable — the reference lives right
+     on screen instead.
+  3. **Colors** — a small colored square next to each state label
+     (unread/read/saved/skipped), color values pulled live from the
+     loaded `theme.toml` rather than hardcoded, so the legend always
+     matches whatever's actually rendering in the article list.
+  These two reference sections are purely static — no interactivity, no
+  state — and render identically in both the Topic view and the Saved
+  view.
+- **Right pane:** article list for the selected topic (or saved articles,
+  in Saved view), sorted by recency
+- **Footer:** remaining hints not already covered by the sidebar's Keys
+  section, plus last-refresh timestamp
+- **Saved view:** a dedicated view filtering to `saved = true` across
+  all topics, independent of the topic sidebar (toggled with `S`)
 
 #### Keybinds (v1)
 
@@ -112,7 +129,7 @@ saved articles are meant to persist indefinitely until manually removed.
 |-----------|----------------------------------|
 | `j` / `k` | navigate list                   |
 | `Enter`   | open article in `$BROWSER`      |
-| `x`       | skip article (feeds skip-weighting) |
+| `x`       | skip article (recolors, no keyword-learning behind it — see below) |
 | `s`       | save article (auto-marks as read) |
 | `n`       | edit note on a saved article     |
 | `r`       | refresh all sources               |
@@ -128,7 +145,7 @@ saved articles are meant to persist indefinitely until manually removed.
 |-----------|-------------------------------------------|-------------------------------------|
 | unread    | default state, not yet interacted with    |                                      |
 | read      | opened, or saved (saving implies read)     |                                      |
-| skipped   | explicitly dismissed                       | feeds the skip-weighting system     |
+| skipped   | explicitly dismissed                       | purely visual/state — see below     |
 | saved     | permanent until manually unsaved           | supports an optional free-text note |
 
 **Saving auto-marks as read** — these are not tracked as independent
@@ -137,19 +154,26 @@ in one action.
 
 ---
 
-## The "Learning" System (Skip-Weighting)
+## Skip-Weighting ("Learning") — Deferred to v2
 
-Not machine learning — a simple, transparent keyword/topic weighting system:
+`x` marks an article skipped: it's recolored (mauve, per the theme) and
+that's it. This is deliberately simple and considered **complete as-is**
+for v1 — it does exactly what's needed (get an uninteresting article out
+of visual focus) without any further behavior behind it.
 
-1. Pressing `x` on an article logs its keywords/tags into `skip_weights`,
-   incrementing their weight.
-2. On each refresh, incoming articles are scored against `skip_weights`.
-3. High-weight (frequently-skipped) keywords cause matching articles to be
-   filtered or sorted to the bottom.
-
-This is intentionally simple and inspectable — you should always be able to
-look at `skip_weights` and understand exactly why an article was
-deprioritized.
+An earlier version of this doc described a keyword-weighting system where
+skipping an article would log its keywords and future similar articles
+would be auto-deprioritized. That's explicitly **cut from v1 scope**:
+- The `skip_weights` table and `Storage::increment_skip_weight` /
+  `Storage::skip_weight` methods already exist from the initial schema, but
+  are intentionally left unwired — not a bug, not unfinished, just unused
+  for now.
+- A plain skip-and-recolor loop has proven sufficient through active use;
+  keyword-scoring adds real complexity (extraction, stopword handling,
+  scoring-and-resorting on every fetch) for a behavior that hasn't turned
+  out to be missed.
+- If this is revisited for v2, the existing schema and methods are already
+  there to build on — nothing needs to be re-designed, just wired up.
 
 ---
 
@@ -190,14 +214,9 @@ the sidebar is fully driven by what the user has actually assigned. Adding
 a brand-new category is just typing a new `topic = "..."` value on a source;
 no code change required.
 
-**Current source list:** 9to5Linux, Phoronix, It's FOSS, GamingOnLinux
-(the site behind the "LinuxGamingNews" pick), Linuxiac, LWN.net, OMG!
-Ubuntu, KrebsOnSecurity — configured in `~/.config/tuxwire/sources.toml`,
-grouped as `kernel` (Phoronix, LWN.net), `distros` (9to5Linux, Linuxiac,
-OMG! Ubuntu), `linux` (It's FOSS), `gaming` (GamingOnLinux), and
-`security` (KrebsOnSecurity). See that file's own comments for the
-per-source reasoning — it's a first pass, freely adjustable by just
-editing `topic = "..."`.
+**Current source list:** 9to5Linux, Phoronix, It's FOSS, LinuxGamingNews,
+Linuxiac, LWN.net, OMG! Ubuntu (candidates to add: Arch Linux news, a
+dedicated CVE/security feed, KrebsOnSecurity).
 
 ### `theme.toml`
 
@@ -290,7 +309,7 @@ tuxwire/
 │   ├── main.rs
 │   ├── fetchers/        # one module per source type
 │   ├── storage/         # SQLite access + migrations
-│   ├── scoring.rs        # skip-weighting logic
+│   ├── scoring.rs        # reserved for v2 skip-weighting (unused in v1)
 │   ├── theme.rs           # theme.toml loading
 │   └── ui/                # ratatui views/widgets
 ├── migrations/
@@ -389,9 +408,8 @@ A lightweight self-hosted-analytics-style view, in the same spirit as the
 GoatCounter dashboards already tracking the blogs.
 
 - Articles read per day/week, broken down by topic and by source
-- Top sources by volume, top skipped keywords (surfaces what the
-  skip-weighting system has actually learned — useful for sanity-checking
-  it isn't over-filtering)
+- Top sources by volume, most-skipped articles/topics (simple counts —
+  not dependent on the deferred skip-weighting system)
 - Could be a dedicated ratatui view with simple bar/sparkline widgets, or
   even just a formatted text summary to start — doesn't need to be
   visually elaborate to be useful
@@ -413,6 +431,7 @@ GoatCounter dashboards already tracking the blogs.
 **Other open questions:**
 - Multi-line vs. single-line notes UI — inline popup (`tui-textarea`) vs.
   shelling out to `$EDITOR` for real Vim; likely support both, config-toggled
+- Whether the "Saved" view is a pseudo-topic in the sidebar or a separate pane
 - Custom fetchers for any source without RSS
 - Possible future: syncing the SQLite db via rclone across machines
 - Offline caching strategy: cache-on-fetch vs. cache-on-save/open

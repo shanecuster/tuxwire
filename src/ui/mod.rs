@@ -32,29 +32,41 @@ use crate::theme::Theme;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
 
-/// Keybind hints for the footer, for the normal (not editing-a-note) state
-/// while `View::Topic` is showing -- see `SAVED_HINTS` below for the saved
-/// view's own hint line, and `EDITING_NOTE_HINTS` for the popup's. `a` add
-/// source, the last remaining key in ARCHITECTURE.md's v1 keybind table,
-/// isn't implemented yet, so it doesn't belong in the footer yet either;
-/// showing a hint for a key that does nothing would be worse than showing
-/// no hint at all. Kept as one `const` (rather than inlined into
-/// `render_footer` below) so there's exactly one place this has to stay in
-/// sync with the `Mode::Normal` match arm in `draw_until_quit` below.
-const KEYBIND_HINTS: &str = "j/k move · ↑/↓/Tab topic · Enter open · x skip · s save · n note · r refresh · S saved · q quit";
+/// Keybind hints for the footer, for the normal (not editing-a-note,
+/// not adding-a-source) state while `View::Topic` is showing -- see
+/// `SAVED_HINTS` below for the saved view's own hint line,
+/// `EDITING_NOTE_HINTS` for the note popup's, and
+/// `ADD_SOURCE_URL_HINTS`/`ADD_SOURCE_CONFIRM_HINTS` for the add-source
+/// flow's. Kept as one `const` (rather than inlined into `render_footer`
+/// below) so there's exactly one place this has to stay in sync with the
+/// `Mode::Normal` match arm in `draw_until_quit` below.
+///
+/// Deliberately drops `x`/`s`/`n`/`r`/`S`/`a` -- those six now have a
+/// permanent home in the sidebar's own "Keys" section (see
+/// `render_keys_section`), which is on screen at all times rather than
+/// only in the footer, so repeating them here would just be the same
+/// reference living in two places. What's left is exactly the keys the
+/// Keys section *doesn't* cover: raw navigation (`j`/`k`, `↑`/`↓`/`Tab`,
+/// `Enter`) and `q` to quit.
+const KEYBIND_HINTS: &str = "j/k move · ↑/↓/Tab topic · Enter open · q quit";
 
-/// The footer hint line shown while `View::Saved` is showing (and the note
-/// popup isn't open). Deliberately drops `↑/↓ topic` and `r refresh` --
+/// The footer hint line shown while `View::Saved` is showing (and no
+/// popup is open). Deliberately drops `↑/↓ topic` and `r refresh` --
 /// both are disabled in this view (see the guards on their match arms in
 /// `draw_until_quit`), since neither a topic-sidebar selection nor "refetch
 /// this topic's sources" means anything once the list is "every saved
 /// article across every topic" instead of one topic's.
-const SAVED_HINTS: &str =
-    "j/k move · Enter open · x skip · s save · n note · S/Esc/Tab back · q quit";
+///
+/// Also drops `x`/`s`/`n`/`a`, same reasoning as `KEYBIND_HINTS` above --
+/// covered by the sidebar's always-visible Keys section instead. `S` stays
+/// off this line for the same reason (it's in Keys too), but `Esc`/`Tab`
+/// remain: they're this view's *own* way back to `View::Topic`, which the
+/// Keys section (a flat list of the six main-flow keys) doesn't document.
+const SAVED_HINTS: &str = "j/k move · Enter open · Esc/Tab back · q quit";
 
 /// The footer hint line shown while the note popup (`Mode::EditingNote`)
 /// is open -- every other keybind is suspended while typing a note (see
@@ -62,6 +74,16 @@ const SAVED_HINTS: &str =
 /// swaps to just these two regardless of which `View` was showing
 /// underneath.
 const EDITING_NOTE_HINTS: &str = "Enter save note · Esc cancel";
+
+/// The footer hint line shown while the add-source popup is open and on
+/// its first step -- prompting for the feed URL itself (see
+/// `AddSourceStep::Url`).
+const ADD_SOURCE_URL_HINTS: &str = "Enter fetch & validate · Esc cancel";
+
+/// The footer hint line shown on the add-source popup's second step -- the
+/// name/topic confirm screen (see `AddSourceStep::Confirm`).
+const ADD_SOURCE_CONFIRM_HINTS: &str =
+    "Tab switch field · ↑/↓ pick existing topic · Enter save · Esc cancel";
 
 /// How many characters of a saved article's note to show in the saved
 /// view's list before truncating with `…` -- see `truncate_preview` and
@@ -71,6 +93,28 @@ const EDITING_NOTE_HINTS: &str = "Enter save note · Esc cancel";
 /// it; the full text is always one `n` press away in the same edit popup
 /// already built for editing it.
 const NOTE_PREVIEW_CHARS: usize = 45;
+
+/// The sidebar's "Keys" reference section (`docs/ARCHITECTURE.md` § 3. TUI)
+/// -- the six main-flow keybinds, as `(key, action)` pairs, rendered one per
+/// line by `render_keys_section` below. A `const` array (rather than
+/// building this `Vec` fresh inside `render_keys_section` every frame) since
+/// it never changes at runtime -- there's no reason to reallocate the same
+/// six pairs on every single draw.
+///
+/// This exists specifically because the person building tuxwire has no
+/// prior Rust/TUI-app experience and shouldn't have to memorize the keybind
+/// table before the app is usable -- the reference lives on screen instead,
+/// in both `View::Topic` and `View::Saved` (see `render_sidebar`, which
+/// doesn't take a `View` at all -- these two sections render identically
+/// regardless of which one is showing).
+const KEY_HINTS: [(&str, &str); 6] = [
+    ("s", "save"),
+    ("x", "close"),
+    ("n", "note"),
+    ("S", "saved view"),
+    ("r", "refresh"),
+    ("a", "add source"),
+];
 
 /// Which main view is currently showing -- the ordinary per-topic article
 /// list (`Topic`, the default) or every saved article across every topic
@@ -107,6 +151,54 @@ enum View {
 enum Mode {
     Normal,
     EditingNote { text: String },
+    /// The `a` "add a new source" flow is open -- see `AddSourceStep` for
+    /// which of its two steps is currently showing. Wrapping the step in
+    /// its own type (rather than adding more `Mode` variants directly, one
+    /// per step) keeps `Mode` itself a flat "which popup, if any" tag, and
+    /// lets `AddSourceStep` evolve its own fields independently.
+    AddSource(AddSourceStep),
+}
+
+/// Which step of the `a` add-source flow is currently showing (`ARCHITECTURE.md`
+/// § Adding Sources): first a bare feed URL prompt, then -- once that URL
+/// has actually been fetched and parsed successfully, which *is* the
+/// validation (see `fetchers::rss::fetch_feed`) -- a confirm screen for the
+/// name and topic before anything is written to `sources.toml`.
+enum AddSourceStep {
+    /// Prompting for the feed URL itself. `error`, when `Some`, is the
+    /// message from the most recent failed fetch/parse attempt -- kept
+    /// alongside `text` (not cleared) so the user can see *why* it failed
+    /// while they edit `text` and retry, per ARCHITECTURE.md's "show a
+    /// clear error and let the user retry or cancel."
+    Url { text: String, error: Option<String> },
+
+    /// The URL in `url` parsed successfully; confirming `name` (guessed
+    /// from the feed's own `<title>`, but editable) and `topic` (required,
+    /// either picked from `topic_options` -- the topics that existed when
+    /// this screen opened, via `Storage::topics()` -- or freely typed as a
+    /// brand new one) before writing a `[[source]]` block. `error`, when
+    /// `Some`, is a validation or write failure to show inline (e.g. an
+    /// empty topic on `Enter`), same idea as `Url`'s.
+    Confirm {
+        url: String,
+        name: String,
+        topic: String,
+        field: ConfirmField,
+        topic_options: Vec<String>,
+        error: Option<String>,
+    },
+}
+
+/// Which field of the `AddSourceStep::Confirm` screen currently has focus
+/// -- `Tab` toggles this, and it decides both which field typed characters
+/// go into and (for `Topic`) whether `Up`/`Down` cycle through
+/// `topic_options`. `Clone, Copy, PartialEq` for the same reason as `View`
+/// above: a two-variant tag with no data of its own, compared with plain
+/// `==` (see `render_add_source_popup`'s `focus_style`).
+#[derive(Clone, Copy, PartialEq)]
+enum ConfirmField {
+    Name,
+    Topic,
 }
 
 /// Runs the TUI shell until the user presses `q`.
@@ -123,7 +215,13 @@ enum Mode {
 /// ownership would force whoever calls `ui::run` to give up their own
 /// `Storage`/`Theme` (or clone them) just to display something once.
 pub fn run(storage: &Storage, theme: &Theme) -> anyhow::Result<()> {
-    let topics = storage.topics()?;
+    // `mut` (and passed to `draw_until_quit` as `&mut` below) because the
+    // `a` add-source flow can grow this list: a brand-new topic typed on
+    // the confirm screen needs to show up in the sidebar immediately (per
+    // ARCHITECTURE.md's "usable immediately without restart"), which means
+    // mutating this same `Vec` in place rather than only ever reading it
+    // once here at startup.
+    let mut topics = storage.topics()?;
 
     // `ratatui::run` (see the doc comment on it in the `ratatui` crate)
     // is the "simplest path" helper: it puts the terminal into raw mode +
@@ -133,7 +231,7 @@ pub fn run(storage: &Storage, theme: &Theme) -> anyhow::Result<()> {
     // exactly the guarantee this function needs: if `draw_until_quit`
     // below hits an error partway through, the user's shell must not be
     // left in raw mode / the alternate screen.
-    ratatui::run(|terminal| draw_until_quit(terminal, theme, storage, &topics))
+    ratatui::run(|terminal| draw_until_quit(terminal, theme, storage, &mut topics))
 }
 
 /// The actual draw loop: redraw the frame, block for the next terminal
@@ -152,7 +250,7 @@ fn draw_until_quit(
     terminal: &mut ratatui::DefaultTerminal,
     theme: &Theme,
     storage: &Storage,
-    topics: &[String],
+    topics: &mut Vec<String>,
 ) -> anyhow::Result<()> {
     let mut topic_index: usize = 0;
     let mut article_index: usize = 0;
@@ -181,7 +279,7 @@ fn draw_until_quit(
             render(
                 frame,
                 theme,
-                topics,
+                topics.as_slice(),
                 selected_topic,
                 &articles,
                 selected_article,
@@ -201,6 +299,61 @@ fn draw_until_quit(
             continue;
         };
         if key.kind != KeyEventKind::Press {
+            continue;
+        }
+
+        // While the add-source popup is open, every keypress belongs to
+        // it, same reasoning as the note-popup split just below -- and
+        // for the same reason, this has to be checked *first*, before
+        // that split, so a keypress meant for the add-source flow never
+        // falls through into ordinary navigation.
+        //
+        // `matches!` here only inspects `mode`'s discriminant (the `_`
+        // doesn't bind the `AddSourceStep` payload by value), so it
+        // doesn't move `mode` -- unlike the `let Mode::AddSource(step) =
+        // mode else { unreachable!() };` right after, which does move it
+        // (that's *why* it's guarded by this check: the pattern is
+        // guaranteed to match, so `unreachable!()` really is unreachable).
+        // `handle_add_source_key` takes `step` (and the old `mode`, via
+        // that move) by value and hands back whatever `mode` should become
+        // next -- there's no way to pass `&mut mode` in here directly
+        // instead, since `step` would then be a live borrow *out of*
+        // `mode` at the same time something tries to reassign `mode`
+        // itself, which the borrow checker rejects.
+        if matches!(mode, Mode::AddSource(_)) {
+            // Captured *before* `handle_add_source_key` runs, since a
+            // successful confirm can insert a brand-new topic into
+            // `topics` and re-sort it -- `topic_index` (a plain number)
+            // would then silently point at the wrong topic afterward
+            // unless it's re-derived from the topic's *name* instead.
+            let previously_selected_topic = topics.get(topic_index).cloned();
+
+            let Mode::AddSource(step) = mode else {
+                unreachable!("just checked mode is Mode::AddSource above")
+            };
+            mode = handle_add_source_key(key.code, step, topics)?;
+
+            // `mode` is back to `Mode::Normal` once the flow ends, whether
+            // that's by successfully confirming or by cancelling with
+            // `Esc` -- both cases need the same cleanup: re-find the
+            // sidebar selection by name (see the comment above) and
+            // reload `articles` for it, so a source added under a
+            // brand-new topic is immediately reflected in the sidebar
+            // without restarting tuxwire, and a first-ever topic (added
+            // when `topics` was completely empty) becomes browsable
+            // right away instead of staying on the "no articles yet"
+            // placeholder against a still-empty topic list.
+            if matches!(mode, Mode::Normal) {
+                topic_index = previously_selected_topic
+                    .and_then(|name| topics.iter().position(|t| *t == name))
+                    .unwrap_or(0);
+
+                articles = match topics.get(topic_index) {
+                    Some(topic) => storage.articles_by_topic(topic)?,
+                    None => Vec::new(),
+                };
+                article_index = article_index.min(articles.len().saturating_sub(1));
+            }
             continue;
         }
 
@@ -396,6 +549,20 @@ fn draw_until_quit(
                     article_index = 0;
                 }
 
+                // `a` opens the add-source popup (switches `mode` to
+                // `Mode::AddSource`), starting on its first step -- an
+                // empty feed-URL prompt with no error showing yet. The
+                // keystrokes that follow are handled by the
+                // `Mode::AddSource` branch above, once this same `loop`
+                // iterates back around and reads the next key -- same
+                // pattern as `n` opening the note popup above. Available
+                // in both `View::Topic` and `View::Saved` (no `view ==
+                // ...` guard) since adding a source has nothing to do with
+                // which view happens to be showing.
+                KeyCode::Char('a') => {
+                    mode = Mode::AddSource(AddSourceStep::Url { text: String::new(), error: None });
+                }
+
                 _ => {}
             }
             continue;
@@ -532,6 +699,284 @@ fn refresh_topic(storage: &Storage, topic: &str) -> anyhow::Result<Vec<Article>>
     storage.articles_by_topic(topic)
 }
 
+/// Advances the `a` add-source flow by one keypress: `step` is the state
+/// `Mode::AddSource` was carrying when `key` was pressed, and the returned
+/// `Mode` is what it should become next -- either still `Mode::AddSource`
+/// (with an updated `AddSourceStep`, mid-flow) or `Mode::Normal` (the flow
+/// finished, by cancelling or by successfully confirming).
+///
+/// `topics` doubles as both "the existing topics to offer on the confirm
+/// screen" (per ARCHITECTURE.md, "existing topics -- queried live via
+/// `Storage::topics()`") and the write target for a brand-new one: it's
+/// the very same `Vec` `run` originally populated from
+/// `Storage::topics()`, kept live in `draw_until_quit`'s loop state rather
+/// than re-queried here, so a successful confirm can push a new topic
+/// directly onto it (re-sorted) and have the sidebar reflect it right
+/// away -- see the comment on `run`'s own `let mut topics` for why that
+/// has to be a real, in-place mutation rather than something the caller
+/// re-derives afterward.
+///
+/// This function only ever touches `sources.toml` on a successful
+/// confirm (via `fetchers::config::add_source`, see its own doc comment
+/// for why nothing here needs to separately "reload" the in-memory
+/// fetcher list) -- every other keypress just edits `step`'s fields in
+/// memory.
+fn handle_add_source_key(key: KeyCode, step: AddSourceStep, topics: &mut Vec<String>) -> anyhow::Result<Mode> {
+    match step {
+        AddSourceStep::Url { mut text, error } => match key {
+            KeyCode::Esc => Ok(Mode::Normal),
+
+            KeyCode::Backspace => {
+                text.pop();
+                Ok(Mode::AddSource(AddSourceStep::Url { text, error: None }))
+            }
+
+            KeyCode::Char(c) => {
+                text.push(c);
+                Ok(Mode::AddSource(AddSourceStep::Url { text, error: None }))
+            }
+
+            // Per ARCHITECTURE.md's Adding Sources section: "tuxwire
+            // validates it by trying to parse it... If it parses
+            // successfully, that *is* the proof it's a valid feed." This
+            // arm is that validation, end to end -- a real network fetch
+            // plus a real `feed-rs` parse, the exact same path
+            // `RssFetcher::fetch` uses for every regular refresh (see
+            // `fetch_feed`'s own doc comment), just not yet wrapped in an
+            // `RssFetcher` since there's no confirmed name/topic for one
+            // yet.
+            //
+            // `draw_until_quit` runs synchronously, but `fetch_feed` is
+            // `async` (real I/O) -- `tokio::task::block_in_place` +
+            // `Handle::current().block_on(...)` is the same "drive an
+            // async call from inside a sync call site, without blocking
+            // the whole runtime" trick `refresh_topic` above already uses
+            // for the `r` keybind; see its doc comment for the full
+            // explanation of why this works.
+            KeyCode::Enter => {
+                let trimmed = text.trim();
+                if trimmed.is_empty() {
+                    return Ok(Mode::AddSource(AddSourceStep::Url {
+                        text,
+                        error: Some("enter a feed URL first".to_string()),
+                    }));
+                }
+
+                let fetch_result = tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(fetchers::rss::fetch_feed(trimmed))
+                });
+
+                match fetch_result {
+                    Ok(feed) => Ok(Mode::AddSource(AddSourceStep::Confirm {
+                        name: guess_source_name(&feed, trimmed),
+                        url: trimmed.to_string(),
+                        topic: String::new(),
+                        field: ConfirmField::Name,
+                        topic_options: topics.clone(),
+                        error: None,
+                    })),
+                    // Per ARCHITECTURE.md: "show a clear error ('couldn't
+                    // parse this as a feed -- check the URL') and let the
+                    // user retry or cancel." `text` (not `trimmed`) is
+                    // kept so the popup still shows exactly what they
+                    // typed, whitespace included, ready to edit rather
+                    // than retype from scratch.
+                    Err(err) => Ok(Mode::AddSource(AddSourceStep::Url {
+                        text,
+                        error: Some(format!("couldn't parse this as a feed -- check the URL ({err:#})")),
+                    })),
+                }
+            }
+
+            _ => Ok(Mode::AddSource(AddSourceStep::Url { text, error })),
+        },
+
+        AddSourceStep::Confirm { url, mut name, mut topic, mut field, topic_options, error } => match key {
+            KeyCode::Esc => Ok(Mode::Normal),
+
+            KeyCode::Tab => {
+                field = match field {
+                    ConfirmField::Name => ConfirmField::Topic,
+                    ConfirmField::Topic => ConfirmField::Name,
+                };
+                Ok(Mode::AddSource(AddSourceStep::Confirm {
+                    url,
+                    name,
+                    topic,
+                    field,
+                    topic_options,
+                    error: None,
+                }))
+            }
+
+            // Only meaningful while `Topic` has focus -- cycling "pick an
+            // existing topic" makes no sense while typing the source's
+            // `name`. Guarded here (rather than in `render`) so `Up`/`Down`
+            // simply do nothing while `Name` is focused, instead of
+            // needing a separate "is this key even valid right now" check
+            // anywhere else.
+            KeyCode::Up if matches!(field, ConfirmField::Topic) && !topic_options.is_empty() => {
+                topic = cycle_topic(&topic_options, &topic, -1);
+                Ok(Mode::AddSource(AddSourceStep::Confirm {
+                    url,
+                    name,
+                    topic,
+                    field,
+                    topic_options,
+                    error: None,
+                }))
+            }
+            KeyCode::Down if matches!(field, ConfirmField::Topic) && !topic_options.is_empty() => {
+                topic = cycle_topic(&topic_options, &topic, 1);
+                Ok(Mode::AddSource(AddSourceStep::Confirm {
+                    url,
+                    name,
+                    topic,
+                    field,
+                    topic_options,
+                    error: None,
+                }))
+            }
+
+            KeyCode::Backspace => {
+                match field {
+                    ConfirmField::Name => {
+                        name.pop();
+                    }
+                    ConfirmField::Topic => {
+                        topic.pop();
+                    }
+                }
+                Ok(Mode::AddSource(AddSourceStep::Confirm {
+                    url,
+                    name,
+                    topic,
+                    field,
+                    topic_options,
+                    error: None,
+                }))
+            }
+
+            // Typing while `Topic` is focused is how a brand new topic
+            // gets created -- there's no separate "new topic" mode to
+            // switch into first; starting to type just overwrites
+            // whatever existing topic `Up`/`Down` had most recently
+            // selected, per ARCHITECTURE.md's "pick from existing topics
+            // ... or type a new one."
+            KeyCode::Char(c) => {
+                match field {
+                    ConfirmField::Name => name.push(c),
+                    ConfirmField::Topic => topic.push(c),
+                }
+                Ok(Mode::AddSource(AddSourceStep::Confirm {
+                    url,
+                    name,
+                    topic,
+                    field,
+                    topic_options,
+                    error: None,
+                }))
+            }
+
+            // Confirm: validate both fields are non-empty (ARCHITECTURE.md:
+            // "No source can be left without a topic" -- `name` gets the
+            // same treatment, since an empty source name would be equally
+            // useless), then write the `[[source]]` block. `topics` only
+            // gets the new topic pushed onto it *after* `add_source`
+            // actually succeeds -- the in-memory sidebar list must never
+            // show a topic that didn't really make it into `sources.toml`.
+            KeyCode::Enter => {
+                let trimmed_name = name.trim();
+                let trimmed_topic = topic.trim();
+
+                if trimmed_name.is_empty() {
+                    return Ok(Mode::AddSource(AddSourceStep::Confirm {
+                        url,
+                        name,
+                        topic,
+                        field,
+                        topic_options,
+                        error: Some("name can't be empty".to_string()),
+                    }));
+                }
+                if trimmed_topic.is_empty() {
+                    return Ok(Mode::AddSource(AddSourceStep::Confirm {
+                        url,
+                        name,
+                        topic,
+                        field,
+                        topic_options,
+                        error: Some("every source needs a topic".to_string()),
+                    }));
+                }
+
+                match fetchers::config::add_source(
+                    trimmed_name,
+                    fetchers::config::SourceType::Rss,
+                    &url,
+                    trimmed_topic,
+                ) {
+                    Ok(()) => {
+                        if !topics.iter().any(|existing| existing == trimmed_topic) {
+                            topics.push(trimmed_topic.to_string());
+                            topics.sort();
+                        }
+                        Ok(Mode::Normal)
+                    }
+                    Err(err) => Ok(Mode::AddSource(AddSourceStep::Confirm {
+                        url,
+                        name,
+                        topic,
+                        field,
+                        topic_options,
+                        error: Some(format!("failed to save source: {err:#}")),
+                    })),
+                }
+            }
+
+            _ => Ok(Mode::AddSource(AddSourceStep::Confirm {
+                url,
+                name,
+                topic,
+                field,
+                topic_options,
+                error,
+            })),
+        },
+    }
+}
+
+/// Picks the next (`direction > 0`) or previous (`direction < 0`) topic in
+/// `options`, wrapping around at either end -- the `Confirm` screen's
+/// `Up`/`Down` handling. If `current` doesn't match any entry in
+/// `options` (the user had been free-typing a new topic, or this is the
+/// very first press), starts from the first entry going forward or the
+/// last one going backward, rather than requiring `current` to already be
+/// a real selection.
+fn cycle_topic(options: &[String], current: &str, direction: i32) -> String {
+    let len = options.len() as i32;
+    let next_index = match options.iter().position(|topic| topic == current) {
+        Some(index) => (index as i32 + direction).rem_euclid(len),
+        None if direction >= 0 => 0,
+        None => len - 1,
+    };
+    options[next_index as usize].clone()
+}
+
+/// Guesses a source name from the feed's own `<title>`, per
+/// ARCHITECTURE.md's "guessed name (from the feed's own `<title>`
+/// metadata, editable)". Falls back to the URL itself for the rare feed
+/// that omits a title entirely (or has only whitespace in it) -- still a
+/// reasonable, editable starting point, rather than leaving the name
+/// field blank.
+fn guess_source_name(feed: &feed_rs::model::Feed, url: &str) -> String {
+    feed.title
+        .as_ref()
+        .map(|title| title.content.trim().to_string())
+        .filter(|content| !content.is_empty())
+        .unwrap_or_else(|| url.to_string())
+}
+
 /// Draws one frame: the topic sidebar + article list side by side, with
 /// the keybind footer beneath them -- the layout ARCHITECTURE.md
 /// describes ("Left pane: topic list... Right pane: article list...
@@ -601,15 +1046,62 @@ fn render(
     // The note popup, if open, paints on top of everything drawn above --
     // see `render_note_popup` for why it has to come last (after the panes
     // it's meant to sit over) and why it lives inside `body` rather than
-    // the full frame.
+    // the full frame. The add-source popup follows the same reasoning;
+    // `mode` can only ever be *one* of these two at a time (see `Mode`
+    // itself), so at most one of the two `if let`s below actually draws
+    // anything.
     if let Mode::EditingNote { text } = mode {
         render_note_popup(frame, theme, body, text);
     }
+    if let Mode::AddSource(step) = mode {
+        render_add_source_popup(frame, theme, body, step);
+    }
 }
 
-/// The left pane: every topic in `storage`, with `selected_topic`
-/// highlighted using `theme.accent_selected`.
+/// The left pane, three stacked sections top to bottom (`docs/ARCHITECTURE.md`
+/// § 3. TUI): the topic list itself (interactive, sized to fill whatever
+/// space the other two don't need), then the static "Keys" and "Colors"
+/// reference sections. This function takes no `View` -- unlike
+/// `render_articles`, which shows a genuinely different list/title
+/// depending on `View::Topic` vs `View::Saved`, every part of the sidebar
+/// is identical in both: the topic list keeps showing the last topic
+/// selection either way (see the comment on `selected_topic` in
+/// `draw_until_quit`), and the Keys/Colors sections below don't depend on
+/// `View` at all.
+///
+/// `Constraint::Length` for the bottom two sections (rather than
+/// `Constraint::Min`/`Percentage`) is what makes them a fixed height
+/// regardless of terminal size -- six key rows and four color rows, plus
+/// two border rows apiece, is always enough content to show in full, so
+/// there's no reason to let them grow. `Constraint::Min(0)` on the topics
+/// list is what then makes *it* absorb every leftover row instead.
 fn render_sidebar(
+    frame: &mut Frame,
+    theme: &Theme,
+    area: Rect,
+    topics: &[String],
+    selected_topic: Option<&str>,
+) {
+    let [topics_area, keys_area, colors_area] = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(0),
+            Constraint::Length(KEY_HINTS.len() as u16 + 2),
+            Constraint::Length(4 + 2),
+        ])
+        .areas(area);
+
+    render_topics_section(frame, theme, topics_area, topics, selected_topic);
+    render_keys_section(frame, theme, keys_area);
+    render_colors_section(frame, theme, colors_area);
+}
+
+/// The sidebar's top section: every topic in `storage`, with
+/// `selected_topic` highlighted using `theme.accent_selected`. Split out of
+/// `render_sidebar` itself once that function grew two more sections below
+/// this one -- keeps each section's rendering logic self-contained instead
+/// of one long function juggling three `Block`s at once.
+fn render_topics_section(
     frame: &mut Frame,
     theme: &Theme,
     area: Rect,
@@ -646,6 +1138,72 @@ fn render_sidebar(
     );
 
     frame.render_stateful_widget(list, area, &mut state);
+}
+
+/// The sidebar's middle section: a static, non-interactive readout of
+/// `KEY_HINTS`, one `"<key> <action>"` line per row -- see `KEY_HINTS`'s own
+/// doc comment for why this exists. A plain `Paragraph`, not a `List`: there's
+/// nothing here to select or scroll, just fixed reference text, so a `List`'s
+/// selection/highlight machinery would be pure overhead with no behavior
+/// behind it.
+fn render_keys_section(frame: &mut Frame, theme: &Theme, area: Rect) {
+    let block = Block::new()
+        .title(" Keys ")
+        .borders(Borders::ALL)
+        .style(Style::new().bg(theme.background).fg(theme.text_primary))
+        .border_style(Style::new().fg(theme.panel_border));
+
+    let lines: Vec<Line> = KEY_HINTS
+        .iter()
+        .map(|(key, action)| {
+            Line::from(vec![
+                Span::styled(*key, Style::new().fg(theme.accent_selected).add_modifier(Modifier::BOLD)),
+                Span::styled(format!(" {action}"), Style::new().fg(theme.text_primary)),
+            ])
+        })
+        .collect();
+
+    let paragraph = Paragraph::new(lines).block(block);
+    frame.render_widget(paragraph, area);
+}
+
+/// The sidebar's bottom section: a small colored square next to each article
+/// state's label (unread/read/saved/skipped, `docs/ARCHITECTURE.md`'s
+/// "Article States & Behavior" table order), so the legend is always right
+/// there without having to remember which color means what.
+///
+/// The colors themselves come straight from `theme.accent_*` -- the very
+/// same fields `article_item` above reads to color the article list -- never
+/// a hardcoded value here. That's the whole point of this section: if
+/// someone swaps `theme.toml` for a different palette (Mocha, Frappé, a
+/// fully custom one), this legend updates automatically along with the
+/// article list it's explaining, instead of silently going stale.
+fn render_colors_section(frame: &mut Frame, theme: &Theme, area: Rect) {
+    let block = Block::new()
+        .title(" Colors ")
+        .borders(Borders::ALL)
+        .style(Style::new().bg(theme.background).fg(theme.text_primary))
+        .border_style(Style::new().fg(theme.panel_border));
+
+    let states: [(&str, Color); 4] = [
+        ("unread", theme.accent_unread),
+        ("read", theme.accent_read),
+        ("saved", theme.accent_saved),
+        ("skipped", theme.accent_skipped),
+    ];
+
+    let lines: Vec<Line> = states
+        .iter()
+        .map(|(label, color)| {
+            Line::from(vec![
+                Span::styled("■ ", Style::new().fg(*color)),
+                Span::styled(*label, Style::new().fg(theme.text_primary)),
+            ])
+        })
+        .collect();
+
+    let paragraph = Paragraph::new(lines).block(block);
+    frame.render_widget(paragraph, area);
 }
 
 /// The right pane: every article in `articles` (either
@@ -820,14 +1378,18 @@ fn truncate_preview(text: &str, max_chars: usize) -> String {
 /// so far -- see `KEYBIND_HINTS`/`SAVED_HINTS`/`EDITING_NOTE_HINTS` and
 /// this module's top-level doc comment for which parts of ARCHITECTURE.md's
 /// full keybind table that excludes. `mode` takes priority over `view`:
-/// while the note popup is open every other keybind (navigation included)
-/// is suspended for the duration (see the `Mode::EditingNote` match arm in
-/// `draw_until_quit`), so `EDITING_NOTE_HINTS` shows regardless of which
-/// view sits underneath it. Otherwise, `view` picks between the two
+/// while the note popup or the add-source popup is open, every other
+/// keybind (navigation included) is suspended for the duration (see the
+/// `Mode::EditingNote` match arm and the `Mode::AddSource` check in
+/// `draw_until_quit`), so one of `EDITING_NOTE_HINTS` /
+/// `ADD_SOURCE_URL_HINTS` / `ADD_SOURCE_CONFIRM_HINTS` shows regardless of
+/// which view sits underneath it. Otherwise, `view` picks between the two
 /// normal-mode hint lines.
 fn render_footer(frame: &mut Frame, theme: &Theme, area: Rect, mode: &Mode, view: View) {
     let hints = match mode {
         Mode::EditingNote { .. } => EDITING_NOTE_HINTS,
+        Mode::AddSource(AddSourceStep::Url { .. }) => ADD_SOURCE_URL_HINTS,
+        Mode::AddSource(AddSourceStep::Confirm { .. }) => ADD_SOURCE_CONFIRM_HINTS,
         Mode::Normal => match view {
             View::Topic => KEYBIND_HINTS,
             View::Saved => SAVED_HINTS,
@@ -883,6 +1445,117 @@ fn render_note_popup(frame: &mut Frame, theme: &Theme, area: Rect, text: &str) {
     let cursor_x = popup_area.x + 1 + text.chars().count() as u16;
     let cursor_y = popup_area.y + 1;
     frame.set_cursor_position((cursor_x, cursor_y));
+}
+
+/// The add-source popup: same "bordered box centered over `area`" idea as
+/// `render_note_popup` above, but with two different layouts depending on
+/// `step` -- a single line for the URL prompt, or four lines (plus an
+/// optional error line) for the name/topic confirm screen. Both branches
+/// place the real terminal cursor at the end of whichever field is
+/// currently being typed into, same reasoning as `render_note_popup`'s own
+/// cursor placement.
+fn render_add_source_popup(frame: &mut Frame, theme: &Theme, area: Rect, step: &AddSourceStep) {
+    match step {
+        AddSourceStep::Url { text, error } => {
+            // One line for the typed URL, plus one more if there's an
+            // error to show beneath it; `+ 2` for the box's own top/bottom
+            // border, same accounting `centered_rect`'s caller always does.
+            let height = if error.is_some() { 4 } else { 3 };
+            let popup_area = centered_rect(area, 70, height);
+
+            // See `render_note_popup`'s comment on `Clear` -- same reason
+            // it's needed here: without it, the article list underneath
+            // would show through anywhere this popup's own background
+            // doesn't happen to overwrite.
+            frame.render_widget(Clear, popup_area);
+
+            let block = Block::new()
+                .title(" Add Source — Feed URL ")
+                .borders(Borders::ALL)
+                .style(Style::new().bg(theme.background).fg(theme.text_primary))
+                .border_style(Style::new().fg(theme.accent_selected));
+
+            let mut lines = vec![Line::from(text.as_str())];
+            if let Some(message) = error {
+                lines.push(Line::from(Span::styled(
+                    message.as_str(),
+                    Style::new().fg(theme.accent_breaking),
+                )));
+            }
+
+            let paragraph = Paragraph::new(lines)
+                .style(Style::new().fg(theme.text_primary))
+                .block(block);
+            frame.render_widget(paragraph, popup_area);
+
+            let cursor_x = popup_area.x + 1 + text.chars().count() as u16;
+            let cursor_y = popup_area.y + 1;
+            frame.set_cursor_position((cursor_x, cursor_y));
+        }
+
+        AddSourceStep::Confirm { url, name, topic, field, topic_options, error } => {
+            // Four content lines (URL, Name, Topic, the "existing topics"
+            // hint) always show; a fifth appears only when there's a
+            // validation/write error to surface. `+ 2` for the border,
+            // same as the `Url` branch above.
+            let height = if error.is_some() { 7 } else { 6 };
+            let popup_area = centered_rect(area, 70, height);
+
+            frame.render_widget(Clear, popup_area);
+
+            let block = Block::new()
+                .title(" Add Source — Confirm ")
+                .borders(Borders::ALL)
+                .style(Style::new().bg(theme.background).fg(theme.text_primary))
+                .border_style(Style::new().fg(theme.accent_selected));
+
+            // The focused field (per `field`) is highlighted in
+            // `accent_selected` so it's visually obvious which one `Tab`
+            // last landed on and which one typed characters/`Backspace`
+            // will affect -- everything else stays `text_primary`.
+            let focus_style = |this_field: ConfirmField| {
+                if *field == this_field {
+                    Style::new().fg(theme.accent_selected)
+                } else {
+                    Style::new().fg(theme.text_primary)
+                }
+            };
+
+            let mut lines = vec![
+                Line::from(Span::styled(format!("URL:   {url}"), Style::new().fg(theme.text_muted))),
+                Line::from(Span::styled(format!("Name:  {name}"), focus_style(ConfirmField::Name))),
+                Line::from(Span::styled(format!("Topic: {topic}"), focus_style(ConfirmField::Topic))),
+                Line::from(Span::styled(
+                    format!("       existing: {}", topic_options.join(", ")),
+                    Style::new().fg(theme.text_muted),
+                )),
+            ];
+            if let Some(message) = error {
+                lines.push(Line::from(Span::styled(
+                    message.as_str(),
+                    Style::new().fg(theme.accent_breaking),
+                )));
+            }
+
+            let paragraph = Paragraph::new(lines)
+                .style(Style::new().fg(theme.text_primary))
+                .block(block);
+            frame.render_widget(paragraph, popup_area);
+
+            // "Name:  " and "Topic: " are both exactly 7 characters wide
+            // (see the `format!`s above), so the same `label_width`
+            // positions the cursor correctly after either label -- the
+            // cursor's *row* is what actually depends on `field`.
+            let label_width: u16 = 7;
+            let (field_text, row) = match field {
+                ConfirmField::Name => (name.as_str(), 2),
+                ConfirmField::Topic => (topic.as_str(), 3),
+            };
+            let cursor_x = popup_area.x + 1 + label_width + field_text.chars().count() as u16;
+            let cursor_y = popup_area.y + row;
+            frame.set_cursor_position((cursor_x, cursor_y));
+        }
+    }
 }
 
 /// A `width_percent`-wide, `height`-tall `Rect` centered inside `area` --

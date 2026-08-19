@@ -202,6 +202,92 @@ fn sources_path() -> anyhow::Result<PathBuf> {
     Ok(PathBuf::from(home).join(".config/tuxwire/sources.toml"))
 }
 
+/// Appends one new `[[source]]` block to the user's `sources.toml` --
+/// the write side of the in-app "add a source" flow (`ui`'s `a` keybind,
+/// see `docs/ARCHITECTURE.md`'s Adding Sources section). Called only
+/// *after* the URL the user typed has already been proven valid by
+/// successfully fetching and parsing it (see `fetchers::rss::fetch_feed`),
+/// so this function itself does no further validation beyond "these
+/// fields aren't empty" -- that's the caller's job.
+///
+/// Uses `toml_edit` (see the comment on it in `Cargo.toml`) rather than
+/// deserializing into `RawSourcesFile`, editing the `Vec`, and
+/// re-serializing with plain `toml` -- that round-trip would silently
+/// drop every comment already in the file (like the topic-grouping notes
+/// a user might leave for themselves), which `toml_edit`'s document model
+/// preserves untouched apart from the one block being added.
+///
+/// There's no separate "reload the in-memory source list" step needed
+/// after this returns: `fetchers::configured_sources` always re-reads
+/// `sources.toml` from disk on every call (it's never cached), so the
+/// very next refresh -- in the TUI, `ui`'s `r` keybind -- already sees
+/// whatever this function just wrote.
+pub fn add_source(name: &str, source_type: SourceType, url: &str, topic: &str) -> anyhow::Result<()> {
+    add_source_at(&sources_path()?, name, source_type, url, topic)
+}
+
+/// The actual read-edit-write logic behind `add_source`, taking `path`
+/// explicitly rather than resolving it via `sources_path()` itself. Split
+/// out purely so the test below can point it at a temporary file instead
+/// of the real `~/.config/tuxwire/sources.toml` -- `sources_path()` reads
+/// `$XDG_CONFIG_HOME`/`$HOME`, and mutating process-wide environment
+/// variables from a test is exactly the kind of global, order-dependent
+/// state that makes `cargo test`'s parallel test execution flaky.
+fn add_source_at(
+    path: &std::path::Path,
+    name: &str,
+    source_type: SourceType,
+    url: &str,
+    topic: &str,
+) -> anyhow::Result<()> {
+    let contents = std::fs::read_to_string(path)
+        .with_context(|| format!("failed to read sources file {}", path.display()))?;
+
+    // `DocumentMut` is `toml_edit`'s mutable, formatting-preserving parse
+    // of the whole file -- as opposed to `toml::from_str::<RawSourcesFile>`
+    // above, which only keeps the *values*, not how they were written.
+    let mut doc: toml_edit::DocumentMut = contents
+        .parse()
+        .with_context(|| format!("failed to parse sources file {} as TOML", path.display()))?;
+
+    // `sources.toml` always has at least one `[[source]]` block by the
+    // time this can run (see the doc comment on `load_sources` -- a
+    // missing file is written out with the bundled default on first
+    // load), but this guards the theoretical case of a hand-edited file
+    // with the `source` key removed entirely: auto-vivify an empty array
+    // of tables to append into, rather than erroring.
+    if doc.get("source").and_then(|item| item.as_array_of_tables()).is_none() {
+        doc["source"] = toml_edit::Item::ArrayOfTables(toml_edit::ArrayOfTables::new());
+    }
+
+    let sources = doc["source"].as_array_of_tables_mut().ok_or_else(|| {
+        anyhow!("sources file's 'source' key exists but isn't an array of [[source]] tables")
+    })?;
+
+    // Field order here (name, type, url, topic) matches every existing
+    // `[[source]]` block in `sources.toml.example` and the real config --
+    // purely cosmetic (TOML doesn't care), but keeps a newly-appended
+    // block looking like every other one instead of standing out.
+    let mut table = toml_edit::Table::new();
+    table["name"] = toml_edit::value(name);
+    table["type"] = toml_edit::value(match source_type {
+        SourceType::Rss => "rss",
+        SourceType::Reddit => "reddit",
+    });
+    table["url"] = toml_edit::value(url);
+    table["topic"] = toml_edit::value(topic);
+    sources.push(table);
+
+    // `doc.to_string()` renders the whole document back out, including
+    // every byte of formatting/comments that was there before -- the
+    // entire reason this function reaches for `toml_edit` over plain
+    // `toml` in the first place.
+    std::fs::write(path, doc.to_string())
+        .with_context(|| format!("failed to write sources file {}", path.display()))?;
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -271,5 +357,76 @@ mod tests {
 
         let result: Result<RawSourcesFile, _> = toml::from_str(toml);
         assert!(result.is_err(), "an unrecognized source type must fail to parse");
+    }
+
+    /// A temporary `sources.toml`-shaped file, seeded with `contents` --
+    /// backs the `add_source_at` tests below. `tempfile::NamedTempFile`
+    /// isn't a dependency of this project, so this hand-rolls the same
+    /// idea with `std::env::temp_dir()` plus a `#[test]`-unique filename
+    /// (via the current thread's ID, since `cargo test` runs tests on
+    /// separate threads in parallel) -- good enough for a test that writes
+    /// one file and never runs concurrently with itself.
+    fn temp_sources_file(contents: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir()
+            .join(format!("tuxwire-test-sources-{:?}.toml", std::thread::current().id()));
+        std::fs::write(&path, contents).unwrap();
+        path
+    }
+
+    /// Appending a source preserves every comment and blank line already
+    /// in the file, and the new `[[source]]` block round-trips with the
+    /// exact fields passed in -- the whole point of using `toml_edit`
+    /// over plain `toml` here (see the doc comment on `add_source`).
+    #[test]
+    fn add_source_preserves_comments_and_appends_block() {
+        let original = r#"# a comment a real user left for themselves
+# about how they've grouped their topics
+
+[[source]]
+name = "Phoronix"
+type = "rss"
+url = "https://www.phoronix.com/rss.php"
+topic = "kernel"
+"#;
+        let path = temp_sources_file(original);
+
+        add_source_at(&path, "Hacker News", SourceType::Rss, "https://hnrss.org/frontpage", "tech").unwrap();
+
+        let written = std::fs::read_to_string(&path).unwrap();
+        std::fs::remove_file(&path).ok();
+
+        assert!(
+            written.contains("# a comment a real user left for themselves"),
+            "existing comments must survive a write: {written}"
+        );
+        assert!(written.contains(r#"name = "Phoronix""#), "the original source must still be there: {written}");
+
+        let raw: RawSourcesFile = toml::from_str(&written).unwrap();
+        assert_eq!(raw.source.len(), 2, "the new source must be appended, not replace the file: {written}");
+
+        let added = &raw.source[1];
+        assert_eq!(added.name.as_deref(), Some("Hacker News"));
+        assert_eq!(added.source_type, Some(SourceType::Rss));
+        assert_eq!(added.url.as_deref(), Some("https://hnrss.org/frontpage"));
+        assert_eq!(added.topic.as_deref(), Some("tech"));
+    }
+
+    /// Appending to a file with no `[[source]]` blocks at all (an edge
+    /// case `load_sources`'s own `#[serde(default)]` already treats as
+    /// valid, just empty) still produces a well-formed array-of-tables
+    /// rather than erroring -- see the `doc.get("source")...is_none()`
+    /// guard in `add_source_at`.
+    #[test]
+    fn add_source_to_file_with_no_existing_sources() {
+        let path = temp_sources_file("# empty sources file, nothing configured yet\n");
+
+        add_source_at(&path, "Phoronix", SourceType::Rss, "https://www.phoronix.com/rss.php", "kernel").unwrap();
+
+        let written = std::fs::read_to_string(&path).unwrap();
+        std::fs::remove_file(&path).ok();
+
+        let raw: RawSourcesFile = toml::from_str(&written).unwrap();
+        assert_eq!(raw.source.len(), 1);
+        assert_eq!(raw.source[0].name.as_deref(), Some("Phoronix"));
     }
 }

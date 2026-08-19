@@ -25,67 +25,83 @@ pub struct RssFetcher {
     pub topic: String,
 }
 
+/// Downloads and parses the feed at `url`, returning the raw
+/// `feed_rs::model::Feed` rather than a `Vec<Article>`.
+///
+/// `RssFetcher::fetch` below is *built on* this — it just maps the
+/// resulting `Feed`'s entries into `Article`s — but this function has a
+/// second caller: the in-app "add a source" flow (`ui`'s `a` keybind, see
+/// `docs/ARCHITECTURE.md`'s Adding Sources section) needs the *feed's
+/// own* `<title>` to guess a name for the confirm screen, which only
+/// exists on the `Feed` itself, not on any individual entry. A successful
+/// parse here is also literally the entire validation that flow performs
+/// — "tuxwire validates it by trying to parse it, that's the whole
+/// mechanism" — so one function correctly serves both jobs instead of
+/// duplicating this fetch-then-parse logic in `ui`.
+///
+/// ## Reading this function as a Rust newcomer
+///
+/// The `?` operator appears after almost every step. Each of those
+/// steps returns a `Result<T, E>` — `reqwest::get` can fail (DNS
+/// error, connection refused, timeout...), reading the response body
+/// can fail (connection dropped mid-transfer), and parsing the feed
+/// can fail (the response wasn't valid RSS/Atom XML). `?` says: "if
+/// this is `Err`, stop this function immediately and return that
+/// error to *my* caller; if it's `Ok`, unwrap the value and keep
+/// going." It's how Rust does what other languages use exceptions
+/// for, except the possibility of failure is visible in every
+/// function signature (`-> anyhow::Result<...>`) rather than being an
+/// invisible control-flow path that might or might not be caught
+/// somewhere up the call stack.
+///
+/// For `?` to work here, whatever error type each step produces has
+/// to be convertible into this function's error type
+/// (`anyhow::Error`, via the `anyhow::Result<...>` return
+/// type). `anyhow::Error` can be built from *any* type implementing
+/// Rust's standard `std::error::Error` trait, which is exactly why
+/// `anyhow` is convenient here: `reqwest`'s error type and
+/// `feed_rs`'s error type are unrelated to each other, but `?` can
+/// convert either of them into one common `anyhow::Error` without us
+/// writing any conversion code by hand.
+pub async fn fetch_feed(url: &str) -> anyhow::Result<feed_rs::model::Feed> {
+    // `reqwest::get` is a convenience wrapper around building a
+    // `Client` and issuing a GET request. It's `async`, so this line
+    // returns a `Future` immediately; `.await` is what actually
+    // drives the request and suspends this function (without
+    // blocking the whole program) until a response arrives.
+    //
+    // `.with_context(...)` (from anyhow) attaches a human-readable
+    // message to the error *if* this step fails, without changing
+    // anything on the success path. The closure `|| format!(...)`
+    // only actually runs when there's an error to attach it to — it's
+    // not wasted work formatting a string on every successful fetch.
+    let response = reqwest::get(url)
+        .await
+        .with_context(|| format!("failed to fetch feed at {url}"))?;
+
+    // Read the whole response body into a `String`. RSS/Atom feeds
+    // are XML text, so `.text()` (rather than `.bytes()`) is the
+    // natural fit here — it also handles the response's declared
+    // character encoding for us.
+    let body = response
+        .text()
+        .await
+        .with_context(|| format!("failed to read response body from {url}"))?;
+
+    // `feed_rs::parser::parse` accepts anything implementing
+    // `std::io::Read`; `&str` doesn't implement `Read` directly, but
+    // `.as_bytes()` gives us a `&[u8]` byte slice, which does. This
+    // is the same parser regardless of whether the feed turns out to
+    // be RSS or Atom — `feed-rs` detects the format and returns one
+    // unified `Feed` either way.
+    feed_rs::parser::parse(body.as_bytes()).with_context(|| format!("failed to parse feed XML from {url}"))
+}
+
 impl Fetcher for RssFetcher {
-    /// Downloads the feed at `self.url` and parses every entry into an
-    /// `Article`.
-    ///
-    /// ## Reading this function as a Rust newcomer
-    ///
-    /// The `?` operator appears after almost every step. Each of those
-    /// steps returns a `Result<T, E>` — `reqwest::get` can fail (DNS
-    /// error, connection refused, timeout...), reading the response body
-    /// can fail (connection dropped mid-transfer), and parsing the feed
-    /// can fail (the response wasn't valid RSS/Atom XML). `?` says: "if
-    /// this is `Err`, stop this function immediately and return that
-    /// error to *my* caller; if it's `Ok`, unwrap the value and keep
-    /// going." It's how Rust does what other languages use exceptions
-    /// for, except the possibility of failure is visible in every
-    /// function signature (`-> anyhow::Result<...>`) rather than being an
-    /// invisible control-flow path that might or might not be caught
-    /// somewhere up the call stack.
-    ///
-    /// For `?` to work here, whatever error type each step produces has
-    /// to be convertible into this function's error type
-    /// (`anyhow::Error`, via the `anyhow::Result<Vec<Article>>` return
-    /// type). `anyhow::Error` can be built from *any* type implementing
-    /// Rust's standard `std::error::Error` trait, which is exactly why
-    /// `anyhow` is convenient here: `reqwest`'s error type and
-    /// `feed_rs`'s error type are unrelated to each other, but `?` can
-    /// convert either of them into one common `anyhow::Error` without us
-    /// writing any conversion code by hand.
+    /// Fetches and parses `self.url` (via `fetch_feed` above) and maps
+    /// every entry in the result into an `Article`.
     async fn fetch(&self) -> anyhow::Result<Vec<Article>> {
-        // `reqwest::get` is a convenience wrapper around building a
-        // `Client` and issuing a GET request. It's `async`, so this line
-        // returns a `Future` immediately; `.await` is what actually
-        // drives the request and suspends this function (without
-        // blocking the whole program) until a response arrives.
-        //
-        // `.with_context(...)` (from anyhow) attaches a human-readable
-        // message to the error *if* this step fails, without changing
-        // anything on the success path. The closure `|| format!(...)`
-        // only actually runs when there's an error to attach it to — it's
-        // not wasted work formatting a string on every successful fetch.
-        let response = reqwest::get(&self.url)
-            .await
-            .with_context(|| format!("failed to fetch feed for '{}' at {}", self.name, self.url))?;
-
-        // Read the whole response body into a `String`. RSS/Atom feeds
-        // are XML text, so `.text()` (rather than `.bytes()`) is the
-        // natural fit here — it also handles the response's declared
-        // character encoding for us.
-        let body = response
-            .text()
-            .await
-            .with_context(|| format!("failed to read response body for '{}'", self.name))?;
-
-        // `feed_rs::parser::parse` accepts anything implementing
-        // `std::io::Read`; `&str` doesn't implement `Read` directly, but
-        // `.as_bytes()` gives us a `&[u8]` byte slice, which does. This
-        // is the same parser regardless of whether the feed turns out to
-        // be RSS or Atom — `feed-rs` detects the format and returns one
-        // unified `Feed` either way.
-        let feed = feed_rs::parser::parse(body.as_bytes())
-            .with_context(|| format!("failed to parse feed XML for '{}'", self.name))?;
+        let feed = fetch_feed(&self.url).await.with_context(|| format!("fetching '{}'", self.name))?;
 
         // Build the `Vec<Article>` we're returning. `feed.entries` is a
         // `Vec<feed_rs::model::Entry>` — we walk it with `.into_iter()`
