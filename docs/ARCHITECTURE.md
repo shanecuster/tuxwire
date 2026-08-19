@@ -115,7 +115,7 @@ saved articles are meant to persist indefinitely until manually removed.
 | `x`       | skip article (feeds skip-weighting) |
 | `s`       | save article (auto-marks as read) |
 | `n`       | edit note on a saved article     |
-| `r`       | refresh current topic's sources   |
+| `r`       | refresh all sources               |
 | `S`       | view saved articles               |
 | `a`       | add a new source                  |
 | `q`       | quit                             |
@@ -158,23 +158,41 @@ deprioritized.
 ### `sources.toml`
 
 Adding a new source is a config edit, not a code change (for anything with
-an RSS feed):
+an RSS feed). Every source is assigned exactly **one** topic — not a list.
+This is a deliberate choice: a source's articles only ever live under one
+sidebar category, which keeps topic filtering, the skip-weighting system,
+and duplicate-article handling all working against a single unambiguous
+grouping instead of articles potentially appearing in more than one place:
 
 ```toml
 [[source]]
 name = "Phoronix"
 type = "rss"
 url = "https://www.phoronix.com/rss.php"
+topic = "kernel"
+
+[[source]]
+name = "KrebsOnSecurity"
+type = "rss"
+url = "https://krebsonsecurity.com/feed/"
+topic = "security"
 
 [[source]]
 name = "r/linux"
 type = "reddit"
 url = "linux"
+topic = "distros"
 ```
+
+Topics themselves are **not** a fixed list anywhere in code — `Storage::topics()`
+returns whatever distinct topic values exist across configured sources, so
+the sidebar is fully driven by what the user has actually assigned. Adding
+a brand-new category is just typing a new `topic = "..."` value on a source;
+no code change required.
 
 **Current source list:** 9to5Linux, Phoronix, It's FOSS, LinuxGamingNews,
 Linuxiac, LWN.net, OMG! Ubuntu (candidates to add: Arch Linux news, a
-dedicated CVE/security feed).
+dedicated CVE/security feed, KrebsOnSecurity).
 
 ### `theme.toml`
 
@@ -207,48 +225,36 @@ theme loader reads from this file rather than anything compiled in.
 
 ## Adding Sources
 
-Two entry points, both feeding the same underlying flow: discover the feed,
-confirm details, write to `sources.toml`.
+For v1, a single entry point: the in-app `a` keybind.
 
-### In-app (`a` keybind)
+Deliberately simple — no HTML parsing, no feed autodiscovery. Paste the
+actual feed URL, tuxwire validates it by trying to parse it, that's the
+whole mechanism:
 
-1. Prompt for a URL — just the site itself, not the feed path.
-2. **Feed autodiscovery:** fetch the page, check the HTML `<head>` for the
-   standard `<link rel="alternate" type="application/rss+xml">` tag; fall
-   back to common paths (`/feed`, `/rss.xml`, `/atom.xml`) if that tag is
-   missing.
-3. Confirm screen: guessed name (from the page title, editable), the
-   discovered feed URL, and a topic to assign it to.
-4. On confirm, write a new `[[source]]` block into `sources.toml` using the
+1. Prompt for a feed URL directly (not the site's homepage) — most sites'
+   feed URLs are easy to find or guess (`/feed`, `/rss.xml`, `/feed.xml`).
+2. **Validation via the existing parser, nothing new:** tuxwire attempts to
+   fetch and parse the URL with `feed-rs`, the same crate already used for
+   every regular fetch. If it parses successfully, that *is* the proof it's
+   a valid feed — no separate discovery logic needed.
+3. On success, confirm screen: guessed name (from the feed's own `<title>`
+   metadata, editable), and a **single required topic** — pick from
+   existing topics (queried live via `Storage::topics()`) or type a new
+   one. No source can be left without a topic.
+4. On failure, show a clear error ("couldn't parse this as a feed — check
+   the URL") and let the user retry or cancel.
+5. On confirm, write a new `[[source]]` block into `sources.toml` using the
    `toml_edit` crate rather than plain `toml` — `toml_edit` preserves
    existing formatting/comments on write instead of rewriting the whole
    file.
-5. If no feed is found, fall back to manual feed-URL entry, or flag it as
-   "needs a custom fetcher" for later.
 
-### Phone capture → ntfy inbox
+This intentionally reuses the app's existing fetch/parse path as validation
+rather than adding HTML scraping or a fallback-path-guessing system — less
+code, fewer moving parts, and one less thing that can break independently
+of the rest of the app.
 
-Reuses the existing ntfy phone→desktop pipeline (same pattern as the
-notification scratchpad) instead of building new infrastructure:
-
-1. Share a URL from the phone's browser straight to a dedicated ntfy topic
-   (e.g. `tuxwire-inbox`) via Android's native share sheet.
-2. tuxwire polls that topic on startup and drops any new links into a
-   `pending_sources` table in the same SQLite db — capture and add are
-   decoupled on purpose, so a link found mid-scroll on the phone doesn't
-   need a decision made on the spot.
-3. A footer indicator ("2 pending sources") surfaces them next time the app
-   is open. Stepping through pending sources runs the *same*
-   autodiscovery-and-confirm flow as the in-app `a` keybind — reviewing a
-   pre-filled URL instead of typing one fresh.
-
-```
-pending_sources
-  id            INTEGER PRIMARY KEY
-  url           TEXT
-  received_at   TEXT
-  status        TEXT DEFAULT 'pending'  -- pending | added | dismissed
-```
+A phone-capture inbox (sharing a URL from Android straight into a pending
+list) was considered and deliberately deferred — see Roadmap.
 
 ---
 
@@ -389,17 +395,27 @@ GoatCounter dashboards already tracking the blogs.
 
 ## Roadmap / Not Yet Decided
 
+**Deferred until the rest of v1 + near-term features are solid:**
+- **Phone capture → ntfy inbox.** Would reuse the existing ntfy
+  phone→desktop pipeline (same pattern as the notification scratchpad) so
+  sharing a URL from Android drops it into a `pending_sources` table for
+  later review. Deliberately cut from v1 scope: it's a full extra
+  subsystem (polling, auth/tunnel-down handling, a second review UI) for
+  a convenience that manual capture-and-paste already covers. Notes and
+  the stats view are a better use of time right now. Revisit once the
+  core app (including notes + stats) is genuinely daily-usable.
+
+**Other open questions:**
 - Multi-line vs. single-line notes UI — inline popup (`tui-textarea`) vs.
   shelling out to `$EDITOR` for real Vim; likely support both, config-toggled
 - Whether the "Saved" view is a pseudo-topic in the sidebar or a separate pane
 - Custom fetchers for any source without RSS
 - Possible future: syncing the SQLite db via rclone across machines
-- Whether the ntfy inbox watcher runs as part of tuxwire's own startup, or
-  as a small separate poller (fits the existing Docker/Fedora VM stack) that
-  just writes into `pending_sources`
 - Offline caching strategy: cache-on-fetch vs. cache-on-save/open
 - Export location/config for Markdown export — likely an `export.toml`
-- Duplicate article detection across sources (same story, multiple sites)
+- Duplicate article detection across sources (same story, multiple sites —
+  note: with the one-topic-per-source rule now settled, this is scoped to
+  duplicates *within* a topic, not cross-topic, which simplifies it)
 - A `:` command mode as an alternative to single-key binds for less-common
   actions
 
