@@ -70,21 +70,102 @@ pub trait Fetcher {
 // ARCHITECTURE.md ("fetchers/ — one module per source type"). `rss`
 // covers both RSS and Atom feeds, since `feed-rs` (see Cargo.toml) parses
 // both into one shape — from the app's perspective they're the same
-// source type.
+// source type. `reddit` is a placeholder (see its module doc comment) --
+// `config` is the `sources.toml` loader/validator, not a source type
+// itself, but lives here rather than as a top-level module since it only
+// exists to produce the values this module hands out.
+pub mod config;
+pub mod reddit;
 pub mod rss;
 
-/// The source list, standing in for `sources.toml` until config-file
-/// loading is built (see ARCHITECTURE.md's Configuration section — this
-/// is the same one-entry set `main.rs` used to build inline before this
-/// function existed). Pulled out here, rather than left inline in
-/// `main.rs`, so it's the single place both the app's initial fetch
+/// One configured source, already resolved into whichever concrete
+/// fetcher type its `sources.toml` entry's `type = "..."` named (see
+/// `config::SourceType`).
+///
+/// This exists instead of just returning `Vec<rss::RssFetcher>` (as this
+/// function did before config-file loading existed) because
+/// `sources.toml` can now list *more than one* source type in the same
+/// file -- ARCHITECTURE.md's own example has both `type = "rss"` and
+/// `type = "reddit"` entries side by side. Something has to hold "an RSS
+/// fetcher, or a Reddit fetcher, or ..." as one list callers can iterate
+/// over uniformly. An `enum` is the right tool here rather than `dyn
+/// Fetcher` (a "trait object"): as `Fetcher`'s own doc comment notes, a
+/// plain `async fn` in a trait isn't usable behind `dyn Fetcher` without
+/// extra work (boxing the returned `Future`) that a small, closed set of
+/// source types -- known completely at compile time -- doesn't need. An
+/// `enum` with one variant per source type gets the same "one list, mixed
+/// concrete types" result for free.
+pub enum ConfiguredSource {
+    Rss(rss::RssFetcher),
+    Reddit(reddit::RedditFetcher),
+}
+
+impl ConfiguredSource {
+    /// This source's human-readable name, regardless of which variant it
+    /// is -- used for log/status messages (see `main.rs`, `ui/mod.rs`)
+    /// without every caller needing its own `match` to reach into
+    /// whichever fetcher type is actually inside.
+    pub fn name(&self) -> &str {
+        match self {
+            ConfiguredSource::Rss(fetcher) => &fetcher.name,
+            ConfiguredSource::Reddit(fetcher) => &fetcher.name,
+        }
+    }
+
+    /// This source's configured topic -- used by the TUI's `r` refresh
+    /// (`ui/mod.rs`'s `refresh_topic`) to filter down to just the sources
+    /// filed under the topic currently selected.
+    pub fn topic(&self) -> &str {
+        match self {
+            ConfiguredSource::Rss(fetcher) => &fetcher.topic,
+            ConfiguredSource::Reddit(fetcher) => &fetcher.topic,
+        }
+    }
+}
+
+impl Fetcher for ConfiguredSource {
+    /// Delegates to whichever concrete fetcher this source actually is.
+    /// This is the whole payoff of the `enum` over having every caller
+    /// `match` on `ConfiguredSource` itself before it can call `.fetch()`
+    /// at all -- callers (`main.rs`'s fetch loop, `refresh_topic`) just
+    /// call `.fetch()` once, uniformly, same as if there were still only
+    /// one source type.
+    async fn fetch(&self) -> anyhow::Result<Vec<Article>> {
+        match self {
+            ConfiguredSource::Rss(fetcher) => fetcher.fetch().await,
+            ConfiguredSource::Reddit(fetcher) => fetcher.fetch().await,
+        }
+    }
+}
+
+/// Loads and validates `sources.toml` (via `config::load_sources`) and
+/// resolves every entry into a real `ConfiguredSource` ready to
+/// `.fetch()`. This is the single place both the app's initial fetch
 /// (`main.rs`) and the TUI's `r` refresh keybind (`ui/mod.rs`) read
-/// from — adding a second hardcoded source later means editing this list
-/// once, not two call sites that would otherwise be free to drift apart.
-pub fn configured_sources() -> Vec<rss::RssFetcher> {
-    vec![rss::RssFetcher {
-        name: String::from("Phoronix"),
-        url: String::from("https://www.phoronix.com/rss.php"),
-        topic: String::from("linux-news"),
-    }]
+/// from -- same reasoning as before config-file loading existed, just now
+/// backed by a real file instead of a hardcoded `vec![...]`.
+///
+/// Returns `anyhow::Result` (unlike the hardcoded version this replaces,
+/// which couldn't fail) because loading a config file genuinely can:
+/// the file might not parse as TOML, or a source in it might be missing
+/// its required `topic`. Every caller already propagates this with `?`,
+/// same as any other fallible step.
+pub fn configured_sources() -> anyhow::Result<Vec<ConfiguredSource>> {
+    let sources = config::load_sources()?;
+
+    Ok(sources
+        .into_iter()
+        .map(|source| match source.source_type {
+            config::SourceType::Rss => ConfiguredSource::Rss(rss::RssFetcher {
+                name: source.name,
+                url: source.url,
+                topic: source.topic,
+            }),
+            config::SourceType::Reddit => ConfiguredSource::Reddit(reddit::RedditFetcher {
+                name: source.name,
+                url: source.url,
+                topic: source.topic,
+            }),
+        })
+        .collect())
 }

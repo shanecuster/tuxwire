@@ -1,16 +1,13 @@
 //! tuxwire — a terminal-based Linux news aggregator.
 //!
-//! See `docs/ARCHITECTURE.md` for the full design. This file is currently
-//! just enough to prove the first two milestones work end to end: fetch
-//! one real RSS feed and print what came back, then open the real, real
-//! on-disk database (creating and migrating it if necessary). Those two
-//! steps are deliberately not wired together yet -- fetched articles
-//! aren't inserted into storage -- since that's fetcher/TUI integration
-//! work that hasn't been built. The TUI and skip-weighting layers
-//! described in the architecture doc aren't wired up at all yet -- their
-//! modules exist as documented placeholders (see `scoring.rs`,
-//! `theme.rs`, `ui/mod.rs`) so the project layout matches the plan from
-//! the start.
+//! See `docs/ARCHITECTURE.md` for the full design. `main` loads
+//! `sources.toml` (see `fetchers::configured_sources`), fetches every
+//! configured source, inserts whatever comes back into the real on-disk
+//! database (creating and migrating it if necessary), and then hands off
+//! to the TUI (`ui::run`). The skip-weighting layer described in the
+//! architecture doc isn't wired up yet -- `scoring.rs` exists as a
+//! documented placeholder so the project layout matches the plan from the
+//! start.
 //!
 //! ## The module tree, and why these lines have to be here
 //!
@@ -56,21 +53,32 @@ use theme::Theme;
 /// and exits with a non-zero status instead of panicking.
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // The source list is hardcoded rather than loaded from `sources.toml`
-    // (config loading isn't built yet) — see
-    // `fetchers::configured_sources` for the one place that list lives,
-    // shared with the TUI's `r` refresh keybind.
-    let sources = fetchers::configured_sources();
+    // Loaded from `~/.config/tuxwire/sources.toml` (writing out a bundled
+    // default there first, if this is a first run) — see
+    // `fetchers::configured_sources` for the one place that config is
+    // read from, shared with the TUI's `r` refresh keybind. The `?` here
+    // is for the config file itself failing to load (malformed TOML, a
+    // source missing its required `topic`) — that's a real problem the
+    // user needs to see and fix, unlike a single source's fetch failing
+    // below, which shouldn't take down the other sources' fetches with it.
+    let sources = fetchers::configured_sources()?;
     let mut articles = Vec::new();
 
     for source in &sources {
-        println!("Fetching {}...", source.name);
+        println!("Fetching {}...", source.name());
 
-        // `.fetch().await?` — call the async method, wait for it to
-        // finish, and propagate any error up out of `main` (which is
-        // what triggers the "print the error and exit non-zero" behavior
-        // mentioned above).
-        articles.extend(source.fetch().await?);
+        // Unlike the config-load `?` above, a single source failing to
+        // fetch (a dead network, a 404, or — for now — any `type =
+        // "reddit"` source, see `fetchers::reddit`) is *not* propagated
+        // with `?`. Per ARCHITECTURE.md, "one slow/dead source never
+        // blocks a refresh of everything else" — `match` on the
+        // `Result` here, instead of `?`, is what makes that true: a
+        // failure prints a message and this loop moves on to the next
+        // source rather than aborting the whole fetch.
+        match source.fetch().await {
+            Ok(fetched) => articles.extend(fetched),
+            Err(err) => eprintln!("  skipped {}: {err:#}", source.name()),
+        }
     }
 
     println!("Got {} articles:\n", articles.len());

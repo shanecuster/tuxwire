@@ -9,10 +9,9 @@ use crate::models::Article;
 use anyhow::Context;
 use chrono::Utc;
 
-/// One RSS/Atom source, as it will eventually be loaded from a
-/// `[[source]]` block in `sources.toml` (see ARCHITECTURE.md's
-/// Configuration section). For now it's built directly in `main.rs` with
-/// hardcoded values — config file loading comes later.
+/// One RSS/Atom source, built from a `[[source]]` block in `sources.toml`
+/// with `type = "rss"` (see `fetchers::config` and ARCHITECTURE.md's
+/// Configuration section) by `fetchers::configured_sources`.
 pub struct RssFetcher {
     /// Human-readable source name (e.g. "Phoronix"), copied onto every
     /// `Article` this fetcher produces so the TUI can show where each

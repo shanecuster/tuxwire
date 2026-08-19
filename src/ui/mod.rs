@@ -502,13 +502,27 @@ fn open_in_browser(url: &str) {
 /// `#[tokio::main]`'s default multi-threaded runtime has more than one
 /// worker thread to hand off to.
 fn refresh_topic(storage: &Storage, topic: &str) -> anyhow::Result<Vec<Article>> {
-    for source in fetchers::configured_sources()
-        .into_iter()
-        .filter(|source| source.topic == topic)
-    {
-        let fetched = tokio::task::block_in_place(|| {
+    for source in fetchers::configured_sources()?.into_iter().filter(|source| source.topic() == topic) {
+        let fetch_result = tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(source.fetch())
-        })?;
+        });
+
+        // Same reasoning as `main.rs`'s initial fetch loop: one source
+        // failing (a dead feed, or a `type = "reddit"` source that isn't
+        // implemented yet) must not make `r` fail to refresh every *other*
+        // source filed under this topic. `eprintln!` rather than `?`
+        // records the failure without aborting this loop -- there's no
+        // status line yet to surface it inside the TUI itself (see
+        // ARCHITECTURE.md's footer spec), so this is only visible if
+        // stderr is redirected somewhere, but it's still strictly better
+        // than losing the rest of this topic's refresh over it.
+        let fetched = match fetch_result {
+            Ok(fetched) => fetched,
+            Err(err) => {
+                eprintln!("skipped {}: {err:#}", source.name());
+                continue;
+            }
+        };
 
         for article in &fetched {
             storage.insert_article(article)?;

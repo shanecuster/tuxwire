@@ -190,9 +190,14 @@ the sidebar is fully driven by what the user has actually assigned. Adding
 a brand-new category is just typing a new `topic = "..."` value on a source;
 no code change required.
 
-**Current source list:** 9to5Linux, Phoronix, It's FOSS, LinuxGamingNews,
-Linuxiac, LWN.net, OMG! Ubuntu (candidates to add: Arch Linux news, a
-dedicated CVE/security feed, KrebsOnSecurity).
+**Current source list:** 9to5Linux, Phoronix, It's FOSS, GamingOnLinux
+(the site behind the "LinuxGamingNews" pick), Linuxiac, LWN.net, OMG!
+Ubuntu, KrebsOnSecurity — configured in `~/.config/tuxwire/sources.toml`,
+grouped as `kernel` (Phoronix, LWN.net), `distros` (9to5Linux, Linuxiac,
+OMG! Ubuntu), `linux` (It's FOSS), `gaming` (GamingOnLinux), and
+`security` (KrebsOnSecurity). See that file's own comments for the
+per-source reasoning — it's a first pass, freely adjustable by just
+editing `topic = "..."`.
 
 ### `theme.toml`
 

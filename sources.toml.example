@@ -1,0 +1,36 @@
+# tuxwire sources — docs/ARCHITECTURE.md § sources.toml.
+#
+# This exact file is compiled directly into the tuxwire binary
+# (src/fetchers/config.rs) and is written out to
+# ~/.config/tuxwire/sources.toml the first time tuxwire runs and finds no
+# config there yet -- so a first run has real articles to show, and a real
+# file to start editing, instead of an empty sidebar.
+#
+# Every [[source]] needs exactly one topic -- not a list. This is a
+# deliberate, locked design decision (see ARCHITECTURE.md): a source's
+# articles only ever live under one sidebar entry. Topics themselves
+# aren't a fixed list anywhere in code -- typing a new topic = "..." value
+# on a source is all it takes to create a new sidebar category.
+#
+# type = "rss" is the only source type that actually fetches anything in
+# this version. type = "reddit" parses fine (as shown below) but fails
+# clearly, one source at a time, when tuxwire tries to fetch it -- see
+# src/fetchers/reddit.rs.
+
+[[source]]
+name = "Phoronix"
+type = "rss"
+url = "https://www.phoronix.com/rss.php"
+topic = "kernel"
+
+[[source]]
+name = "KrebsOnSecurity"
+type = "rss"
+url = "https://krebsonsecurity.com/feed/"
+topic = "security"
+
+[[source]]
+name = "r/linux"
+type = "reddit"
+url = "linux"
+topic = "distros"
