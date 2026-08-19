@@ -100,8 +100,19 @@ saved articles are meant to persist indefinitely until manually removed.
 
 ### 3. TUI (ratatui)
 
-- **Left pane (topic sidebar):** three stacked sections, always visible
-  regardless of topic or view selected:
+The screen is split into two vertical regions: a fixed-height **banner
+bar** across the full terminal width at the top, and everything else
+below it. Same pattern as Claude Code's own terminal header — a reserved
+top row that never scrolls or changes, with the working area rendered
+underneath.
+
+- **Banner bar (top, full width, fixed height):** the `tuxwire` figlet
+  wordmark, rendered persistently — full-width means the original figlet
+  ASCII banner (37 chars, `standard` font) fits comfortably with room to
+  spare, no need for a cramped/narrow substitute. This region never
+  changes regardless of topic, view, or selection state.
+- **Left pane (topic sidebar), below the banner bar:** three stacked
+  sections, always visible regardless of topic or view selected:
   1. **Topics** — the topic list itself, toggle/select as before
   2. **Keys** — a static reference list of the active v1 keybinds (`s`
      save, `x` close, `n` note, `S` saved view, `r` refresh, `a` add
@@ -113,11 +124,11 @@ saved articles are meant to persist indefinitely until manually removed.
      (unread/read/saved/skipped), color values pulled live from the
      loaded `theme.toml` rather than hardcoded, so the legend always
      matches whatever's actually rendering in the article list.
-  These two reference sections are purely static — no interactivity, no
+  The Keys and Colors sections are purely static — no interactivity, no
   state — and render identically in both the Topic view and the Saved
   view.
-- **Right pane:** article list for the selected topic (or saved articles,
-  in Saved view), sorted by recency
+- **Right pane, below the banner bar:** article list for the selected
+  topic (or saved articles, in Saved view), sorted by recency
 - **Footer:** remaining hints not already covered by the sidebar's Keys
   section, plus last-refresh timestamp
 - **Saved view:** a dedicated view filtering to `saved = true` across

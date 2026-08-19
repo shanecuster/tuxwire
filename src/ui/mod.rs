@@ -31,7 +31,7 @@ use crate::storage::Storage;
 use crate::theme::Theme;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
@@ -114,6 +114,26 @@ const KEY_HINTS: [(&str, &str); 6] = [
     ("S", "saved view"),
     ("r", "refresh"),
     ("a", "add source"),
+];
+
+/// The `tuxwire` wordmark, straight out of `figlet -f standard tuxwire` --
+/// see `render_banner` and the "Banner bar" bullet in `docs/ARCHITECTURE.md`'s
+/// TUI section. Kept as a fixed array of lines rather than pulling in a
+/// figlet-rendering crate to regenerate it at runtime: it's five characters
+/// of static ASCII art that never changes, so there's nothing dynamic here
+/// worth a dependency for. Each line is exactly 37 characters wide -- the
+/// `standard` font's natural width for this word -- and there are six rows,
+/// not five: figlet reserves a row for descenders on every character's grid
+/// cell even though none of `t`/`u`/`x`/`w`/`i`/`r`/`e` actually dip below
+/// the baseline in this font, so the last row here is blank padding, not a
+/// mistake.
+const BANNER: [&str; 6] = [
+    r" _                        _          ",
+    r"| |_ _   ___  ____      _(_)_ __ ___ ",
+    r"| __| | | \ \/ /\ \ /\ / / | '__/ _ \",
+    r"| |_| |_| |>  <  \ V  V /| | | |  __/",
+    r" \__|\__,_/_/\_\  \_/\_/ |_|_|  \___|",
+    r"                                     ",
 ];
 
 /// Which main view is currently showing -- the ordinary per-topic article
@@ -1012,14 +1032,22 @@ fn render(
         frame.area(),
     );
 
-    // Split the frame vertically into "everything except the last row"
-    // and "the last row" -- `Constraint::Min(0)` claims as much space as
-    // is left over after the other constraints in the same `Layout` are
-    // satisfied, which is what makes the footer pinned to exactly one row
-    // regardless of terminal height.
-    let [body, footer_area] = Layout::default()
+    // Split the frame vertically into the banner bar (fixed height, exactly
+    // `BANNER.len()` rows), the body, and the footer -- `Constraint::Min(0)`
+    // on the body claims whatever's left over after the other two fixed-size
+    // constraints are satisfied, which is what makes both the banner and the
+    // footer pinned to a constant height regardless of terminal size. Per
+    // `docs/ARCHITECTURE.md`'s "Banner bar" bullet, this row never changes
+    // shape based on topic, view, or selection -- `render_banner` below
+    // takes no such state as a parameter at all, so there's nothing here
+    // that *could* make it vary from frame to frame.
+    let [banner_area, body, footer_area] = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(0), Constraint::Length(1)])
+        .constraints([
+            Constraint::Length(BANNER.len() as u16),
+            Constraint::Min(0),
+            Constraint::Length(1),
+        ])
         .areas(frame.area());
 
     // Then split that body horizontally into the sidebar and the article
@@ -1031,6 +1059,7 @@ fn render(
         .constraints([Constraint::Percentage(25), Constraint::Percentage(75)])
         .areas(body);
 
+    render_banner(frame, theme, banner_area);
     render_sidebar(frame, theme, sidebar_area, topics, selected_topic);
     render_articles(
         frame,
@@ -1056,6 +1085,33 @@ fn render(
     if let Mode::AddSource(step) = mode {
         render_add_source_popup(frame, theme, body, step);
     }
+}
+
+/// The top banner bar (`docs/ARCHITECTURE.md` § 3. TUI): the `tuxwire`
+/// figlet wordmark (`BANNER`), spanning the full terminal width, styled in
+/// `theme.accent_unread`. Same pattern as Claude Code's own terminal header
+/// -- a reserved top row that never scrolls, resizes, or changes regardless
+/// of topic, view, or selection state, which is why this function -- unlike
+/// `render_sidebar`/`render_articles` right below it -- takes no such state
+/// as a parameter at all: there's nothing here that varies frame to frame
+/// except the theme color.
+///
+/// `Alignment::Center` (rather than left-flush at column 0) is what gives
+/// the bar "room to spare" either side of the wordmark per
+/// `docs/ARCHITECTURE.md`'s note that full width means the 37-char banner
+/// "fits comfortably" -- centering is what actually uses that spare room
+/// instead of leaving it all bunched up on the right.
+fn render_banner(frame: &mut Frame, theme: &Theme, area: Rect) {
+    let lines: Vec<Line> = BANNER
+        .iter()
+        .map(|line| Line::styled(*line, Style::new().fg(theme.accent_unread)))
+        .collect();
+
+    let banner = Paragraph::new(lines)
+        .style(Style::new().bg(theme.background))
+        .alignment(Alignment::Center);
+
+    frame.render_widget(banner, area);
 }
 
 /// The left pane, three stacked sections top to bottom (`docs/ARCHITECTURE.md`
