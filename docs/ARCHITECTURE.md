@@ -408,7 +408,6 @@ GoatCounter dashboards already tracking the blogs.
 **Other open questions:**
 - Multi-line vs. single-line notes UI — inline popup (`tui-textarea`) vs.
   shelling out to `$EDITOR` for real Vim; likely support both, config-toggled
-- Whether the "Saved" view is a pseudo-topic in the sidebar or a separate pane
 - Custom fetchers for any source without RSS
 - Possible future: syncing the SQLite db via rclone across machines
 - Offline caching strategy: cache-on-fetch vs. cache-on-save/open

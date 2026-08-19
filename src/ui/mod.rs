@@ -1,23 +1,29 @@
 //! ratatui views/widgets (`docs/ARCHITECTURE.md` § 3. TUI).
 //!
-//! Fourth milestone: `s` save and `n` note. `j`/`k` move the article-list
+//! Fifth milestone: `S` saved view. `j`/`k` move the article-list
 //! selection, `Up`/`Down`/`Tab` move the topic-sidebar selection (reloading
 //! the article list from `storage` whenever the topic changes), `Enter`
 //! opens the selected article's URL in `$BROWSER`, `x` marks the selected
 //! article skipped, `r` re-fetches the current topic's sources (via
 //! `fetchers::configured_sources`), inserts whatever's new into `storage`,
-//! and reloads the article list. `s` now saves the selected article via
+//! and reloads the article list. `s` saves the selected article via
 //! `Storage::save_article`, and `n` opens a small inline popup (see `Mode`
 //! below) for editing that article's note via `Storage::update_note`.
-//! `S` saved view and `a` add source are still to come, and none of them
-//! run yet -- same for the "opening an article marks it read" behavior
-//! ARCHITECTURE.md describes; `Enter` here only opens the link. This
-//! module owns the terminal setup/teardown, the draw loop, and the small
-//! bit of navigation state that selection requires -- which topic and
-//! which article are highlighted, the current topic's article list (since
-//! that has to be reloaded from `storage` on every topic change and every
-//! `r` refresh, rather than loaded once upfront), and now `Mode`, which
-//! tracks whether the note popup is open.
+//! `S` now switches the whole main view (see `View` below) to every saved
+//! article across every topic, via `Storage::saved_articles` -- pressing it
+//! again (or `Esc`, or `Tab`) switches back. `j`/`k`, `Enter`, and `n` all
+//! keep working unmodified in that view since they already just operate on
+//! whatever's in `articles`/`article_index`, regardless of which query
+//! populated them. `a` add source is still to come, and neither it nor the
+//! "opening an article marks it read" behavior ARCHITECTURE.md describes
+//! run yet; `Enter` here only opens the link. This module owns the
+//! terminal setup/teardown, the draw loop, and the small bit of navigation
+//! state that selection requires -- which topic and which article are
+//! highlighted, the current article list (since that has to be reloaded
+//! from `storage` on every topic change, every `r` refresh, and every `S`
+//! toggle, rather than loaded once upfront), `Mode`, which tracks whether
+//! the note popup is open, and now `View`, which tracks whether that list
+//! is a topic's articles or the saved-articles view.
 
 use crate::fetchers::{self, Fetcher};
 use crate::models::Article;
@@ -30,23 +36,60 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
 
-/// Keybind hints for the footer, for the normal (not editing-a-note)
-/// state -- see `EDITING_NOTE_HINTS` below for the popup's own hint line.
-/// `S` saved view and `a` add source, the rest of ARCHITECTURE.md's v1
-/// keybind table, aren't implemented yet, so they don't belong in the
-/// footer yet either; showing a hint for a key that does nothing would be
-/// worse than showing no hint at all. Kept as one `const` (rather than
-/// inlined into `render_footer` below) so there's exactly one place this
-/// has to stay in sync with the `Mode::Normal` match arm in
-/// `draw_until_quit` below.
-const KEYBIND_HINTS: &str =
-    "j/k move · ↑/↓/Tab topic · Enter open · x skip · s save · n note · r refresh · q quit";
+/// Keybind hints for the footer, for the normal (not editing-a-note) state
+/// while `View::Topic` is showing -- see `SAVED_HINTS` below for the saved
+/// view's own hint line, and `EDITING_NOTE_HINTS` for the popup's. `a` add
+/// source, the last remaining key in ARCHITECTURE.md's v1 keybind table,
+/// isn't implemented yet, so it doesn't belong in the footer yet either;
+/// showing a hint for a key that does nothing would be worse than showing
+/// no hint at all. Kept as one `const` (rather than inlined into
+/// `render_footer` below) so there's exactly one place this has to stay in
+/// sync with the `Mode::Normal` match arm in `draw_until_quit` below.
+const KEYBIND_HINTS: &str = "j/k move · ↑/↓/Tab topic · Enter open · x skip · s save · n note · r refresh · S saved · q quit";
+
+/// The footer hint line shown while `View::Saved` is showing (and the note
+/// popup isn't open). Deliberately drops `↑/↓ topic` and `r refresh` --
+/// both are disabled in this view (see the guards on their match arms in
+/// `draw_until_quit`), since neither a topic-sidebar selection nor "refetch
+/// this topic's sources" means anything once the list is "every saved
+/// article across every topic" instead of one topic's.
+const SAVED_HINTS: &str =
+    "j/k move · Enter open · x skip · s save · n note · S/Esc/Tab back · q quit";
 
 /// The footer hint line shown while the note popup (`Mode::EditingNote`)
 /// is open -- every other keybind is suspended while typing a note (see
 /// the `Mode::EditingNote` match arm in `draw_until_quit`), so the footer
-/// swaps to just these two.
+/// swaps to just these two regardless of which `View` was showing
+/// underneath.
 const EDITING_NOTE_HINTS: &str = "Enter save note · Esc cancel";
+
+/// How many characters of a saved article's note to show in the saved
+/// view's list before truncating with `…` -- see `truncate_preview` and
+/// its use in `article_item` below. The saved view is a list of many
+/// articles at once, each getting at most a couple of terminal rows, so a
+/// long note would either wrap unpredictably or crowd out the rows around
+/// it; the full text is always one `n` press away in the same edit popup
+/// already built for editing it.
+const NOTE_PREVIEW_CHARS: usize = 45;
+
+/// Which main view is currently showing -- the ordinary per-topic article
+/// list (`Topic`, the default) or every saved article across every topic
+/// (`Saved`, entered/exited with `S`). This is a *separate* piece of state
+/// from `Mode` below rather than another `Mode` variant: `Mode` tracks
+/// whether the note popup is open, which can happen while looking at
+/// *either* view, so folding them into one enum would need a variant for
+/// every combination (`Mode::EditingNote` while saved, while not, ...)
+/// instead of the two independent axes this actually is.
+///
+/// `PartialEq` is derived so match guards elsewhere in this file can write
+/// plain `view == View::Topic` / `view == View::Saved` comparisons; `Clone,
+/// Copy` because a `View` is just a two-variant tag with no data of its
+/// own, cheap to copy by value rather than worth ever borrowing.
+#[derive(Clone, Copy, PartialEq)]
+enum View {
+    Topic,
+    Saved,
+}
 
 /// Which "screen" the draw loop is currently in. `Normal` is the ordinary
 /// two-pane browsing view every other keybind operates on; `EditingNote`
@@ -118,8 +161,15 @@ fn draw_until_quit(
         None => Vec::new(),
     };
     let mut mode = Mode::Normal;
+    let mut view = View::Topic;
 
     loop {
+        // The sidebar only ever reflects the current *topic* selection,
+        // even while `view` is `View::Saved` -- there's no per-row
+        // selection in the saved view that maps onto it, so leaving this
+        // as-is just means the sidebar keeps showing whichever topic was
+        // selected before `S` was pressed, ready to resume from once the
+        // user switches back.
         let selected_topic = topics.get(topic_index).map(String::as_str);
         let selected_article = if articles.is_empty() {
             None
@@ -136,6 +186,7 @@ fn draw_until_quit(
                 &articles,
                 selected_article,
                 &mode,
+                view,
             )
         })?;
 
@@ -176,15 +227,19 @@ fn draw_until_quit(
                     article_index = article_index.saturating_sub(1);
                 }
 
-                // `Up`/`Down`/`Tab` move the topic-sidebar selection instead,
+                // `Up`/`Down` move the topic-sidebar selection instead,
                 // wrapping around at either end (unlike `j`/`k` above) since a
                 // sidebar of a handful of topics is small enough that cycling
                 // through it is more convenient than getting stuck at an edge.
                 // Every topic switch reloads `articles` for the newly selected
                 // topic and resets `article_index` back to the top -- carrying
                 // over an index from a different topic's list makes no sense,
-                // and could even be out of bounds for a shorter one.
-                KeyCode::Up if !topics.is_empty() => {
+                // and could even be out of bounds for a shorter one. Guarded
+                // to `View::Topic` only -- there's no topic-sidebar selection
+                // to move while `View::Saved` is showing, and reloading
+                // `articles` here would silently clobber the saved list with
+                // a topic's instead.
+                KeyCode::Up if view == View::Topic && !topics.is_empty() => {
                     topic_index = if topic_index == 0 {
                         topics.len() - 1
                     } else {
@@ -193,9 +248,45 @@ fn draw_until_quit(
                     articles = storage.articles_by_topic(&topics[topic_index])?;
                     article_index = 0;
                 }
-                KeyCode::Down | KeyCode::Tab if !topics.is_empty() => {
+                KeyCode::Down if view == View::Topic && !topics.is_empty() => {
                     topic_index = (topic_index + 1) % topics.len();
                     articles = storage.articles_by_topic(&topics[topic_index])?;
+                    article_index = 0;
+                }
+
+                // `Tab` does double duty depending on `view`: in `View::Topic`
+                // it's just another way to cycle the topic sidebar forward
+                // (same as `Down` above); in `View::Saved` it instead exits
+                // back to the topic view, per ARCHITECTURE.md's "pressing S
+                // again (or Esc, or Tab) returns to the normal topic view."
+                // Splitting this into its own arm (rather than folding it
+                // into the `Down` arm above the way it used to be) is what
+                // makes that second behavior possible -- the two keys now
+                // genuinely do different things depending on `view`.
+                KeyCode::Tab => {
+                    if view == View::Saved {
+                        view = View::Topic;
+                        if let Some(topic) = topics.get(topic_index) {
+                            articles = storage.articles_by_topic(topic)?;
+                        }
+                        article_index = 0;
+                    } else if !topics.is_empty() {
+                        topic_index = (topic_index + 1) % topics.len();
+                        articles = storage.articles_by_topic(&topics[topic_index])?;
+                        article_index = 0;
+                    }
+                }
+
+                // `Esc` outside the note popup only means something in
+                // `View::Saved`: exit back to the topic view, same as `Tab`
+                // above. In `View::Topic` there's nothing for a bare `Esc` to
+                // cancel, so it falls through to the `_ => {}` catch-all
+                // instead.
+                KeyCode::Esc if view == View::Saved => {
+                    view = View::Topic;
+                    if let Some(topic) = topics.get(topic_index) {
+                        articles = storage.articles_by_topic(topic)?;
+                    }
                     article_index = 0;
                 }
 
@@ -269,10 +360,40 @@ fn draw_until_quit(
                 // only ever grow or hold steady the list (nothing here
                 // removes rows), but doing it unconditionally is simpler than
                 // reasoning about which case applies, and is a no-op when the
-                // list grew or stayed the same length.
-                KeyCode::Char('r') if !topics.is_empty() => {
+                // list grew or stayed the same length. Guarded to
+                // `View::Topic` -- "refetch this topic's sources" has no
+                // meaning against "every saved article across every topic",
+                // and would otherwise silently swap the saved view out for a
+                // single topic's list without actually leaving `View::Saved`.
+                KeyCode::Char('r') if view == View::Topic && !topics.is_empty() => {
                     articles = refresh_topic(storage, &topics[topic_index])?;
                     article_index = article_index.min(articles.len().saturating_sub(1));
+                }
+
+                // `S` toggles between the two main views: `View::Topic`
+                // (the ordinary per-topic list) and `View::Saved` (every
+                // saved article across every topic, via
+                // `Storage::saved_articles` -- ARCHITECTURE.md's dedicated
+                // "Saved" view, deliberately independent of the topic
+                // sidebar rather than a pseudo-topic inside it). `j`/`k`,
+                // `Enter`, `x`, `s`, and `n` all keep working unmodified
+                // afterwards since none of them care *how* `articles` got
+                // populated, only that it's a `Vec<Article>` with a valid
+                // `article_index` into it -- which resetting to `0` here
+                // guarantees, the same as every other list reload above.
+                KeyCode::Char('S') => {
+                    view = match view {
+                        View::Topic => View::Saved,
+                        View::Saved => View::Topic,
+                    };
+                    articles = match view {
+                        View::Saved => storage.saved_articles()?,
+                        View::Topic => match topics.get(topic_index) {
+                            Some(topic) => storage.articles_by_topic(topic)?,
+                            None => Vec::new(),
+                        },
+                    };
+                    article_index = 0;
                 }
 
                 _ => {}
@@ -401,7 +522,18 @@ fn refresh_topic(storage: &Storage, topic: &str) -> anyhow::Result<Vec<Article>>
 /// the keybind footer beneath them -- the layout ARCHITECTURE.md
 /// describes ("Left pane: topic list... Right pane: article list...
 /// Footer: keybind hints") -- plus the note popup on top of everything
-/// else when `mode` is `Mode::EditingNote`.
+/// else when `mode` is `Mode::EditingNote`. `view` decides what the right
+/// pane actually shows (see `render_articles`) and which footer hint line
+/// applies (see `render_footer`); the sidebar itself doesn't change shape
+/// based on `view` -- see the note on `selected_topic` in `draw_until_quit`
+/// for why it keeps showing the last topic selection either way.
+///
+/// `view` pushes this past clippy's default 7-argument threshold for
+/// `too_many_arguments`. Bundling these into a params struct just to quiet
+/// the lint would be an abstraction with no other caller and no reuse to
+/// justify it -- `render` has exactly one call site (`draw_until_quit`'s
+/// `terminal.draw` closure), so the allow below is the more honest fix.
+#[allow(clippy::too_many_arguments)]
 fn render(
     frame: &mut Frame,
     theme: &Theme,
@@ -410,6 +542,7 @@ fn render(
     articles: &[Article],
     selected_article: Option<usize>,
     mode: &Mode,
+    view: View,
 ) {
     // Painting a plain background-colored block across the whole frame
     // first means every gap between/around the panes below (e.g. if the
@@ -447,8 +580,9 @@ fn render(
         selected_topic,
         articles,
         selected_article,
+        view,
     );
-    render_footer(frame, theme, footer_area, mode);
+    render_footer(frame, theme, footer_area, mode, view);
 
     // The note popup, if open, paints on top of everything drawn above --
     // see `render_note_popup` for why it has to come last (after the panes
@@ -500,10 +634,17 @@ fn render_sidebar(
     frame.render_stateful_widget(list, area, &mut state);
 }
 
-/// The right pane: every article in `articles` (already the result of
-/// `storage.articles_by_topic(selected_topic)`, most recent first), styled
-/// per its read/skipped/saved state using the matching `theme.accent_*`
-/// color -- ARCHITECTURE.md's "Article States & Behavior" table.
+/// The right pane: every article in `articles` (either
+/// `storage.articles_by_topic(selected_topic)` or, while `view` is
+/// `View::Saved`, `storage.saved_articles()` -- see the `S` keybind's arm
+/// in `draw_until_quit` for which), most recent first, styled per its
+/// read/skipped/saved state using the matching `theme.accent_*` color --
+/// ARCHITECTURE.md's "Article States & Behavior" table. `view` decides the
+/// title and whether each item also gets a truncated note preview (see
+/// `article_item`) -- the saved view is the one place a note is worth
+/// surfacing without pressing `n` first, since "which of these did I leave
+/// a note on, and roughly what did it say" is the whole point of browsing
+/// it.
 fn render_articles(
     frame: &mut Frame,
     theme: &Theme,
@@ -511,10 +652,14 @@ fn render_articles(
     selected_topic: Option<&str>,
     articles: &[Article],
     selected_article: Option<usize>,
+    view: View,
 ) {
-    let title = match selected_topic {
-        Some(topic) => format!(" Articles — {topic} "),
-        None => " Articles ".to_string(),
+    let title = match view {
+        View::Saved => " Saved Articles ".to_string(),
+        View::Topic => match selected_topic {
+            Some(topic) => format!(" Articles — {topic} "),
+            None => " Articles ".to_string(),
+        },
     };
 
     let block = Block::new()
@@ -526,17 +671,24 @@ fn render_articles(
     if articles.is_empty() {
         // An empty topic (or no topics at all) shouldn't render as a
         // blank pane with no explanation -- that looks indistinguishable
-        // from a bug.
-        let empty = Paragraph::new("No articles yet -- run a fetcher first.")
+        // from a bug. Same logic applies to an empty saved view: "nothing
+        // saved yet" is a real, expected state (nobody's pressed `s` yet),
+        // not something to leave the user guessing about.
+        let message = match view {
+            View::Saved => "No saved articles yet -- press s on an article to save it.",
+            View::Topic => "No articles yet -- run a fetcher first.",
+        };
+        let empty = Paragraph::new(message)
             .style(Style::new().fg(theme.text_muted))
             .block(block);
         frame.render_widget(empty, area);
         return;
     }
 
+    let show_note_preview = view == View::Saved;
     let items: Vec<ListItem> = articles
         .iter()
-        .map(|article| article_item(theme, article))
+        .map(|article| article_item(theme, article, show_note_preview))
         .collect();
 
     // Each `ListItem` here is two lines (title + source/timestamp, see
@@ -558,9 +710,15 @@ fn render_articles(
     frame.render_stateful_widget(list, area, &mut state);
 }
 
-/// One article's two-line `ListItem`: the title (colored by state) above a
-/// dimmer "source · timestamp" line.
-fn article_item<'a>(theme: &Theme, article: &'a Article) -> ListItem<'a> {
+/// One article's `ListItem`: the title (colored by state) above a dimmer
+/// "source · timestamp" line, plus -- when `show_note_preview` is true and
+/// the article actually has a note -- a third line with a truncated
+/// preview of it (see `truncate_preview`). `show_note_preview` is a plain
+/// `bool` parameter rather than this function reaching for a `View`
+/// itself: whether to show the preview is entirely `render_articles`'s
+/// call (only `View::Saved` wants it), and `article_item` doesn't need to
+/// know *why*, just *whether*.
+fn article_item<'a>(theme: &Theme, article: &'a Article, show_note_preview: bool) -> ListItem<'a> {
     // Priority order matters here: an article can technically be both
     // `read` and `saved` (saving implies read, per ARCHITECTURE.md), so
     // `saved`/`skipped` are checked first -- they're the more specific,
@@ -590,19 +748,76 @@ fn article_item<'a>(theme: &Theme, article: &'a Article) -> ListItem<'a> {
         Style::new().fg(theme.text_muted),
     ));
 
-    ListItem::new(vec![title_line, meta_line])
+    let mut lines = vec![title_line, meta_line];
+
+    // `article.note.as_deref()` turns `&Option<String>` into
+    // `Option<&str>` without cloning the note just to look at it --
+    // `if let Some(note) = ...` then only runs at all when
+    // `show_note_preview` is set *and* a note actually exists, so an
+    // article saved without one still renders as the plain two-line item
+    // above instead of a blank or missing third line.
+    if show_note_preview && let Some(note) = article.note.as_deref() {
+        let preview_line = Line::from(Span::styled(
+            format!(
+                "  \u{201c}{}\u{201d}",
+                truncate_preview(note, NOTE_PREVIEW_CHARS)
+            ),
+            Style::new().fg(theme.accent_saved),
+        ));
+        lines.push(preview_line);
+    }
+
+    ListItem::new(lines)
+}
+
+/// Truncates `text` to at most `max_chars` characters, appending `…` if
+/// anything was actually cut off -- the short note preview shown next to
+/// each title in the saved view (see `article_item`), since the full note
+/// is always one `n` press away in the same edit popup already built for
+/// it, and terminal width doesn't allow rendering a full note inline next
+/// to every row.
+///
+/// Counts *characters*, not bytes, via `str::chars()` -- `String`/`&str`
+/// in Rust are UTF-8 under the hood, where one character (an accented
+/// letter, an emoji) can take more than one byte. Slicing by byte index
+/// instead (e.g. `&text[..max_chars]`) risks cutting a multi-byte
+/// character in half, which panics at runtime rather than producing
+/// garbled output the way it might in a language that allows it silently.
+///
+/// The `chars.next().is_some()` check after collecting the first
+/// `max_chars` is what tells apart "this note was exactly `max_chars`
+/// characters, nothing to truncate" from "there was more text after
+/// this" -- `Iterator::by_ref()` is what makes that possible: it borrows
+/// the iterator instead of consuming it outright, so `.take(max_chars)`
+/// only advances it that far, leaving whatever's left over still
+/// reachable via `chars.next()` on the next line.
+fn truncate_preview(text: &str, max_chars: usize) -> String {
+    let mut chars = text.chars();
+    let preview: String = chars.by_ref().take(max_chars).collect();
+
+    if chars.next().is_some() {
+        format!("{preview}…")
+    } else {
+        preview
+    }
 }
 
 /// The footer: the keybind hint line, covering exactly the keys wired up
-/// so far -- see `KEYBIND_HINTS`/`EDITING_NOTE_HINTS` and this module's
-/// top-level doc comment for which parts of ARCHITECTURE.md's full keybind
-/// table that excludes. Swaps to `EDITING_NOTE_HINTS` while the note popup
-/// is open, since every other keybind is suspended for the duration (see
-/// the `Mode::EditingNote` match arm in `draw_until_quit`).
-fn render_footer(frame: &mut Frame, theme: &Theme, area: Rect, mode: &Mode) {
+/// so far -- see `KEYBIND_HINTS`/`SAVED_HINTS`/`EDITING_NOTE_HINTS` and
+/// this module's top-level doc comment for which parts of ARCHITECTURE.md's
+/// full keybind table that excludes. `mode` takes priority over `view`:
+/// while the note popup is open every other keybind (navigation included)
+/// is suspended for the duration (see the `Mode::EditingNote` match arm in
+/// `draw_until_quit`), so `EDITING_NOTE_HINTS` shows regardless of which
+/// view sits underneath it. Otherwise, `view` picks between the two
+/// normal-mode hint lines.
+fn render_footer(frame: &mut Frame, theme: &Theme, area: Rect, mode: &Mode, view: View) {
     let hints = match mode {
-        Mode::Normal => KEYBIND_HINTS,
         Mode::EditingNote { .. } => EDITING_NOTE_HINTS,
+        Mode::Normal => match view {
+            View::Topic => KEYBIND_HINTS,
+            View::Saved => SAVED_HINTS,
+        },
     };
 
     let footer =
@@ -685,4 +900,55 @@ fn centered_rect(area: Rect, width_percent: u16, height: u16) -> Rect {
         .areas(vertical);
 
     horizontal
+}
+
+// `#[cfg(test)]` -- see the same note on `storage/mod.rs`'s `tests` module
+// for why this doesn't add anything to a normal `cargo build`. Only
+// `truncate_preview` gets unit tests here: it's the one piece of this
+// module's new logic that's a plain, pure function (`&str` in, `String`
+// out, no `Storage`/terminal/event dependency) -- exactly the shape that's
+// cheap to test directly, unlike `draw_until_quit`'s event loop, which
+// this project instead verifies with a pty-driven run (see the project's
+// own notes on that, not a `#[test]`).
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Text shorter than the limit comes back untouched, with no `…`
+    /// appended -- there was nothing to cut off.
+    #[test]
+    fn truncate_preview_leaves_short_text_untouched() {
+        assert_eq!(truncate_preview("short note", 45), "short note");
+    }
+
+    /// Text exactly at the limit also comes back untouched -- the
+    /// `chars.next().is_some()` check in `truncate_preview` is what tells
+    /// "exactly max_chars, nothing left over" apart from "there was more,"
+    /// and this is the boundary that distinguishes them.
+    #[test]
+    fn truncate_preview_leaves_exact_length_text_untouched() {
+        let text = "12345";
+        assert_eq!(truncate_preview(text, 5), "12345");
+    }
+
+    /// Text longer than the limit is cut to exactly `max_chars` characters
+    /// with `…` appended.
+    #[test]
+    fn truncate_preview_truncates_long_text() {
+        let text = "this note is definitely longer than the preview limit allows";
+        let truncated = truncate_preview(text, 10);
+        assert_eq!(truncated, "this note …");
+    }
+
+    /// Truncation counts *characters*, not bytes -- a multi-byte character
+    /// (here, an accented "é") must count as one unit, and the cut must
+    /// never land in the middle of one. Slicing by byte index instead would
+    /// either panic (Rust refuses to slice a `&str` mid-character) or, in a
+    /// language that allowed it, produce garbled output.
+    #[test]
+    fn truncate_preview_counts_chars_not_bytes() {
+        let text = "café résumé";
+        let truncated = truncate_preview(text, 4);
+        assert_eq!(truncated, "café…");
+    }
 }
