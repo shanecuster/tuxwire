@@ -2679,6 +2679,7 @@ dependencies = [
  "tokio",
  "toml",
  "toml_edit",
+ "webpki-root-certs",
 ]
 
 [[package]]

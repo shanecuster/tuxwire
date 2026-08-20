@@ -8,6 +8,33 @@ use crate::fetchers::Fetcher;
 use crate::models::Article;
 use anyhow::Context;
 use chrono::Utc;
+use std::sync::LazyLock;
+
+/// The `reqwest::Client` every fetch in this module shares, built once on
+/// first use (`LazyLock` runs its initializer exactly once, the first time
+/// `HTTP_CLIENT` is dereferenced, and caches the result for every call
+/// after that).
+///
+/// This is *not* `reqwest::Client::new()` -- see the `reqwest` comment in
+/// Cargo.toml. Explicitly handing the builder its own root certs (via
+/// `webpki_root_certs`, Mozilla's bundled list) and calling
+/// `.tls_certs_only(...)` keeps this client off the OS-backed
+/// `rustls-platform-verifier` codepath entirely, which is what avoids the
+/// Android/Termux panic that motivated this.
+static HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
+    let root_certs = webpki_root_certs::TLS_SERVER_ROOT_CERTS
+        .iter()
+        .map(|der| {
+            reqwest::Certificate::from_der(der.as_ref())
+                .expect("webpki-root-certs' bundled certs are always valid DER")
+        })
+        .collect::<Vec<_>>();
+
+    reqwest::Client::builder()
+        .tls_certs_only(root_certs)
+        .build()
+        .expect("building the shared HTTP client with bundled root certs should never fail")
+});
 
 /// One RSS/Atom source, built from a `[[source]]` block in `sources.toml`
 /// with `type = "rss"` (see `fetchers::config` and ARCHITECTURE.md's
@@ -64,10 +91,14 @@ pub struct RssFetcher {
 /// convert either of them into one common `anyhow::Error` without us
 /// writing any conversion code by hand.
 pub async fn fetch_feed(url: &str) -> anyhow::Result<feed_rs::model::Feed> {
-    // `reqwest::get` is a convenience wrapper around building a
-    // `Client` and issuing a GET request. It's `async`, so this line
-    // returns a `Future` immediately; `.await` is what actually
-    // drives the request and suspends this function (without
+    // `HTTP_CLIENT.get(url).send()` is the explicit-`Client` equivalent of
+    // the `reqwest::get(url)` convenience function -- we can't use that
+    // convenience function here because it always builds its *own*
+    // internal client with no root certs of its own, which is exactly the
+    // codepath that hits the platform verifier (see `HTTP_CLIENT`'s doc
+    // comment above). Otherwise this behaves the same way: it's `async`,
+    // so this line returns a `Future` immediately; `.await` is what
+    // actually drives the request and suspends this function (without
     // blocking the whole program) until a response arrives.
     //
     // `.with_context(...)` (from anyhow) attaches a human-readable
@@ -75,7 +106,9 @@ pub async fn fetch_feed(url: &str) -> anyhow::Result<feed_rs::model::Feed> {
     // anything on the success path. The closure `|| format!(...)`
     // only actually runs when there's an error to attach it to — it's
     // not wasted work formatting a string on every successful fetch.
-    let response = reqwest::get(url)
+    let response = HTTP_CLIENT
+        .get(url)
+        .send()
         .await
         .with_context(|| format!("failed to fetch feed at {url}"))?;
 

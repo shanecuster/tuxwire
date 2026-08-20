@@ -67,6 +67,21 @@ ratatui = "0.30.2"
 # `reqwest` performs the actual network requests fetchers make (RSS feeds,
 # and later Reddit's/HN's JSON APIs). It's built on `tokio` (below) and is
 # async by default, which is why fetching a feed involves `.await`.
+#
+# reqwest's rustls backend always links `rustls-platform-verifier`, which
+# asks the *OS* for its trusted root certs (Keychain on macOS, Windows cert
+# store, Android's system trust manager, ...). Older reqwest versions let
+# you swap that out for a bundled cert list at the Cargo-feature level (a
+# `rustls-tls-webpki-roots` feature); 0.13 removed that knob -- the
+# platform verifier is always compiled in, and whether it's actually *used*
+# at runtime is decided in code (see `fetchers::rss::HTTP_CLIENT`) by
+# whether the `Client` was given its own root certs via `tls_certs_only()`.
+# On Android/Termux there's no real Android app context for the platform
+# verifier to hook into, so leaving that decision at its default panics at
+# first use with "Expect rustls-platform-verifier to be initialized". The
+# `webpki-root-certs` dependency below supplies the bundled Mozilla roots
+# `HTTP_CLIENT` uses instead, so no OS trust store is ever consulted --
+# same behavior on desktop and Termux.
 reqwest = "0.13.4"
 
 # --- Embedded database ----------------------------------------------
@@ -128,3 +143,13 @@ toml = "1.1.4"
 # via this crate (plain `toml`, above, already covers that), so there's no
 # reason to pull in the rest.
 toml_edit = "0.25.13"
+
+# --- Bundled TLS root certificates --------------------------------------
+# Full Mozilla root CA certificates in plain X.509 DER form, used by
+# `fetchers::rss::HTTP_CLIENT` to build a `reqwest::Client` that trusts a
+# baked-in cert list instead of asking the OS for one (see the comment on
+# `reqwest` above for why). The similarly-named `webpki-roots` crate is
+# *not* a substitute here: it stores certs pre-trimmed to just the fields
+# `rustls`/`webpki` need internally, not full DER, so it can't be fed to
+# `reqwest::Certificate::from_der`.
+webpki-root-certs = "1.0.9"
