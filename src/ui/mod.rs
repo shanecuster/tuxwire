@@ -465,10 +465,16 @@ fn draw_until_quit(
 
                 // `Enter` opens the selected article's URL in `$BROWSER` --
                 // see `open_in_browser` below for why this can't fail this
-                // loop even if it doesn't work.
+                // loop even if it doesn't work -- and marks the article read,
+                // both on disk via `Storage::mark_read` and in the in-memory
+                // `articles` list, mirroring how `x` and `s` update their
+                // entry directly so the row recolors immediately without a
+                // full reload from `storage`.
                 KeyCode::Enter => {
-                    if let Some(article) = articles.get(article_index) {
+                    if let Some(article) = articles.get_mut(article_index) {
                         open_in_browser(&article.url);
+                        storage.mark_read(article.id)?;
+                        article.read = true;
                     }
                 }
 
