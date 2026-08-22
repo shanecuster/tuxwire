@@ -18,19 +18,13 @@
 # src/fetchers/reddit.rs.
 
 [[source]]
-name = "Phoronix"
+name = "Arch Linux News"
 type = "rss"
-url = "https://www.phoronix.com/rss.php"
-topic = "kernel"
+url = "https://archlinux.org/feeds/news/"
+topic = "linux"
 
 [[source]]
-name = "KrebsOnSecurity"
+name = "shanetalkstech"
 type = "rss"
-url = "https://krebsonsecurity.com/feed/"
-topic = "security"
-
-[[source]]
-name = "r/linux"
-type = "reddit"
-url = "linux"
-topic = "distros"
+url = "https://shanetalkstech.com/index.xml"
+topic = "blog"
