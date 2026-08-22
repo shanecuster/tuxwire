@@ -4,7 +4,7 @@ A terminal-based RSS reader built for people who take notes while they read.
 
 tuxwire aggregates feeds from any source you choose — Linux/FOSS/kernel news, or anything else you subscribe to — into a single fast TUI. Save articles, tag them by status, and jot notes without ever leaving the terminal.
 
-![tuxwire screenshot](docs/screenshot.png)
+![tuxwire screenshot](docs/tuxwire.png)
 
 ## Features
 
