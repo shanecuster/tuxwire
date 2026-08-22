@@ -439,6 +439,33 @@ GoatCounter dashboards already tracking the blogs.
   the stats view are a better use of time right now. Revisit once the
   core app (including notes + stats) is genuinely daily-usable.
 
+**Currently in exploration on the `terminal-browser-integration` branch —
+not merged into master until it's genuinely liked:**
+- **In-terminal article reading.** Two very different approaches under
+  consideration, worth stating separately since they're different sized
+  problems, not two flavors of the same one:
+  - **Option A (starting point):** `Enter` suspends tuxwire's screen, spawns
+    a terminal browser (`w3m` first choice — good rendering, common,
+    scriptable) full-screen pointed at the article URL, and resumes
+    tuxwire exactly where it left off on quit. Same suspend/resume pattern
+    already used for shelling out to `$EDITOR` on notes — genuinely
+    adapting existing plumbing to a new target program, not new
+    architecture. Not true side-by-side; it's a full takeover, same as
+    the current `$BROWSER` behavior just rendered in-terminal instead of
+    a GUI browser.
+  - **Option B (stretch goal, only if A feels unsatisfying):** a true
+    split pane — sidebar/article list still visible while the browser
+    renders in an adjacent region. This needs an embedded pty inside a
+    ratatui widget (the `tui-term` crate, built on `vt100` to interpret
+    the spawned program's escape codes) — a real, working approach but
+    genuinely new complexity: a new dependency, coordinating resize
+    events between two "terminals," and routing keystrokes to the right
+    pane without tuxwire's own nav keys colliding with the browser's.
+    Treat as its own dedicated effort, not a quick add.
+  - No offline-caching/content-extraction work needed for either option —
+    unlike the earlier in-app-reading idea, a terminal browser handles its
+    own fetching and rendering, so this sidesteps that whole subsystem.
+
 **Other open questions:**
 - Multi-line vs. single-line notes UI — inline popup (`tui-textarea`) vs.
   shelling out to `$EDITOR` for real Vim; likely support both, config-toggled
