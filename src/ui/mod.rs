@@ -401,9 +401,9 @@ fn draw_until_quit(
                 }
 
                 // `Up`/`Down` move the topic-sidebar selection instead,
-                // wrapping around at either end (unlike `j`/`k` above) since a
-                // sidebar of a handful of topics is small enough that cycling
-                // through it is more convenient than getting stuck at an edge.
+                // clamping at either end (same as `j`/`k` above) rather than
+                // wrapping around, so hitting the top or bottom topic just
+                // stays put instead of jumping to the other end.
                 // Every topic switch reloads `articles` for the newly selected
                 // topic and resets `article_index` back to the top -- carrying
                 // over an index from a different topic's list makes no sense,
@@ -413,29 +413,26 @@ fn draw_until_quit(
                 // `articles` here would silently clobber the saved list with
                 // a topic's instead.
                 KeyCode::Up if view == View::Topic && !topics.is_empty() => {
-                    topic_index = if topic_index == 0 {
-                        topics.len() - 1
-                    } else {
-                        topic_index - 1
-                    };
+                    topic_index = topic_index.saturating_sub(1);
                     articles = storage.articles_by_topic(&topics[topic_index])?;
                     article_index = 0;
                 }
                 KeyCode::Down if view == View::Topic && !topics.is_empty() => {
-                    topic_index = (topic_index + 1) % topics.len();
+                    topic_index = (topic_index + 1).min(topics.len() - 1);
                     articles = storage.articles_by_topic(&topics[topic_index])?;
                     article_index = 0;
                 }
 
                 // `Tab` does double duty depending on `view`: in `View::Topic`
-                // it's just another way to cycle the topic sidebar forward
-                // (same as `Down` above); in `View::Saved` it instead exits
-                // back to the topic view, per ARCHITECTURE.md's "pressing S
-                // again (or Esc, or Tab) returns to the normal topic view."
-                // Splitting this into its own arm (rather than folding it
-                // into the `Down` arm above the way it used to be) is what
-                // makes that second behavior possible -- the two keys now
-                // genuinely do different things depending on `view`.
+                // it's just another way to move the topic sidebar forward
+                // (same as `Down` above, clamping at the last topic rather
+                // than wrapping); in `View::Saved` it instead exits back to
+                // the topic view, per ARCHITECTURE.md's "pressing S again (or
+                // Esc, or Tab) returns to the normal topic view." Splitting
+                // this into its own arm (rather than folding it into the
+                // `Down` arm above the way it used to be) is what makes that
+                // second behavior possible -- the two keys now genuinely do
+                // different things depending on `view`.
                 KeyCode::Tab => {
                     if view == View::Saved {
                         view = View::Topic;
@@ -444,7 +441,7 @@ fn draw_until_quit(
                         }
                         article_index = 0;
                     } else if !topics.is_empty() {
-                        topic_index = (topic_index + 1) % topics.len();
+                        topic_index = (topic_index + 1).min(topics.len() - 1);
                         articles = storage.articles_by_topic(&topics[topic_index])?;
                         article_index = 0;
                     }
