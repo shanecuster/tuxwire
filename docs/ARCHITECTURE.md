@@ -113,7 +113,24 @@ underneath.
   changes regardless of topic, view, or selection state.
 - **Left pane (topic sidebar), below the banner bar:** three stacked
   sections, always visible regardless of topic or view selected:
-  1. **Topics** — the topic list itself, toggle/select as before
+  1. **Topics** — an expandable tree, not a flat list:
+     - Each topic shows an indicator (`▸` collapsed / `▾` expanded).
+     - `Right` / `l` expands the selected topic, revealing its individual
+       sources indented underneath (source names come from the already
+       -loaded `sources.toml` config, grouped by topic — no new query
+       needed, since one-topic-per-source means the grouping is already
+       known).
+     - `Left` / `h` collapses it back down.
+     - `Up`/`Down` flow naturally through topic rows and, when a topic is
+       expanded, its nested source rows.
+     - Selecting a **topic row** shows all articles across every source in
+       that topic — unchanged existing behavior.
+     - Selecting a **source row** (only reachable when its parent topic is
+       expanded) filters the article list to just that one source. This
+       is an additional filter layered on the existing topic filter, not
+       a new query path — a source's topic is already fixed, so
+       "articles from source X" is just "articles in X's topic, further
+       filtered by source name."
   2. **Keys** — a static reference list of the active v1 keybinds (`s`
      save, `x` close, `n` note, `S` saved view, `r` refresh, `a` add
      source). Exists specifically because the person using this has no
@@ -139,6 +156,8 @@ underneath.
 | Key       | Action                          |
 |-----------|----------------------------------|
 | `j` / `k` | navigate list                   |
+| `Right` / `l` | expand selected topic (show its sources) |
+| `Left` / `h`  | collapse selected topic          |
 | `Enter`   | open article in `$BROWSER`      |
 | `x`       | skip article (recolors, no keyword-learning behind it — see below) |
 | `s`       | save article (auto-marks as read) |
@@ -438,6 +457,33 @@ GoatCounter dashboards already tracking the blogs.
   a convenience that manual capture-and-paste already covers. Notes and
   the stats view are a better use of time right now. Revisit once the
   core app (including notes + stats) is genuinely daily-usable.
+
+**Currently in exploration on the `terminal-browser-integration` branch —
+not merged into master until it's genuinely liked:**
+- **In-terminal article reading.** Two very different approaches under
+  consideration, worth stating separately since they're different sized
+  problems, not two flavors of the same one:
+  - **Option A (starting point):** `Enter` suspends tuxwire's screen, spawns
+    a terminal browser (`w3m` first choice — good rendering, common,
+    scriptable) full-screen pointed at the article URL, and resumes
+    tuxwire exactly where it left off on quit. Same suspend/resume pattern
+    already used for shelling out to `$EDITOR` on notes — genuinely
+    adapting existing plumbing to a new target program, not new
+    architecture. Not true side-by-side; it's a full takeover, same as
+    the current `$BROWSER` behavior just rendered in-terminal instead of
+    a GUI browser.
+  - **Option B (stretch goal, only if A feels unsatisfying):** a true
+    split pane — sidebar/article list still visible while the browser
+    renders in an adjacent region. This needs an embedded pty inside a
+    ratatui widget (the `tui-term` crate, built on `vt100` to interpret
+    the spawned program's escape codes) — a real, working approach but
+    genuinely new complexity: a new dependency, coordinating resize
+    events between two "terminals," and routing keystrokes to the right
+    pane without tuxwire's own nav keys colliding with the browser's.
+    Treat as its own dedicated effort, not a quick add.
+  - No offline-caching/content-extraction work needed for either option —
+    unlike the earlier in-app-reading idea, a terminal browser handles its
+    own fetching and rendering, so this sidesteps that whole subsystem.
 
 **Other open questions:**
 - Multi-line vs. single-line notes UI — inline popup (`tui-textarea`) vs.
