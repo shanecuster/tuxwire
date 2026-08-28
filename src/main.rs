@@ -131,7 +131,7 @@ async fn main() -> anyhow::Result<()> {
     // screen swaps to a blank buffer -- that's expected, not a bug losing
     // that output.
     let theme = Theme::load()?;
-    ui::run(&storage, &theme)?;
+    ui::run(&storage, &theme, &sources)?;
 
     Ok(())
 }

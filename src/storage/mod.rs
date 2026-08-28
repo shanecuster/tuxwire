@@ -187,6 +187,25 @@ impl Storage {
         rows.collect::<rusqlite::Result<Vec<Article>>>().map_err(Into::into)
     }
 
+    /// All articles filed under `topic` *and* published by `source`
+    /// specifically, most recent first -- backs the sidebar tree's nested
+    /// source rows (`docs/ARCHITECTURE.md`'s "Selecting a source row...
+    /// filters the article list to just that one source"). Deliberately
+    /// the exact same query as `articles_by_topic` above with one more
+    /// `AND source = ?2` clause, not a separate query path -- per
+    /// ARCHITECTURE.md, "a source's topic is already fixed, so 'articles
+    /// from source X' is just 'articles in X's topic, further filtered by
+    /// source name.'"
+    pub fn articles_by_topic_and_source(&self, topic: &str, source: &str) -> anyhow::Result<Vec<Article>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, title, url, source, topic, timestamp, read, skipped, saved, note
+             FROM articles WHERE topic = ?1 AND source = ?2 ORDER BY timestamp DESC",
+        )?;
+
+        let rows = stmt.query_map(params![topic, source], row_to_article)?;
+        rows.collect::<rusqlite::Result<Vec<Article>>>().map_err(Into::into)
+    }
+
     /// Every saved article, across all topics, most recent first -- backs
     /// the dedicated "Saved" view described in ARCHITECTURE.md, which is
     /// explicitly independent of the topic sidebar.
@@ -451,6 +470,37 @@ mod tests {
         // filtering by topic in the query rather than fetching everything
         // and filtering in Rust.
         assert!(storage.articles_by_topic("gaming").unwrap().is_empty());
+    }
+
+    #[test]
+    fn articles_by_topic_and_source_filters_to_just_that_source() {
+        let storage = test_storage();
+        let lwn = Article::new(
+            "Btrfs send/receive got faster".to_string(),
+            "https://example.com/btrfs".to_string(),
+            "LWN.net".to_string(),
+            "linux-news".to_string(),
+            Utc::now(),
+        );
+        let phoronix = Article::new(
+            "New kernel release".to_string(),
+            "https://example.com/kernel".to_string(),
+            "Phoronix".to_string(),
+            "linux-news".to_string(),
+            Utc::now(),
+        );
+        storage.insert_article(&lwn).unwrap();
+        storage.insert_article(&phoronix).unwrap();
+
+        let lwn_only = storage.articles_by_topic_and_source("linux-news", "LWN.net").unwrap();
+        assert_eq!(lwn_only.len(), 1);
+        assert_eq!(lwn_only[0].source, "LWN.net");
+
+        // The two sources share a topic but not a source name -- a source
+        // filter on one must never leak the other's articles in, and a
+        // source name that matches no row at all (right topic, wrong or
+        // unknown source) comes back empty rather than erroring.
+        assert!(storage.articles_by_topic_and_source("linux-news", "unknown-source").unwrap().is_empty());
     }
 
     #[test]

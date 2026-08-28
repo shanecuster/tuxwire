@@ -24,12 +24,24 @@
 //! toggle, rather than loaded once upfront), `Mode`, which tracks whether
 //! the note popup is open, and now `View`, which tracks whether that list
 //! is a topic's articles or the saved-articles view.
+//!
+//! The topic sidebar is now an expandable tree, not a flat list of topics
+//! (`docs/ARCHITECTURE.md`'s "Topics" bullet): `Right`/`l` expands the
+//! selected topic, revealing its individual sources -- names pulled from
+//! `sources_by_topic`, grouped once from the `ConfiguredSource` list `main`
+//! already loaded, no new `sources.toml` read or DB query -- indented
+//! underneath it; `Left`/`h` collapses it back down. `Up`/`Down` walk that
+//! same flattened topic-then-sources order (`sidebar_rows`,
+//! `move_sidebar_selection`); landing on a source row filters the article
+//! list to just that source (`Storage::articles_by_topic_and_source`, via
+//! `load_articles_for_selection`) instead of the whole topic.
 
-use crate::fetchers::{self, Fetcher};
+use crate::fetchers::{self, ConfiguredSource, Fetcher};
 use crate::models::Article;
 use crate::storage::Storage;
 use crate::theme::Theme;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use std::collections::{HashMap, HashSet};
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -45,10 +57,10 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragra
 /// below) so there's exactly one place this has to stay in sync with the
 /// `Mode::Normal` match arm in `draw_until_quit` below.
 ///
-/// Deliberately drops `x`/`s`/`n`/`r`/`S`/`a` -- those six now have a
-/// permanent home in the sidebar's own "Keys" section (see
-/// `render_keys_section`), which is on screen at all times rather than
-/// only in the footer, so repeating them here would just be the same
+/// Deliberately drops `x`/`s`/`n`/`r`/`S`/`a`/`Right`+`l`/`Left`+`h` --
+/// those now have a permanent home in the sidebar's own "Keys" section
+/// (see `render_keys_section`), which is on screen at all times rather
+/// than only in the footer, so repeating them here would just be the same
 /// reference living in two places. What's left is exactly the keys the
 /// Keys section *doesn't* cover: raw navigation (`j`/`k`, `↑`/`↓`/`Tab`,
 /// `Enter`) and `q` to quit.
@@ -107,13 +119,21 @@ const NOTE_PREVIEW_CHARS: usize = 45;
 /// in both `View::Topic` and `View::Saved` (see `render_sidebar`, which
 /// doesn't take a `View` at all -- these two sections render identically
 /// regardless of which one is showing).
-const KEY_HINTS: [(&str, &str); 6] = [
+///
+/// `→`/`l` and `←`/`h` (expanding/collapsing a topic in the sidebar tree,
+/// see `SidebarRow`/`sidebar_rows` below) live here rather than in
+/// `KEYBIND_HINTS` -- they're sidebar navigation, not article-list
+/// navigation, and per ARCHITECTURE.md's keybind table this is their
+/// documented home.
+const KEY_HINTS: [(&str, &str); 8] = [
     ("s", "save"),
     ("x", "close"),
     ("n", "note"),
     ("S", "saved view"),
     ("r", "refresh"),
     ("a", "add source"),
+    ("→/l", "expand topic"),
+    ("←/h", "collapse topic"),
 ];
 
 /// The `tuxwire` wordmark, straight out of `figlet -f standard tuxwire` --
@@ -234,7 +254,14 @@ enum ConfirmField {
 /// owned: this function only ever *reads* through them, and taking
 /// ownership would force whoever calls `ui::run` to give up their own
 /// `Storage`/`Theme` (or clone them) just to display something once.
-pub fn run(storage: &Storage, theme: &Theme) -> anyhow::Result<()> {
+///
+/// `sources: &[ConfiguredSource]` is `main`'s own already-loaded,
+/// already-fetched-from list (the same one it built via
+/// `fetchers::configured_sources()` before ever opening the TUI) -- passed
+/// in and grouped by topic once, right here, so the sidebar's expandable
+/// topic tree (see `SidebarRow`/`sidebar_rows`) can list each topic's
+/// sources with no new `sources.toml` read and no new database query.
+pub fn run(storage: &Storage, theme: &Theme, sources: &[ConfiguredSource]) -> anyhow::Result<()> {
     // `mut` (and passed to `draw_until_quit` as `&mut` below) because the
     // `a` add-source flow can grow this list: a brand-new topic typed on
     // the confirm screen needs to show up in the sidebar immediately (per
@@ -242,6 +269,7 @@ pub fn run(storage: &Storage, theme: &Theme) -> anyhow::Result<()> {
     // mutating this same `Vec` in place rather than only ever reading it
     // once here at startup.
     let mut topics = storage.topics()?;
+    let sources_by_topic = group_sources_by_topic(sources);
 
     // `ratatui::run` (see the doc comment on it in the `ratatui` crate)
     // is the "simplest path" helper: it puts the terminal into raw mode +
@@ -251,7 +279,22 @@ pub fn run(storage: &Storage, theme: &Theme) -> anyhow::Result<()> {
     // exactly the guarantee this function needs: if `draw_until_quit`
     // below hits an error partway through, the user's shell must not be
     // left in raw mode / the alternate screen.
-    ratatui::run(|terminal| draw_until_quit(terminal, theme, storage, &mut topics))
+    ratatui::run(|terminal| draw_until_quit(terminal, theme, storage, &mut topics, &sources_by_topic))
+}
+
+/// Groups every configured source's name under its one topic
+/// (`sources.toml`'s "exactly one topic per source" rule -- see
+/// ARCHITECTURE.md's Configuration section), built once from the
+/// `ConfiguredSource` list `main` already loaded at startup. Source names
+/// within a topic keep `sources.toml`'s own order (the order they appear
+/// in the file / the order `sources` iterates in), not re-sorted -- there's
+/// no natural reason to alphabetize them over just matching the config.
+fn group_sources_by_topic(sources: &[ConfiguredSource]) -> HashMap<String, Vec<String>> {
+    let mut grouped: HashMap<String, Vec<String>> = HashMap::new();
+    for source in sources {
+        grouped.entry(source.topic().to_string()).or_default().push(source.name().to_string());
+    }
+    grouped
 }
 
 /// The actual draw loop: redraw the frame, block for the next terminal
@@ -266,11 +309,23 @@ pub fn run(storage: &Storage, theme: &Theme) -> anyhow::Result<()> {
 /// every time `topic_index` changes -- it's *not* one big upfront list, so
 /// switching topics always reflects whatever's actually in the database
 /// for that topic.
+///
+/// Also owns the sidebar tree's own state: `expanded_topics` (which topics
+/// currently show their nested source rows) and `selected_source` (`Some`
+/// when the cursor is actually sitting on one of those source rows rather
+/// than the topic row itself). `expanded_topics` is a `HashSet<String>`
+/// keyed by topic *name*, not a `Vec<bool>` parallel to `topics` keyed by
+/// *index* -- the `a` add-source flow can insert a brand-new topic into
+/// `topics` and re-sort the whole `Vec` (see the block handling
+/// `Mode::AddSource` finishing, below), which would silently scramble any
+/// index-based parallel `Vec`; a name-keyed set stays correct no matter how
+/// `topics` gets reordered.
 fn draw_until_quit(
     terminal: &mut ratatui::DefaultTerminal,
     theme: &Theme,
     storage: &Storage,
     topics: &mut Vec<String>,
+    sources_by_topic: &HashMap<String, Vec<String>>,
 ) -> anyhow::Result<()> {
     let mut topic_index: usize = 0;
     let mut article_index: usize = 0;
@@ -280,6 +335,8 @@ fn draw_until_quit(
     };
     let mut mode = Mode::Normal;
     let mut view = View::Topic;
+    let mut expanded_topics: HashSet<String> = HashSet::new();
+    let mut selected_source: Option<String> = None;
 
     loop {
         // The sidebar only ever reflects the current *topic* selection,
@@ -300,7 +357,10 @@ fn draw_until_quit(
                 frame,
                 theme,
                 topics.as_slice(),
+                sources_by_topic,
+                &expanded_topics,
                 selected_topic,
+                selected_source.as_deref(),
                 &articles,
                 selected_article,
                 &mode,
@@ -368,6 +428,12 @@ fn draw_until_quit(
                     .and_then(|name| topics.iter().position(|t| *t == name))
                     .unwrap_or(0);
 
+                // The add-source flow has nothing to do with a source-row
+                // selection that may have been active before it opened --
+                // always land back on the plain topic-level list rather
+                // than trying to re-derive whether that source selection
+                // still makes sense.
+                selected_source = None;
                 articles = match topics.get(topic_index) {
                     Some(topic) => storage.articles_by_topic(topic)?,
                     None => Vec::new(),
@@ -400,27 +466,90 @@ fn draw_until_quit(
                     article_index = article_index.saturating_sub(1);
                 }
 
-                // `Up`/`Down` move the topic-sidebar selection instead,
-                // clamping at either end (same as `j`/`k` above) rather than
-                // wrapping around, so hitting the top or bottom topic just
-                // stays put instead of jumping to the other end.
-                // Every topic switch reloads `articles` for the newly selected
-                // topic and resets `article_index` back to the top -- carrying
-                // over an index from a different topic's list makes no sense,
-                // and could even be out of bounds for a shorter one. Guarded
-                // to `View::Topic` only -- there's no topic-sidebar selection
-                // to move while `View::Saved` is showing, and reloading
-                // `articles` here would silently clobber the saved list with
-                // a topic's instead.
+                // `Up`/`Down` move the sidebar cursor through the flattened
+                // topic tree -- every topic row, plus (for whichever topics
+                // are in `expanded_topics`) their nested source rows right
+                // underneath, in the same order `render_topics_section`
+                // draws them -- clamping at either end (same as `j`/`k`
+                // above) rather than wrapping. `move_sidebar_selection`
+                // rewrites `topic_index`/`selected_source` in place to
+                // wherever the cursor lands; `load_articles_for_selection`
+                // then reloads `articles` from *that*, which is either a
+                // plain per-topic query (landed on a topic row) or the
+                // same query with a source-name filter added (landed on
+                // one of that topic's source rows) -- see its own doc
+                // comment. Guarded to `View::Topic` only -- there's no
+                // sidebar cursor to move while `View::Saved` is showing,
+                // and reloading `articles` here would silently clobber the
+                // saved list with a topic's instead.
                 KeyCode::Up if view == View::Topic && !topics.is_empty() => {
-                    topic_index = topic_index.saturating_sub(1);
-                    articles = storage.articles_by_topic(&topics[topic_index])?;
+                    move_sidebar_selection(
+                        -1,
+                        topics,
+                        sources_by_topic,
+                        &expanded_topics,
+                        &mut topic_index,
+                        &mut selected_source,
+                    );
+                    articles =
+                        load_articles_for_selection(storage, &topics[topic_index], selected_source.as_deref())?;
                     article_index = 0;
                 }
                 KeyCode::Down if view == View::Topic && !topics.is_empty() => {
-                    topic_index = (topic_index + 1).min(topics.len() - 1);
-                    articles = storage.articles_by_topic(&topics[topic_index])?;
+                    move_sidebar_selection(
+                        1,
+                        topics,
+                        sources_by_topic,
+                        &expanded_topics,
+                        &mut topic_index,
+                        &mut selected_source,
+                    );
+                    articles =
+                        load_articles_for_selection(storage, &topics[topic_index], selected_source.as_deref())?;
                     article_index = 0;
+                }
+
+                // `Right`/`l` expands the currently selected topic, per
+                // ARCHITECTURE.md's sidebar spec -- revealing its nested
+                // source rows (pulled from `sources_by_topic`, already
+                // grouped from `sources.toml` at startup -- see
+                // `group_sources_by_topic`, no new TOML read or DB query
+                // needed here) for `Up`/`Down` to walk into next. Guarded
+                // to `selected_source.is_none()`: this only makes sense
+                // from a *topic* row -- there's no deeper level to expand
+                // from one of its source rows, so the cursor being on one
+                // makes this a no-op (falls through to `_ => {}` below). A
+                // topic with no configured sources also has nothing to
+                // reveal, so `expanded_topics` is only touched when
+                // `sources_by_topic` actually has a non-empty entry for it
+                // -- otherwise the indicator in `render_topics_section`
+                // would flip to "expanded" over an empty nested list.
+                KeyCode::Right | KeyCode::Char('l')
+                    if view == View::Topic && selected_source.is_none() && !topics.is_empty() =>
+                {
+                    if let Some(topic) = topics.get(topic_index)
+                        && sources_by_topic.get(topic).is_some_and(|sources| !sources.is_empty())
+                    {
+                        expanded_topics.insert(topic.clone());
+                    }
+                }
+
+                // `Left`/`h` collapses the currently selected topic. From a
+                // source row, this first jumps the cursor back up to its
+                // parent topic row (clearing `selected_source` and
+                // reloading the unfiltered per-topic article list) rather
+                // than requiring a separate `Up` press first -- the same
+                // "collapse jumps to parent" convention most file-tree UIs
+                // use. From an already-collapsed topic row, removing a name
+                // that was never in `expanded_topics` is a harmless no-op.
+                KeyCode::Left | KeyCode::Char('h') if view == View::Topic && !topics.is_empty() => {
+                    if let Some(topic) = topics.get(topic_index) {
+                        expanded_topics.remove(topic);
+                    }
+                    if selected_source.take().is_some() {
+                        articles = load_articles_for_selection(storage, &topics[topic_index], None)?;
+                        article_index = 0;
+                    }
                 }
 
                 // `Tab` does double duty depending on `view`: in `View::Topic`
@@ -433,15 +562,24 @@ fn draw_until_quit(
                 // `Down` arm above the way it used to be) is what makes that
                 // second behavior possible -- the two keys now genuinely do
                 // different things depending on `view`.
+                //
+                // Deliberately a flat "next topic row" jump, not a walk
+                // through `Up`/`Down`'s expanded-tree order -- `Tab` is the
+                // quick "next topic" shortcut, so it always lands on a bare
+                // topic row (clearing any active `selected_source`) rather
+                // than stepping into whichever topic's source rows happen
+                // to be expanded.
                 KeyCode::Tab => {
                     if view == View::Saved {
                         view = View::Topic;
+                        selected_source = None;
                         if let Some(topic) = topics.get(topic_index) {
                             articles = storage.articles_by_topic(topic)?;
                         }
                         article_index = 0;
                     } else if !topics.is_empty() {
                         topic_index = (topic_index + 1).min(topics.len() - 1);
+                        selected_source = None;
                         articles = storage.articles_by_topic(&topics[topic_index])?;
                         article_index = 0;
                     }
@@ -454,6 +592,7 @@ fn draw_until_quit(
                 // instead.
                 KeyCode::Esc if view == View::Saved => {
                     view = View::Topic;
+                    selected_source = None;
                     if let Some(topic) = topics.get(topic_index) {
                         articles = storage.articles_by_topic(topic)?;
                     }
@@ -531,18 +670,23 @@ fn draw_until_quit(
                 }
 
                 // `r` re-fetches the current topic's sources and reloads its
-                // article list -- see `refresh_topic` below. Clamping
-                // `article_index` afterwards matters because a refresh can
-                // only ever grow or hold steady the list (nothing here
-                // removes rows), but doing it unconditionally is simpler than
-                // reasoning about which case applies, and is a no-op when the
-                // list grew or stayed the same length. Guarded to
-                // `View::Topic` -- "refetch this topic's sources" has no
-                // meaning against "every saved article across every topic",
-                // and would otherwise silently swap the saved view out for a
-                // single topic's list without actually leaving `View::Saved`.
+                // article list -- see `refresh_topic` below. Passing
+                // `selected_source` through is what makes a refresh
+                // preserve whichever sidebar row (the topic itself, or one
+                // of its source rows) was selected beforehand, instead of
+                // silently dropping back to the unfiltered topic list every
+                // time `r` is pressed. Clamping `article_index` afterwards
+                // matters because a refresh can only ever grow or hold
+                // steady the list (nothing here removes rows), but doing it
+                // unconditionally is simpler than reasoning about which
+                // case applies, and is a no-op when the list grew or stayed
+                // the same length. Guarded to `View::Topic` -- "refetch this
+                // topic's sources" has no meaning against "every saved
+                // article across every topic", and would otherwise silently
+                // swap the saved view out for a single topic's list without
+                // actually leaving `View::Saved`.
                 KeyCode::Char('r') if view == View::Topic && !topics.is_empty() => {
-                    articles = refresh_topic(storage, &topics[topic_index])?;
+                    articles = refresh_topic(storage, &topics[topic_index], selected_source.as_deref())?;
                     article_index = article_index.min(articles.len().saturating_sub(1));
                 }
 
@@ -557,11 +701,18 @@ fn draw_until_quit(
                 // populated, only that it's a `Vec<Article>` with a valid
                 // `article_index` into it -- which resetting to `0` here
                 // guarantees, the same as every other list reload above.
+                //
+                // `selected_source` is cleared on the way in either
+                // direction, same reasoning as `Tab`/`Esc` above: `S` always
+                // lands back on a bare topic row rather than trying to
+                // re-derive whether a source-row selection from before the
+                // toggle still makes sense.
                 KeyCode::Char('S') => {
                     view = match view {
                         View::Topic => View::Saved,
                         View::Saved => View::Topic,
                     };
+                    selected_source = None;
                     articles = match view {
                         View::Saved => storage.saved_articles()?,
                         View::Topic => match topics.get(topic_index) {
@@ -676,7 +827,10 @@ fn open_in_browser(url: &str) {
 /// Re-fetches every source in `fetchers::configured_sources` filed under
 /// `topic`, inserts whatever comes back into `storage` (idempotently, on
 /// `url` -- see `Storage::insert_article`), and returns the reloaded
-/// article list for `topic` -- the `r` keybind.
+/// article list for `topic` -- the `r` keybind. `source`, when `Some`, is
+/// forwarded straight to `load_articles_for_selection` so a refresh
+/// preserves whichever source-row filter (if any) was active beforehand,
+/// rather than always handing back every article in the topic.
 ///
 /// `draw_until_quit` runs synchronously (it's the body of a plain,
 /// blocking draw loop, not an `async fn`), but `Fetcher::fetch` is async
@@ -691,10 +845,10 @@ fn open_in_browser(url: &str) {
 /// while this one fetch is in flight. This only works because
 /// `#[tokio::main]`'s default multi-threaded runtime has more than one
 /// worker thread to hand off to.
-fn refresh_topic(storage: &Storage, topic: &str) -> anyhow::Result<Vec<Article>> {
-    for source in fetchers::configured_sources()?.into_iter().filter(|source| source.topic() == topic) {
+fn refresh_topic(storage: &Storage, topic: &str, source: Option<&str>) -> anyhow::Result<Vec<Article>> {
+    for configured_source in fetchers::configured_sources()?.into_iter().filter(|source| source.topic() == topic) {
         let fetch_result = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(source.fetch())
+            tokio::runtime::Handle::current().block_on(configured_source.fetch())
         });
 
         // Same reasoning as `main.rs`'s initial fetch loop: one source
@@ -709,7 +863,7 @@ fn refresh_topic(storage: &Storage, topic: &str) -> anyhow::Result<Vec<Article>>
         let fetched = match fetch_result {
             Ok(fetched) => fetched,
             Err(err) => {
-                eprintln!("skipped {}: {err:#}", source.name());
+                eprintln!("skipped {}: {err:#}", configured_source.name());
                 continue;
             }
         };
@@ -719,7 +873,125 @@ fn refresh_topic(storage: &Storage, topic: &str) -> anyhow::Result<Vec<Article>>
         }
     }
 
-    storage.articles_by_topic(topic)
+    load_articles_for_selection(storage, topic, source)
+}
+
+/// Loads the article list a sidebar row's selection actually implies:
+/// every article in `topic` (`Storage::articles_by_topic`) when `source`
+/// is `None` -- the topic row itself was selected -- or, when `source` is
+/// `Some`, the same topic further filtered down to just that one source's
+/// articles (`Storage::articles_by_topic_and_source`) -- one of that
+/// topic's nested source rows was selected instead. Both are the *same*
+/// topic-scoped query under the hood (per ARCHITECTURE.md: "articles in
+/// X's topic, further filtered by source name" -- not a new query path),
+/// so every call site that needs to reload `articles` from the current
+/// sidebar selection goes through this one function instead of
+/// re-deriving the `if source.is_some() { ... } else { ... }` split itself.
+fn load_articles_for_selection(storage: &Storage, topic: &str, source: Option<&str>) -> anyhow::Result<Vec<Article>> {
+    match source {
+        Some(name) => storage.articles_by_topic_and_source(topic, name),
+        None => storage.articles_by_topic(topic),
+    }
+}
+
+/// One row of the sidebar's topic tree, flattened into a single ordered
+/// list -- what `Up`/`Down` step through (`move_sidebar_selection`) and
+/// what `render_topics_section` actually draws, both built from the same
+/// `sidebar_rows` function below so the two can never disagree about
+/// what's on screen versus what the cursor lands on.
+///
+/// Holds indices/borrowed names rather than owned topic/source `String`s:
+/// this is rebuilt fresh on every keypress and every frame (`topics` and
+/// `sources_by_topic` are both small -- a handful of topics, a source list
+/// per topic -- so there's no real cost to that, and it means this can
+/// never itself go stale the way a cached copy could).
+enum SidebarRow<'a> {
+    /// Index into `topics`.
+    Topic(usize),
+    /// `(index into topics, that topic's source name)` -- the source name
+    /// is borrowed out of `sources_by_topic`, hence the lifetime.
+    Source(usize, &'a str),
+}
+
+/// Builds the sidebar's full flattened row order: every topic in `topics`,
+/// each immediately followed by its source rows (in `sources_by_topic`'s
+/// own order -- `sources.toml`'s order, see `group_sources_by_topic`)
+/// whenever that topic's name is present in `expanded_topics`. A topic
+/// with no entry in `sources_by_topic` at all (nothing configured under
+/// it, or its only sources are of a type still unfetchable) simply
+/// contributes no source rows, expanded or not.
+fn sidebar_rows<'a>(
+    topics: &[String],
+    sources_by_topic: &'a HashMap<String, Vec<String>>,
+    expanded_topics: &HashSet<String>,
+) -> Vec<SidebarRow<'a>> {
+    let mut rows = Vec::new();
+    for (index, topic) in topics.iter().enumerate() {
+        rows.push(SidebarRow::Topic(index));
+        if expanded_topics.contains(topic)
+            && let Some(sources) = sources_by_topic.get(topic)
+        {
+            rows.extend(sources.iter().map(|name| SidebarRow::Source(index, name.as_str())));
+        }
+    }
+    rows
+}
+
+/// Moves the sidebar cursor one row up (`direction < 0`) or down
+/// (`direction > 0`) through `sidebar_rows`' flattened order, clamping at
+/// either end rather than wrapping -- same convention as every other list
+/// in this sidebar (`j`/`k` on the article list, the old flat `Up`/`Down`
+/// topic movement this replaces). `topic_index`/`selected_source` are the
+/// two pieces of state that together *are* "which row is selected" (see
+/// the doc comment on `draw_until_quit`'s own copies of them); this
+/// function is the one place that decides where they point next, rewriting
+/// both in place rather than handing back a new pair for the caller to
+/// unpack and reassign itself.
+///
+/// Locates the current row by re-deriving it from `topic_index`/
+/// `selected_source` (rather than tracking a raw row index as the primary
+/// state) specifically so expanding/collapsing a topic elsewhere -- which
+/// changes how many rows exist above/below the cursor -- can never leave a
+/// stale numeric position pointing at the wrong row afterward.
+fn move_sidebar_selection(
+    direction: i32,
+    topics: &[String],
+    sources_by_topic: &HashMap<String, Vec<String>>,
+    expanded_topics: &HashSet<String>,
+    topic_index: &mut usize,
+    selected_source: &mut Option<String>,
+) {
+    let rows = sidebar_rows(topics, sources_by_topic, expanded_topics);
+    if rows.is_empty() {
+        return;
+    }
+
+    let current = rows
+        .iter()
+        .position(|row| match row {
+            SidebarRow::Topic(index) => *index == *topic_index && selected_source.is_none(),
+            SidebarRow::Source(index, name) => {
+                *index == *topic_index && selected_source.as_deref() == Some(*name)
+            }
+        })
+        .unwrap_or(0);
+
+    let next = if direction < 0 {
+        current.saturating_sub(1)
+    } else {
+        (current + 1).min(rows.len() - 1)
+    };
+
+    match rows[next] {
+        SidebarRow::Topic(index) => {
+            *topic_index = index;
+            *selected_source = None;
+        }
+        SidebarRow::Source(index, name) => {
+            *topic_index = index;
+            *selected_source = Some(name.to_string());
+        }
+    }
 }
 
 /// Advances the `a` add-source flow by one keypress: `step` is the state
@@ -1010,17 +1282,22 @@ fn guess_source_name(feed: &feed_rs::model::Feed, url: &str) -> String {
 /// based on `view` -- see the note on `selected_topic` in `draw_until_quit`
 /// for why it keeps showing the last topic selection either way.
 ///
-/// `view` pushes this past clippy's default 7-argument threshold for
-/// `too_many_arguments`. Bundling these into a params struct just to quiet
-/// the lint would be an abstraction with no other caller and no reuse to
-/// justify it -- `render` has exactly one call site (`draw_until_quit`'s
-/// `terminal.draw` closure), so the allow below is the more honest fix.
+/// `view` (and now the sidebar tree's `sources_by_topic`/`expanded_topics`/
+/// `selected_source`) pushes this well past clippy's default 7-argument
+/// threshold for `too_many_arguments`. Bundling these into a params struct
+/// just to quiet the lint would be an abstraction with no other caller and
+/// no reuse to justify it -- `render` has exactly one call site
+/// (`draw_until_quit`'s `terminal.draw` closure), so the allow below is the
+/// more honest fix.
 #[allow(clippy::too_many_arguments)]
 fn render(
     frame: &mut Frame,
     theme: &Theme,
     topics: &[String],
+    sources_by_topic: &HashMap<String, Vec<String>>,
+    expanded_topics: &HashSet<String>,
     selected_topic: Option<&str>,
+    selected_source: Option<&str>,
     articles: &[Article],
     selected_article: Option<usize>,
     mode: &Mode,
@@ -1063,7 +1340,16 @@ fn render(
         .areas(body);
 
     render_banner(frame, theme, banner_area);
-    render_sidebar(frame, theme, sidebar_area, topics, selected_topic);
+    render_sidebar(
+        frame,
+        theme,
+        sidebar_area,
+        topics,
+        sources_by_topic,
+        expanded_topics,
+        selected_topic,
+        selected_source,
+    );
     render_articles(
         frame,
         theme,
@@ -1134,12 +1420,23 @@ fn render_banner(frame: &mut Frame, theme: &Theme, area: Rect) {
 /// two border rows apiece, is always enough content to show in full, so
 /// there's no reason to let them grow. `Constraint::Min(0)` on the topics
 /// list is what then makes *it* absorb every leftover row instead.
+///
+/// The sidebar tree's `sources_by_topic`/`expanded_topics`/
+/// `selected_source` push this to 8 arguments, past clippy's default
+/// 7-argument threshold -- same reasoning as the `#[allow]` on `render`
+/// itself (its one call site, `render`, already threads these straight
+/// through from `draw_until_quit`'s own loop state, so a params struct here
+/// would just be `render`'s params struct again, one layer down).
+#[allow(clippy::too_many_arguments)]
 fn render_sidebar(
     frame: &mut Frame,
     theme: &Theme,
     area: Rect,
     topics: &[String],
+    sources_by_topic: &HashMap<String, Vec<String>>,
+    expanded_topics: &HashSet<String>,
     selected_topic: Option<&str>,
+    selected_source: Option<&str>,
 ) {
     let [topics_area, keys_area, colors_area] = Layout::default()
         .direction(Direction::Vertical)
@@ -1150,22 +1447,52 @@ fn render_sidebar(
         ])
         .areas(area);
 
-    render_topics_section(frame, theme, topics_area, topics, selected_topic);
+    render_topics_section(
+        frame,
+        theme,
+        topics_area,
+        topics,
+        sources_by_topic,
+        expanded_topics,
+        selected_topic,
+        selected_source,
+    );
     render_keys_section(frame, theme, keys_area);
     render_colors_section(frame, theme, colors_area);
 }
 
-/// The sidebar's top section: every topic in `storage`, with
-/// `selected_topic` highlighted using `theme.accent_selected`. Split out of
-/// `render_sidebar` itself once that function grew two more sections below
-/// this one -- keeps each section's rendering logic self-contained instead
-/// of one long function juggling three `Block`s at once.
+/// The sidebar's top section: the expandable topic tree
+/// (`docs/ARCHITECTURE.md`'s "an expandable tree, not a flat list") -- every
+/// topic in `topics`, each prefixed with `▸` (collapsed) or `▾` (expanded,
+/// per `expanded_topics`) when it actually has configured sources to show,
+/// or two blank spaces when it doesn't (nothing to expand into, so no
+/// indicator implying otherwise). Whichever topic is in `expanded_topics`
+/// gets its source names -- from `sources_by_topic`, indented four spaces
+/// -- inserted directly beneath it, and the currently selected row (a
+/// topic, per `selected_topic`, or one of its nested sources, per
+/// `selected_source`) is highlighted using `theme.accent_selected`. Split
+/// out of `render_sidebar` itself once that function grew two more sections
+/// below this one -- keeps each section's rendering logic self-contained
+/// instead of one long function juggling three `Block`s at once.
+///
+/// Walks the exact same `sidebar_rows` flattened order `Up`/`Down`
+/// navigation (`move_sidebar_selection`, in `draw_until_quit`) steps
+/// through -- built from the same function specifically so what's drawn
+/// here and what the cursor actually lands on can never drift apart.
+///
+/// Same 8-argument `#[allow]` as `render_sidebar` just above, for the same
+/// reason -- one call site, all eight already live in the caller's own
+/// state.
+#[allow(clippy::too_many_arguments)]
 fn render_topics_section(
     frame: &mut Frame,
     theme: &Theme,
     area: Rect,
     topics: &[String],
+    sources_by_topic: &HashMap<String, Vec<String>>,
+    expanded_topics: &HashSet<String>,
     selected_topic: Option<&str>,
+    selected_source: Option<&str>,
 ) {
     let block = Block::new()
         .title(" Topics ")
@@ -1173,21 +1500,52 @@ fn render_topics_section(
         .style(Style::new().bg(theme.background).fg(theme.text_primary))
         .border_style(Style::new().fg(theme.panel_border));
 
-    let items: Vec<ListItem> = topics
+    let rows = sidebar_rows(topics, sources_by_topic, expanded_topics);
+
+    // Built alongside `items` below rather than searched for afterward --
+    // each row already knows whether it's the selected one as it's turned
+    // into a `ListItem`, so recording that row's position here (there's
+    // exactly one match, since `topic_index`/`selected_source` can only
+    // ever describe a single row) is simpler than re-deriving it with a
+    // second pass over `rows`.
+    let mut selected_row_index = None;
+    let items: Vec<ListItem> = rows
         .iter()
-        .map(|topic| ListItem::new(topic.as_str()))
+        .enumerate()
+        .map(|(row_index, row)| match *row {
+            SidebarRow::Topic(topic_index) => {
+                let topic = &topics[topic_index];
+                if Some(topic.as_str()) == selected_topic && selected_source.is_none() {
+                    selected_row_index = Some(row_index);
+                }
+
+                let has_sources = sources_by_topic.get(topic).is_some_and(|sources| !sources.is_empty());
+                let indicator = if !has_sources {
+                    "  "
+                } else if expanded_topics.contains(topic) {
+                    "▾ "
+                } else {
+                    "▸ "
+                };
+                ListItem::new(format!("{indicator}{topic}"))
+            }
+            SidebarRow::Source(topic_index, name) => {
+                if Some(topics[topic_index].as_str()) == selected_topic && selected_source == Some(name) {
+                    selected_row_index = Some(row_index);
+                }
+                ListItem::new(format!("    {name}"))
+            }
+        })
         .collect();
 
     // `List` is a `StatefulWidget`: rendering it takes a `&mut ListState`
     // that records which row (if any) is highlighted. `state` is rebuilt
-    // fresh every frame from whatever topic index `draw_until_quit`
-    // currently has selected -- there's no need to persist a `ListState`
-    // across frames when the source of truth (`selected_topic`) already
-    // lives in the caller's loop state.
+    // fresh every frame from whatever row `draw_until_quit` currently has
+    // selected -- there's no need to persist a `ListState` across frames
+    // when the source of truth (`selected_topic`/`selected_source`)
+    // already lives in the caller's loop state.
     let mut state = ListState::default();
-    state.select(
-        selected_topic.and_then(|selected| topics.iter().position(|topic| topic == selected)),
-    );
+    state.select(selected_row_index);
 
     let list = List::new(items).block(block).highlight_style(
         Style::new()
