@@ -3,7 +3,9 @@
 //! Fifth milestone: `S` saved view. `j`/`k` move the article-list
 //! selection, `Up`/`Down`/`Tab` move the topic-sidebar selection (reloading
 //! the article list from `storage` whenever the topic changes), `Enter`
-//! opens the selected article's URL in `$BROWSER`, `x` marks the selected
+//! suspends tuxwire's screen and opens the selected article's URL in `w3m`
+//! (see `open_in_w3m`), falling back to `$BROWSER`/`xdg-open` (see
+//! `open_in_browser`) when `w3m` isn't installed, `x` marks the selected
 //! article skipped, `r` re-fetches the current topic's sources (via
 //! `fetchers::configured_sources`), inserts whatever's new into `storage`,
 //! and reloads the article list. `s` saves the selected article via
@@ -46,7 +48,7 @@ use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 
 /// Keybind hints for the footer, for the normal (not editing-a-note,
 /// not adding-a-source) state while `View::Topic` is showing -- see
@@ -96,6 +98,11 @@ const ADD_SOURCE_URL_HINTS: &str = "Enter fetch & validate · Esc cancel";
 /// name/topic confirm screen (see `AddSourceStep::Confirm`).
 const ADD_SOURCE_CONFIRM_HINTS: &str =
     "Tab switch field · ↑/↓ pick existing topic · Enter save · Esc cancel";
+
+/// The footer hint line shown while the `Mode::Error` popup is open --
+/// there's only one way out of it, unlike the other popups' `Enter`/`Esc`
+/// split, since there's no "confirm" action for a plain error message.
+const ERROR_HINTS: &str = "any key to dismiss";
 
 /// How many characters of a saved article's note to show in the saved
 /// view's list before truncating with `…` -- see `truncate_preview` and
@@ -197,6 +204,17 @@ enum Mode {
     /// per step) keeps `Mode` itself a flat "which popup, if any" tag, and
     /// lets `AddSourceStep` evolve its own fields independently.
     AddSource(AddSourceStep),
+
+    /// A blocking problem `Enter` hit that there's no other popup to show it
+    /// through -- right now that's only "neither `w3m` nor a `$BROWSER`/
+    /// `xdg-open` fallback could open the article" (see `w3m_available`,
+    /// `open_in_w3m`, and `open_in_browser`), checked *before* tuxwire's
+    /// screen is ever suspended, so there's nothing to resume from and this
+    /// is a plain in-place popup like the other two `Mode` variants.
+    /// Dismissed by any keypress, same as pressing `Esc` on the others,
+    /// since there's no follow-up action to take on an error besides
+    /// acknowledging it.
+    Error { message: String },
 }
 
 /// Which step of the `a` add-source flow is currently showing (`ARCHITECTURE.md`
@@ -443,6 +461,15 @@ fn draw_until_quit(
             continue;
         }
 
+        // While the error popup is open, every keypress dismisses it back
+        // to `Mode::Normal` -- there's no text to type or field to navigate,
+        // so unlike the note/add-source popups this doesn't need to inspect
+        // `key.code` at all before deciding what to do with it.
+        if matches!(mode, Mode::Error { .. }) {
+            mode = Mode::Normal;
+            continue;
+        }
+
         // While the note popup is open, every keypress belongs to it --
         // typing "q" or "j" into a note must type that character, not quit
         // or move the article selection. Splitting on `mode` first (rather
@@ -599,18 +626,43 @@ fn draw_until_quit(
                     article_index = 0;
                 }
 
-                // `Enter` opens the selected article's URL in `$BROWSER` --
-                // see `open_in_browser` below for why this can't fail this
-                // loop even if it doesn't work -- and marks the article read,
-                // both on disk via `Storage::mark_read` and in the in-memory
-                // `articles` list, mirroring how `x` and `s` update their
-                // entry directly so the row recolors immediately without a
-                // full reload from `storage`.
+                // `Enter` suspends tuxwire's screen and spawns `w3m`
+                // full-screen against the selected article's URL, resuming
+                // tuxwire exactly where it left off once the user quits w3m
+                // (its own `q` key) -- Roadmap Option A's in-terminal
+                // article reading. `w3m_available` is checked first so a
+                // missing `w3m` doesn't suspend the screen for nothing; see
+                // it and `open_in_w3m` below for why each exists as its own
+                // function. When `w3m` isn't available, this falls back to
+                // `open_in_browser` (the old "open in `$BROWSER`" behavior,
+                // now also trying `xdg-open`) rather than immediately
+                // showing `Mode::Error` -- a missing `w3m` shouldn't stop
+                // someone who still has a working `$BROWSER`/`xdg-open`
+                // from reading the article. `Mode::Error` is reserved for
+                // when *both* paths fail to open anything. Marks the
+                // article read the same way regardless of which path
+                // succeeded -- both on disk via `Storage::mark_read` and in
+                // the in-memory `articles` list, mirroring how `x` and `s`
+                // update their entry directly -- but only once something
+                // has actually opened; the `Mode::Error` branch leaves
+                // `read` untouched, since nothing was.
                 KeyCode::Enter => {
                     if let Some(article) = articles.get_mut(article_index) {
-                        open_in_browser(&article.url);
-                        storage.mark_read(article.id)?;
-                        article.read = true;
+                        if w3m_available() {
+                            open_in_w3m(terminal, &article.url)?;
+                            storage.mark_read(article.id)?;
+                            article.read = true;
+                        } else if open_in_browser(&article.url) {
+                            storage.mark_read(article.id)?;
+                            article.read = true;
+                        } else {
+                            mode = Mode::Error {
+                                message: "could not open article -- w3m \
+                                    isn't installed, and no browser could \
+                                    be launched via $BROWSER or xdg-open."
+                                    .to_string(),
+                            };
+                        }
                     }
                 }
 
@@ -794,34 +846,105 @@ fn draw_until_quit(
     }
 }
 
-/// Opens `url` in the user's `$BROWSER`, per ARCHITECTURE.md's keybind
-/// table. Best-effort and silent: if `$BROWSER` isn't set, or the command
-/// it names doesn't exist, or launching it fails for any other reason,
-/// this simply does nothing rather than propagating an `Err` up through
-/// `draw_until_quit` -- there's no status line yet for surfacing that kind
-/// of message to the user (see ARCHITECTURE.md's footer spec, "keybind
-/// hints + last-refresh timestamp" -- no error slot), and a failed launch
-/// attempt is not a reason to tear down the whole TUI session.
+/// Whether `w3m` exists on `$PATH` -- checked before `Enter` ever suspends
+/// tuxwire's screen, so a missing `w3m` shows `Mode::Error` instead of
+/// leaving/re-entering the alternate screen for nothing. Spawns `w3m
+/// -version` directly (immediately waited on, output discarded) rather than
+/// shelling out to a separate `which`/`command -v` -- that's one real spawn
+/// attempt of the exact program `open_in_w3m` is about to run again, so it
+/// can't disagree with what happens a moment later, and it works the same
+/// on every platform without assuming a `which` binary is present at all.
 ///
-/// `.spawn()` (rather than `.status()` or `.output()`) starts the browser
-/// process and immediately returns without waiting for it to exit --
-/// blocking the draw loop until the user closes their browser would make
-/// `Enter` freeze the whole TUI, which is exactly what opening a link
-/// should *not* do. Stdio is redirected to `/dev/null` so a browser that's
-/// actually a terminal program (some `$BROWSER` values are, e.g. `lynx`)
-/// can't fight with tuxwire over control of the same terminal, which is
-/// still in raw mode / the alternate screen at this point.
-fn open_in_browser(url: &str) {
-    let Ok(browser) = std::env::var("BROWSER") else {
-        return;
-    };
-
-    let _ = std::process::Command::new(browser)
-        .arg(url)
+/// `io::ErrorKind::NotFound` is the specific failure that means "no such
+/// program to exec"; any other error (permission denied, say) is treated as
+/// "available" here, since this check only exists to catch the common "not
+/// installed at all" case -- the real launch attempt in `open_in_w3m` right
+/// after is what actually matters for anything subtler.
+fn w3m_available() -> bool {
+    match std::process::Command::new("w3m")
+        .arg("-version")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .spawn();
+        .status()
+    {
+        Ok(_) => true,
+        Err(err) => err.kind() != std::io::ErrorKind::NotFound,
+    }
+}
+
+/// Suspends tuxwire's screen, runs `w3m` full-screen against `url`, and
+/// resumes tuxwire exactly where it left off once the user quits w3m (its
+/// own `q` key) -- Roadmap Option A's in-terminal article reading. Same
+/// suspend/resume shape as a future `$EDITOR` shell-out for notes would use:
+/// leave the alternate screen, hand the real terminal to the child program,
+/// and restore the screen on return. `ratatui::try_restore`/`try_init` are
+/// the same pair `ratatui::run` itself calls around the whole draw loop
+/// (see `run` above) -- reusing them here is genuinely adapting existing
+/// plumbing to a new target program, not new architecture.
+///
+/// Unlike `open_in_browser` (the fallback below), this calls `.status()`
+/// -- blocking -- instead of `.spawn()`: there's nothing else for
+/// `draw_until_quit` to do while w3m owns the whole terminal, so blocking
+/// until the user quits it is exactly right here, not something to work
+/// around. Caller is expected to have already checked
+/// `w3m_available()`; this doesn't re-check, so a `w3m` that vanishes
+/// between that check and this call surfaces as a plain `Err` propagated up
+/// through `draw_until_quit`'s `?` rather than a friendly `Mode::Error` --
+/// an acceptably narrow gap for that race.
+///
+/// `*terminal = ratatui::try_init()?` (rather than reusing the old
+/// `Terminal`) is what makes the redraw after w3m exits correct: a
+/// `Terminal` diffs each frame against its own record of what's already on
+/// screen, and that record still says "tuxwire's last frame" even after the
+/// alternate screen itself has been left and re-entered (now genuinely
+/// blank) out from under it. A fresh `Terminal` starts with a matching
+/// blank record, so the very next `terminal.draw` call repaints every cell
+/// instead of wrongly believing some are already correct. Re-init happens
+/// *before* `status?` propagates any error from running w3m itself, so a
+/// failed launch still leaves tuxwire's own screen correctly restored
+/// rather than stuck off the alternate screen.
+fn open_in_w3m(terminal: &mut ratatui::DefaultTerminal, url: &str) -> anyhow::Result<()> {
+    ratatui::try_restore()?;
+    let status = std::process::Command::new("w3m").arg(url).status();
+    *terminal = ratatui::try_init()?;
+    status?;
+    Ok(())
+}
+
+/// Falls back to the user's `$BROWSER`, or `xdg-open` if `$BROWSER` isn't
+/// set (or fails to launch), when `w3m_available()` is `false` -- the
+/// pre-`w3m` behavior this restores rather than leaving a missing `w3m` as
+/// a dead end. Returns whether something was actually launched, so the
+/// `Enter` handler above only falls through to `Mode::Error` once *this*
+/// has failed too, not just `w3m`.
+///
+/// `.spawn()` (rather than `.status()`, which `open_in_w3m` uses) starts
+/// the browser process and immediately returns without waiting for it to
+/// exit -- unlike w3m, a `$BROWSER`/`xdg-open` launch doesn't take over
+/// this terminal, so there's nothing to block the draw loop on. Stdio is
+/// redirected to `/dev/null` so a browser that's actually a terminal
+/// program (some `$BROWSER` values are, e.g. `lynx`) can't fight with
+/// tuxwire over control of the same terminal, which is still in raw mode /
+/// the alternate screen at this point.
+fn open_in_browser(url: &str) -> bool {
+    let spawn = |program: &str| {
+        std::process::Command::new(program)
+            .arg(url)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .is_ok()
+    };
+
+    if let Ok(browser) = std::env::var("BROWSER") {
+        if spawn(&browser) {
+            return true;
+        }
+    }
+
+    spawn("xdg-open")
 }
 
 /// Re-fetches every source in `fetchers::configured_sources` filed under
@@ -1364,15 +1487,18 @@ fn render(
     // The note popup, if open, paints on top of everything drawn above --
     // see `render_note_popup` for why it has to come last (after the panes
     // it's meant to sit over) and why it lives inside `body` rather than
-    // the full frame. The add-source popup follows the same reasoning;
-    // `mode` can only ever be *one* of these two at a time (see `Mode`
-    // itself), so at most one of the two `if let`s below actually draws
-    // anything.
+    // the full frame. The add-source and error popups follow the same
+    // reasoning; `mode` can only ever be *one* of these three at a time (see
+    // `Mode` itself), so at most one of the three `if let`s below actually
+    // draws anything.
     if let Mode::EditingNote { text } = mode {
         render_note_popup(frame, theme, body, text);
     }
     if let Mode::AddSource(step) = mode {
         render_add_source_popup(frame, theme, body, step);
+    }
+    if let Mode::Error { message } = mode {
+        render_error_popup(frame, theme, body, message);
     }
 }
 
@@ -1807,6 +1933,7 @@ fn render_footer(frame: &mut Frame, theme: &Theme, area: Rect, mode: &Mode, view
         Mode::EditingNote { .. } => EDITING_NOTE_HINTS,
         Mode::AddSource(AddSourceStep::Url { .. }) => ADD_SOURCE_URL_HINTS,
         Mode::AddSource(AddSourceStep::Confirm { .. }) => ADD_SOURCE_CONFIRM_HINTS,
+        Mode::Error { .. } => ERROR_HINTS,
         Mode::Normal => match view {
             View::Topic => KEYBIND_HINTS,
             View::Saved => SAVED_HINTS,
@@ -1862,6 +1989,32 @@ fn render_note_popup(frame: &mut Frame, theme: &Theme, area: Rect, text: &str) {
     let cursor_x = popup_area.x + 1 + text.chars().count() as u16;
     let cursor_y = popup_area.y + 1;
     frame.set_cursor_position((cursor_x, cursor_y));
+}
+
+/// The error popup: same "bordered box centered over `area`" idea as
+/// `render_note_popup` above, but read-only -- no cursor, dismissed by any
+/// keypress (see the `Mode::Error` check in `draw_until_quit`) rather than
+/// an `Enter`/`Esc` split. `Wrap { trim: true }` lets a longer message (e.g.
+/// `open_in_w3m`'s "not installed" text) flow across multiple lines instead
+/// of running off the popup's fixed width.
+fn render_error_popup(frame: &mut Frame, theme: &Theme, area: Rect, message: &str) {
+    let popup_area = centered_rect(area, 60, 5);
+
+    // Same reasoning as `render_note_popup`'s own `Clear` -- without it the
+    // article list underneath would show through around the popup's text.
+    frame.render_widget(Clear, popup_area);
+
+    let block = Block::new()
+        .title(" Error ")
+        .borders(Borders::ALL)
+        .style(Style::new().bg(theme.background).fg(theme.text_primary))
+        .border_style(Style::new().fg(theme.accent_selected));
+
+    let paragraph = Paragraph::new(message)
+        .style(Style::new().fg(theme.text_primary))
+        .wrap(Wrap { trim: true })
+        .block(block);
+    frame.render_widget(paragraph, popup_area);
 }
 
 /// The add-source popup: same "bordered box centered over `area`" idea as
