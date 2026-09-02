@@ -23,6 +23,7 @@ tuxwire isn't published to crates.io yet, so for now it's build-from-source.
 
 - [Rust and Cargo](https://www.rust-lang.org/tools/install) (stable toolchain)
 - A C compiler toolchain (`build-essential` on Debian/Ubuntu, `base-devel` on Arch, Xcode Command Line Tools on macOS) — needed if the bundled SQLite has to compile from source
+- **Optional:** [w3m](https://w3m.sourceforge.net/) for in-terminal article reading. tuxwire works fine without it — articles just open in your default browser instead — but w3m gives the best experience.
 
 ### Build from source
 
