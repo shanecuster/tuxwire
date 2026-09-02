@@ -4,7 +4,8 @@
 //! selection, `Up`/`Down`/`Tab` move the topic-sidebar selection (reloading
 //! the article list from `storage` whenever the topic changes), `Enter`
 //! suspends tuxwire's screen and opens the selected article's URL in `w3m`
-//! (see `open_in_w3m`), `x` marks the selected
+//! (see `open_in_w3m`), falling back to `$BROWSER`/`xdg-open` (see
+//! `open_in_browser`) when `w3m` isn't installed, `x` marks the selected
 //! article skipped, `r` re-fetches the current topic's sources (via
 //! `fetchers::configured_sources`), inserts whatever's new into `storage`,
 //! and reloads the article list. `s` saves the selected article via
@@ -185,12 +186,14 @@ enum Mode {
     AddSource(AddSourceStep),
 
     /// A blocking problem `Enter` hit that there's no other popup to show it
-    /// through -- right now that's only "`w3m` isn't installed" (see
-    /// `open_in_w3m`), checked *before* tuxwire's screen is ever suspended,
-    /// so there's nothing to resume from and this is a plain in-place popup
-    /// like the other two `Mode` variants. Dismissed by any keypress, same
-    /// as pressing `Esc` on the others, since there's no follow-up action to
-    /// take on an error besides acknowledging it.
+    /// through -- right now that's only "neither `w3m` nor a `$BROWSER`/
+    /// `xdg-open` fallback could open the article" (see `w3m_available`,
+    /// `open_in_w3m`, and `open_in_browser`), checked *before* tuxwire's
+    /// screen is ever suspended, so there's nothing to resume from and this
+    /// is a plain in-place popup like the other two `Mode` variants.
+    /// Dismissed by any keypress, same as pressing `Esc` on the others,
+    /// since there's no follow-up action to take on an error besides
+    /// acknowledging it.
     Error { message: String },
 }
 
@@ -488,27 +491,36 @@ fn draw_until_quit(
                 // full-screen against the selected article's URL, resuming
                 // tuxwire exactly where it left off once the user quits w3m
                 // (its own `q` key) -- Roadmap Option A's in-terminal
-                // article reading, replacing the old "open in `$BROWSER`"
-                // behavior. `w3m_available` is checked first so a missing
-                // `w3m` shows `Mode::Error` instead of suspending the screen
-                // for nothing; see it and `open_in_w3m` below for why each
-                // exists as its own function. Marks the article read the
-                // same way the old `$BROWSER` behavior did -- both on disk
-                // via `Storage::mark_read` and in the in-memory `articles`
-                // list, mirroring how `x` and `s` update their entry
-                // directly -- but only once `w3m` has actually run; the
-                // `Mode::Error` branch leaves `read` untouched, since
-                // nothing was actually opened.
+                // article reading. `w3m_available` is checked first so a
+                // missing `w3m` doesn't suspend the screen for nothing; see
+                // it and `open_in_w3m` below for why each exists as its own
+                // function. When `w3m` isn't available, this falls back to
+                // `open_in_browser` (the old "open in `$BROWSER`" behavior,
+                // now also trying `xdg-open`) rather than immediately
+                // showing `Mode::Error` -- a missing `w3m` shouldn't stop
+                // someone who still has a working `$BROWSER`/`xdg-open`
+                // from reading the article. `Mode::Error` is reserved for
+                // when *both* paths fail to open anything. Marks the
+                // article read the same way regardless of which path
+                // succeeded -- both on disk via `Storage::mark_read` and in
+                // the in-memory `articles` list, mirroring how `x` and `s`
+                // update their entry directly -- but only once something
+                // has actually opened; the `Mode::Error` branch leaves
+                // `read` untouched, since nothing was.
                 KeyCode::Enter => {
                     if let Some(article) = articles.get_mut(article_index) {
                         if w3m_available() {
                             open_in_w3m(terminal, &article.url)?;
                             storage.mark_read(article.id)?;
                             article.read = true;
+                        } else if open_in_browser(&article.url) {
+                            storage.mark_read(article.id)?;
+                            article.read = true;
                         } else {
                             mode = Mode::Error {
-                                message: "w3m not found on $PATH -- install \
-                                    it to read articles in-terminal."
+                                message: "could not open article -- w3m \
+                                    isn't installed, and no browser could \
+                                    be launched via $BROWSER or xdg-open."
                                     .to_string(),
                             };
                         }
@@ -720,11 +732,11 @@ fn w3m_available() -> bool {
 /// (see `run` above) -- reusing them here is genuinely adapting existing
 /// plumbing to a new target program, not new architecture.
 ///
-/// Unlike the old `open_in_browser` (which this replaces), this calls
-/// `.status()` -- blocking -- instead of `.spawn()`: there's nothing else
-/// for `draw_until_quit` to do while w3m owns the whole terminal, so
-/// blocking until the user quits it is exactly right here, not something to
-/// work around. Caller is expected to have already checked
+/// Unlike `open_in_browser` (the fallback below), this calls `.status()`
+/// -- blocking -- instead of `.spawn()`: there's nothing else for
+/// `draw_until_quit` to do while w3m owns the whole terminal, so blocking
+/// until the user quits it is exactly right here, not something to work
+/// around. Caller is expected to have already checked
 /// `w3m_available()`; this doesn't re-check, so a `w3m` that vanishes
 /// between that check and this call surfaces as a plain `Err` propagated up
 /// through `draw_until_quit`'s `?` rather than a friendly `Mode::Error` --
@@ -747,6 +759,41 @@ fn open_in_w3m(terminal: &mut ratatui::DefaultTerminal, url: &str) -> anyhow::Re
     *terminal = ratatui::try_init()?;
     status?;
     Ok(())
+}
+
+/// Falls back to the user's `$BROWSER`, or `xdg-open` if `$BROWSER` isn't
+/// set (or fails to launch), when `w3m_available()` is `false` -- the
+/// pre-`w3m` behavior this restores rather than leaving a missing `w3m` as
+/// a dead end. Returns whether something was actually launched, so the
+/// `Enter` handler above only falls through to `Mode::Error` once *this*
+/// has failed too, not just `w3m`.
+///
+/// `.spawn()` (rather than `.status()`, which `open_in_w3m` uses) starts
+/// the browser process and immediately returns without waiting for it to
+/// exit -- unlike w3m, a `$BROWSER`/`xdg-open` launch doesn't take over
+/// this terminal, so there's nothing to block the draw loop on. Stdio is
+/// redirected to `/dev/null` so a browser that's actually a terminal
+/// program (some `$BROWSER` values are, e.g. `lynx`) can't fight with
+/// tuxwire over control of the same terminal, which is still in raw mode /
+/// the alternate screen at this point.
+fn open_in_browser(url: &str) -> bool {
+    let spawn = |program: &str| {
+        std::process::Command::new(program)
+            .arg(url)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .is_ok()
+    };
+
+    if let Ok(browser) = std::env::var("BROWSER") {
+        if spawn(&browser) {
+            return true;
+        }
+    }
+
+    spawn("xdg-open")
 }
 
 /// Re-fetches every source in `fetchers::configured_sources` filed under

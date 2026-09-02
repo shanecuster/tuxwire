@@ -139,7 +139,9 @@ underneath.
 | Key       | Action                          |
 |-----------|----------------------------------|
 | `j` / `k` | navigate list                   |
-| `Enter`   | open article in `$BROWSER`      |
+| `Right` / `l` | expand selected topic (show its sources) |
+| `Left` / `h`  | collapse selected topic          |
+| `Enter`   | open article in `w3m` (falls back to `$BROWSER`/`xdg-open` if `w3m` isn't installed) |
 | `x`       | skip article (recolors, no keyword-learning behind it — see below) |
 | `s`       | save article (auto-marks as read) |
 | `n`       | edit note on a saved article     |
