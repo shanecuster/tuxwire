@@ -58,6 +58,7 @@
 //! navigation over the (still-filtered) results, `Esc` drops it and
 //! restores whichever view's own unfiltered list was showing.
 
+use crate::export::{self, ExportConfig};
 use crate::fetchers::{self, ConfiguredSource, Fetcher};
 use crate::models::Article;
 use crate::storage::Storage;
@@ -126,6 +127,8 @@ const ADD_SOURCE_CONFIRM_HINTS: &str =
 /// The footer hint line shown while the `Mode::Error` popup is open --
 /// there's only one way out of it, unlike the other popups' `Enter`/`Esc`
 /// split, since there's no "confirm" action for a plain error message.
+/// Also covers the export result popup (see `Mode::Error`'s `title`
+/// field) -- both are dismiss-on-any-key, so they share this line too.
 const ERROR_HINTS: &str = "any key to dismiss";
 
 /// The footer hint line shown while `Mode::Searching` is open -- every
@@ -169,7 +172,13 @@ const NOTE_PREVIEW_CHARS: usize = 45;
 /// not something scoped to whichever list happens to be on screen, so it
 /// belongs in this always-visible reference rather than a footer hint that
 /// only shows up in one particular view.
-const KEY_HINTS: [(&str, &str); 10] = [
+///
+/// `E` (Markdown export -- `docs/ARCHITECTURE.md`'s "Markdown Export")
+/// joins them for the same reason: a whole-app action (regenerating one
+/// combined file from every currently-saved article, not something
+/// scoped to a single row), even though it only actually does anything
+/// while `View::Saved` is showing.
+const KEY_HINTS: [(&str, &str); 11] = [
     ("s", "save"),
     ("x", "close"),
     ("n", "note"),
@@ -178,6 +187,7 @@ const KEY_HINTS: [(&str, &str); 10] = [
     ("/", "search"),
     ("r", "refresh"),
     ("a", "add source"),
+    ("E", "export all saved"),
     ("→/l", "expand topic"),
     ("←/h", "collapse topic"),
 ];
@@ -247,16 +257,23 @@ enum Mode {
     /// lets `AddSourceStep` evolve its own fields independently.
     AddSource(AddSourceStep),
 
-    /// A blocking problem `Enter` hit that there's no other popup to show it
-    /// through -- right now that's only "neither `w3m` nor a `$BROWSER`/
-    /// `xdg-open` fallback could open the article" (see `w3m_available`,
-    /// `open_in_w3m`, and `open_in_browser`), checked *before* tuxwire's
-    /// screen is ever suspended, so there's nothing to resume from and this
-    /// is a plain in-place popup like the other two `Mode` variants.
-    /// Dismissed by any keypress, same as pressing `Esc` on the others,
-    /// since there's no follow-up action to take on an error besides
-    /// acknowledging it.
-    Error { message: String },
+    /// A blocking problem, or a one-off result, that there's no other popup
+    /// to show through -- right now that covers "neither `w3m` nor a
+    /// `$BROWSER`/`xdg-open` fallback could open the article" (see
+    /// `w3m_available`, `open_in_w3m`, and `open_in_browser`) *and* the
+    /// outcome of an `E` export (success or failure -- see the
+    /// `KeyCode::Char('E')` arm in `draw_until_quit`). Dismissed by any
+    /// keypress, same as pressing `Esc` on the others, since there's no
+    /// follow-up action to take on either an error or a one-shot result
+    /// besides acknowledging it.
+    ///
+    /// `title` distinguishes the two uses in the popup's own border (`
+    /// Error `/` Export `) without needing a second, near-identical `Mode`
+    /// variant just to say "same read-only dismiss-on-any-key popup, but
+    /// with different heading text" -- a `&'static str` rather than
+    /// `String` since every title used is a fixed literal chosen at the
+    /// call site, never built at runtime.
+    Error { title: &'static str, message: String },
 
     /// The `/` search input is open -- `text` is the live query buffer,
     /// re-run against `Storage::search_articles` on every keystroke so the
@@ -789,6 +806,7 @@ fn draw_until_quit(
                             article.read = true;
                         } else {
                             mode = Mode::Error {
+                                title: "Error",
                                 message: "could not open article -- w3m \
                                     isn't installed, and no browser could \
                                     be launched via $BROWSER or xdg-open."
@@ -959,6 +977,40 @@ fn draw_until_quit(
                 KeyCode::Char('/') => {
                     mode = Mode::Searching {
                         text: search.clone().unwrap_or_default(),
+                    };
+                }
+
+                // `E` exports every saved article at once into one
+                // combined `saved-articles.md` (`docs/ARCHITECTURE.md`'s
+                // "Markdown Export") -- no popup, no per-article choice:
+                // there's nothing left to ask once "export" always means
+                // "regenerate the whole file from the current saved set."
+                // Guarded to `View::Saved` -- purely a "this is where the
+                // export action lives" placement, matching where `s`/`n`
+                // operate on saved-article state, even though the export
+                // itself (via `Storage::saved_articles`) doesn't depend on
+                // whatever `articles`/`article_index` currently holds.
+                //
+                // `ExportConfig::load` re-reads `export.toml` fresh on
+                // every press rather than being loaded once up front,
+                // matching `Theme::load`/`load_sources`'s own "cheap
+                // enough to just re-read" reasoning -- an edit to
+                // `export.toml` while tuxwire is already running takes
+                // effect on the very next `E` with no restart needed.
+                KeyCode::Char('E') if view == View::Saved => {
+                    mode = match storage.saved_articles().and_then(|saved| {
+                        let config = ExportConfig::load()?;
+                        let path = export::export_saved_articles(&config, &saved)?;
+                        Ok((saved.len(), path))
+                    }) {
+                        Ok((count, path)) => Mode::Error {
+                            title: "Export",
+                            message: format!("Exported {count} saved article(s) to {}", path.display()),
+                        },
+                        Err(err) => Mode::Error {
+                            title: "Error",
+                            message: format!("export failed: {err:#}"),
+                        },
                     };
                 }
 
@@ -1721,8 +1773,8 @@ fn render(
     if let Mode::AddSource(step) = mode {
         render_add_source_popup(frame, theme, body, step);
     }
-    if let Mode::Error { message } = mode {
-        render_error_popup(frame, theme, body, message);
+    if let Mode::Error { title, message } = mode {
+        render_error_popup(frame, theme, body, title, message);
     }
 }
 
@@ -2347,13 +2399,16 @@ fn render_note_popup(frame: &mut Frame, theme: &Theme, area: Rect, text: &str) {
     frame.set_cursor_position((cursor_x, cursor_y));
 }
 
-/// The error popup: same "bordered box centered over `area`" idea as
+/// The error/result popup: same "bordered box centered over `area`" idea as
 /// `render_note_popup` above, but read-only -- no cursor, dismissed by any
 /// keypress (see the `Mode::Error` check in `draw_until_quit`) rather than
 /// an `Enter`/`Esc` split. `Wrap { trim: true }` lets a longer message (e.g.
-/// `open_in_w3m`'s "not installed" text) flow across multiple lines instead
-/// of running off the popup's fixed width.
-fn render_error_popup(frame: &mut Frame, theme: &Theme, area: Rect, message: &str) {
+/// `open_in_w3m`'s "not installed" text, or an exported file's full path)
+/// flow across multiple lines instead of running off the popup's fixed
+/// width. `title` is `Mode::Error`'s own field, passed straight through --
+/// `" Error "` for a genuine failure, `" Export "` for a successful `E`
+/// export, so the border itself tells the two apart at a glance.
+fn render_error_popup(frame: &mut Frame, theme: &Theme, area: Rect, title: &str, message: &str) {
     let popup_area = centered_rect(area, 60, 5);
 
     // Same reasoning as `render_note_popup`'s own `Clear` -- without it the
@@ -2361,7 +2416,7 @@ fn render_error_popup(frame: &mut Frame, theme: &Theme, area: Rect, message: &st
     frame.render_widget(Clear, popup_area);
 
     let block = Block::new()
-        .title(" Error ")
+        .title(format!(" {title} "))
         .borders(Borders::ALL)
         .style(Style::new().bg(theme.background).fg(theme.text_primary))
         .border_style(Style::new().fg(theme.accent_selected));

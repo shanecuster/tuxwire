@@ -19,6 +19,7 @@
 //! `foo::` path other code uses to reach items inside it. Order doesn't
 //! matter here — these five declarations just make each corresponding
 //! file part of the compiled program.
+mod export;
 mod fetchers;
 mod models;
 mod scoring;

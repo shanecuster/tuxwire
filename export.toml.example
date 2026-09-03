@@ -1,0 +1,19 @@
+# tuxwire export — docs/ARCHITECTURE.md § Markdown Export.
+#
+# Copy this file to ~/.config/tuxwire/export.toml and edit freely -- the
+# `E` keybind (Saved view) always writes here, never prompts interactively,
+# same "config-driven, no per-export prompt" approach as sources.toml and
+# theme.toml.
+#
+# This exact file is also compiled directly into the tuxwire binary
+# (src/export.rs) and is written out to ~/.config/tuxwire/export.toml the
+# first time an export runs and finds no config there yet, so a first `E`
+# press always has somewhere real to write to.
+#
+# rclone isn't set up yet, so this isn't pointed at a synced folder for
+# now -- repoint at one later by editing this single line once it is.
+# `~` is expanded to $HOME; the directory is created automatically if it
+# doesn't exist yet.
+
+[export]
+path = "~/tuxwire-notes/"

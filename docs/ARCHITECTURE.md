@@ -167,6 +167,7 @@ underneath.
 | `y`       | view history (every article ever fetched) |
 | `/`       | search titles/notes across the current view |
 | `a`       | add a new source                  |
+| `E`       | export every saved article into one combined Markdown file (Saved view only; regenerates the file fresh each press) |
 | `q`       | quit                             |
 
 ---
@@ -400,8 +401,24 @@ Exports saved articles as Markdown files, fitting directly into the
 existing Hugo/rclone blog pipeline — "things I want to try" can become a
 ready-made post skeleton.
 
-- Triggered by a keybind from the Saved view (e.g. `E`)
-- One article → one `.md` file, or a "export all saved" batch mode
+- Triggered by the `E` keybind from the Saved view — no-op from
+  `View::Topic`/`View::History`, since there's no guarantee the selected
+  row there is even a saved article, and there's nothing selection-
+  dependent about the export itself anyway (see below).
+- **One combined file, not one file per article.** `E` writes *every*
+  saved article into a single `saved-articles.md`, each article's block
+  separated from the next by a Markdown thematic break (`---` on its own
+  line). Simpler than a one-file-per-article design (no per-title
+  filename to sanitize or disambiguate, no directory listing to manage)
+  and a better fit for the actual use case — skimming or grepping the
+  whole saved collection at once, or feeding it into the blog pipeline as
+  one document, rather than opening files one at a time.
+- **Regenerates the file from scratch every press, never appends.**
+  `E` always re-derives the whole file from the current saved set
+  (`Storage::saved_articles`), so it can never drift out of sync with an
+  article being un-saved, re-noted, or removed since the last export —
+  there's no "what's new since last time" delta to track, just "write
+  what's saved right now."
 - **Must include a link back to the original article** — the note is
   context, not a replacement for the source. Uses the real `saved_at`
   (and `noted_at`, if the note was added/edited after saving) timestamps
@@ -412,11 +429,46 @@ ready-made post skeleton.
 Source: [r/linux](https://reddit.com/r/linux/...) — saved 2026-08-12, noted 2026-08-14
 
 > your note goes here, verbatim from the `note` column
+
+---
+
+## Another saved article
+Source: [Phoronix](https://phoronix.com/...) — saved 2026-08-10
 ```
 
-- Output location configurable in `theme.toml` or a new `export.toml` —
-  likely defaulting to a folder that rclone already watches, so saved
-  articles can flow into the blog pipeline with no extra manual step
+  (A saved article with no note simply has no `>` line at all — nothing
+  to quote.) Every subsequent article's block is separated from the one
+  before it by a `---` on its own line, so the combined file still reads
+  as a sequence of distinct entries rather than one run-on document.
+
+- **Output location: config-driven, no per-export prompt.** Consistent
+  with the rest of the app (`sources.toml`, `theme.toml` — nothing else
+  interactively prompts for a path), export writes to a default directory
+  set in a new `export.toml`:
+
+```toml
+[export]
+path = "~/tuxwire-notes/"
+```
+
+  `~/tuxwire-notes/` (i.e. inside the person's own home directory, not
+  `/home/` directly — that top-level path needs root to write to on most
+  systems) is the shipped default. rclone isn't set up yet, so this isn't
+  pointed at a synced folder for now — easy to repoint at one later by
+  editing this single line once rclone is in place. Fully user-editable
+  by design: anyone who wants a different location just edits this file,
+  same as customizing sources or theme. No interactive file-save dialog
+  — not a natural TUI pattern and unnecessary for something that doesn't
+  change often. Documented in the README's Configuration section so it's
+  discoverable without reading the source.
+- **Filename is fixed, not derived from any article title** — always
+  `saved-articles.md` under that directory. Combining every saved article
+  into one file removes the need to sanitize a title for filesystem
+  safety or disambiguate two articles that would otherwise collide on the
+  same name — problems that only existed in the one-file-per-article
+  design this replaced.
+- A saved-without-a-note article omits the `>` blockquote entirely rather
+  than emitting an empty one — nothing to quote.
 
 ### Notes Retrieval & Search
 
@@ -489,31 +541,13 @@ search since it's proactive rather than something the person has to
 remember to go look for). Genuinely novel — most readers, terminal or
 GUI, treat "saved" as a one-way archive. Worth building once retrieval
 and search themselves are solid and have seen real use.
-GUI, treat "saved" as a one-way archive. Worth building once retrieval
-and search themselves are solid and have seen real use.
 
-### Offline Article Caching
-
-Solves spotty cell service at work — read saved (or even just unread)
-articles without a live connection.
-
-- Requires a new `content` column on `articles` (full article body/text,
-  not just title+link) — populated at fetch time, or on-demand when an
-  article is saved
-- Likely needs an HTML-to-text/markdown extraction step (a crate like
-  `readability` or similar) rather than storing raw HTML, since raw HTML
-  won't render well in a ratatui `Paragraph`
-- Cached content should probably be pruned for unsaved articles after
-  some age, but **never pruned for saved articles** — same
-  permanence rule as the saved state itself
-- Worth deciding later: cache everything on fetch (heavier on storage,
-  always available) vs. cache only on save/open (lighter, but requires
-  connectivity at least once)
-
-### Stats View
+### Stats View — priority near-term feature
 
 A lightweight self-hosted-analytics-style view, in the same spirit as the
-GoatCounter dashboards already tracking the blogs.
+GoatCounter dashboards and the homelab dashboard already tracking the
+blogs and desktop stats. Explicitly the next build priority among the
+remaining near-term features.
 
 - Articles read per day/week, broken down by topic and by source
 - Top sources by volume, most-skipped articles/topics (simple counts —
@@ -521,6 +555,53 @@ GoatCounter dashboards already tracking the blogs.
 - Could be a dedicated ratatui view with simple bar/sparkline widgets, or
   even just a formatted text summary to start — doesn't need to be
   visually elaborate to be useful
+
+### Offline Article Caching — cut, not building this
+
+Considered for solving spotty cell service at work, but decided against —
+same category of cut as ntfy phone-capture and in-app highlighting: real
+complexity (a new `content` column, an HTML-to-text extraction step,
+pruning policy for cached-but-unsaved content) for a problem that turned
+out not to be worth solving this way. Not pursuing.
+
+---
+
+## Distribution Roadmap — the next chapter, not the current one
+
+**Explicitly not started.** We're still in the build phase — the app
+should be in a clean, polished, feature-complete state we're happy with
+before any packaging work begins, so there's room to tweak and change
+things without also having to update a published package every time.
+This section exists so the plan doesn't rely on memory once that time
+comes, not as a current task.
+
+**Tier 1 — Linux package managers (approachable, well-trodden path):**
+- **AUR** — the natural first target, given the desktop is CachyOS/Arch-
+  based already. A `PKGBUILD` describing fetch/build/install for a Rust
+  binary is a short, well-documented pattern.
+- **COPR** (Fedora) — similar effort tier, RPM `.spec` file instead of a
+  `PKGBUILD`. Less familiar syntax, same shape of task.
+- Further out, similarly scoped: a Nix flake, a Homebrew tap.
+
+**Tier 2 — Termux packages:** getting `tuxwire` into `termux-packages`
+(a build-recipe PR) so `pkg install tuxwire` works directly, rather than
+requiring a manual clone-and-build on Android.
+
+**Tier 3 — native Android app (F-Droid):** a genuinely separate project,
+not a packaging step — extracting fetchers/storage/scoring into a shared
+Rust core (`uniffi-rs`) and building a real Kotlin/Jetpack Compose UI
+around it, since F-Droid distributes actual Android app packages (APK,
+manifest, Activity), not CLI binaries running inside Termux. Realistically
+weeks-to-months of casual evening work, several genuinely new skill areas
+(Kotlin, Compose, Android's build toolchain, cross-compiling via
+`uniffi-rs`). A long-term "someday" chapter, not a near-term target.
+
+**Packaging niceties already decided, ready for whenever Tier 1 starts:**
+`w3m` should be listed as an `optdepends` (AUR) / `Recommends` (COPR) —
+optional, not required, surfaced to the person at install time by the
+package manager itself rather than an in-app first-run popup (deliberately
+not building the latter — anyone capable of building this from source can
+read one line in the README about it, same reasoning as the cuts above).
 
 ---
 

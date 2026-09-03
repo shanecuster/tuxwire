@@ -64,10 +64,33 @@ tuxwire
 | `n`     | Add or view a note on a saved article     |
 | `Enter` | Confirm and save a note                   |
 | `Esc`   | Discard a note in progress                |
+| `S`     | View saved articles                       |
+| `E`     | Export every saved article into one combined Markdown file (Saved view only) — regenerates the file fresh each time |
 
 ## Configuration
 
-> _TODO: document config file location and feed source format once finalized._
+tuxwire's config files live in `~/.config/tuxwire/` (a fresh install writes
+each one out with a working default the first time it's needed, so there's
+always something real to edit rather than an empty file):
+
+- **`sources.toml`** — your feed list. Every `[[source]]` needs a `name`, a
+  `type` (`rss` for anything with an RSS/Atom feed), a `url`, and exactly
+  one `topic` — the sidebar category it shows up under. New topics are just
+  a new `topic = "..."` value; nothing else to register. Can also be edited
+  in-app with the `a` keybind.
+- **`theme.toml`** — every color the UI uses, as `#rrggbb` hex. Ships with
+  Catppuccin Macchiato; edit any value to reshade the whole app, no rebuild
+  needed.
+- **`export.toml`** — the directory the `E` keybind (Saved view) writes
+  `saved-articles.md` into (one combined file, regenerated fresh every
+  time you press `E`):
+  ```toml
+  [export]
+  path = "~/tuxwire-notes/"
+  ```
+  `~` is expanded to your home directory, and the folder is created
+  automatically if it doesn't exist. Point this at an rclone-synced folder
+  (or anywhere else) to feed exported notes straight into another pipeline.
 
 ## Roadmap
 
