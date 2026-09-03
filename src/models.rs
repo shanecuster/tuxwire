@@ -107,6 +107,25 @@ pub struct Article {
     /// accidentally use a "null" note as if it were text, the way you
     /// could with `null` in many other languages.
     pub note: Option<String>,
+
+    /// When this article was saved -- i.e. when `s` was pressed, per
+    /// `Storage::save_article`. Distinct from `timestamp` above: that's
+    /// the article's *publish* date according to its source feed, while
+    /// this is when the person using tuxwire actually chose to keep it.
+    /// `None` for an article that was never saved, or one that was saved
+    /// before tuxwire started tracking this (migration 003) -- both are
+    /// real, honest states, not bugs, which is why this is `Option`
+    /// rather than defaulting to some placeholder date.
+    pub saved_at: Option<DateTime<Utc>>,
+
+    /// When `note` was last set to a non-empty value, via `n` +
+    /// `Storage::update_note`. Distinct from `saved_at`: a note can be
+    /// written or edited well after the article was originally saved, so
+    /// these two dates genuinely diverge in practice. Clears back to
+    /// `None` whenever the note itself is cleared back to empty -- "no
+    /// note" and "no note date" are kept consistent with each other by
+    /// `Storage::update_note`, not by this struct itself.
+    pub noted_at: Option<DateTime<Utc>>,
 }
 
 impl Article {
@@ -116,7 +135,8 @@ impl Article {
     /// A fetcher only knows about the four things a feed entry actually
     /// tells it — title, url, timestamp, and (via which fetcher/source
     /// config called it) the source name and topic. Everything else
-    /// (`read`, `skipped`, `saved`, `note`) has an obvious default for a
+    /// (`read`, `skipped`, `saved`, `note`, `saved_at`, `noted_at`) has an
+    /// obvious default for a
     /// brand new article, and `id` doesn't exist yet because SQLite
     /// assigns it on insert (that's what `INTEGER PRIMARY KEY` does — the
     /// database, not our code, is the source of truth for IDs). We use
@@ -145,6 +165,8 @@ impl Article {
             skipped: false,
             saved: false,
             note: None,
+            saved_at: None,
+            noted_at: None,
         }
     }
 }

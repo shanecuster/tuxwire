@@ -37,6 +37,26 @@
 //! `move_sidebar_selection`); landing on a source row filters the article
 //! list to just that source (`Storage::articles_by_topic_and_source`, via
 //! `load_articles_for_selection`) instead of the whole topic.
+//!
+//! Notes retrieval & search (`docs/ARCHITECTURE.md`'s "Notes Retrieval &
+//! Search"): `View::Saved`'s meta line now shows `saved_at` (falling back
+//! to the article's publish `timestamp` for a pre-migration-003 row that
+//! predates tuxwire tracking `saved_at` at all) plus `noted_at` when it
+//! differs meaningfully from `saved_at` -- see `saved_meta_line`. `y` adds
+//! a third main view, `View::History`, over `Storage::all_articles` --
+//! every article ever fetched, regardless of read/skipped/saved state --
+//! reusing the exact same list rendering and navigation `View::Saved`
+//! already has (`articles_for_view` is now the one place every
+//! view-switching keybind goes to load a view's own list). `/` opens
+//! `Mode::Searching`, a live substring filter (`Storage::search_articles`,
+//! plain `LIKE`) across every article's title and note -- unscoped by
+//! `view`, since the point is finding something regardless of which list
+//! happens to be open -- re-run on every keystroke and rendered as an
+//! overlay on the article pane's own title/border (`SearchStatus`) rather
+//! than a popup, so the live-filtered results stay visible underneath
+//! while typing; `Enter` commits the query and returns to ordinary
+//! navigation over the (still-filtered) results, `Esc` drops it and
+//! restores whichever view's own unfiltered list was showing.
 
 use crate::fetchers::{self, ConfiguredSource, Fetcher};
 use crate::models::Article;
@@ -68,18 +88,22 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragra
 /// `Enter`) and `q` to quit.
 const KEYBIND_HINTS: &str = "j/k move · ↑/↓/Tab topic · Enter open · q quit";
 
-/// The footer hint line shown while `View::Saved` is showing (and no
-/// popup is open). Deliberately drops `↑/↓ topic` and `r refresh` --
-/// both are disabled in this view (see the guards on their match arms in
-/// `draw_until_quit`), since neither a topic-sidebar selection nor "refetch
-/// this topic's sources" means anything once the list is "every saved
-/// article across every topic" instead of one topic's.
+/// The footer hint line shown while `View::Saved` or `View::History` is
+/// showing (and no popup is open) -- both non-`Topic` views share this one
+/// line, since both disable exactly the same things for exactly the same
+/// reason. Deliberately drops `↑/↓ topic` and `r refresh` -- both are
+/// disabled in these views (see the guards on their match arms in
+/// `draw_until_quit`), since neither a topic-sidebar selection nor
+/// "refetch this topic's sources" means anything once the list is "every
+/// saved article across every topic" or "every article ever fetched"
+/// instead of one topic's.
 ///
 /// Also drops `x`/`s`/`n`/`a`, same reasoning as `KEYBIND_HINTS` above --
-/// covered by the sidebar's always-visible Keys section instead. `S` stays
-/// off this line for the same reason (it's in Keys too), but `Esc`/`Tab`
-/// remain: they're this view's *own* way back to `View::Topic`, which the
-/// Keys section (a flat list of the six main-flow keys) doesn't document.
+/// covered by the sidebar's always-visible Keys section instead. `S`/`y`
+/// stay off this line for the same reason (they're in Keys too), but
+/// `Esc`/`Tab` remain: they're these views' *own* way back to
+/// `View::Topic`, which the Keys section (a flat list of the main-flow
+/// keys) doesn't document.
 const SAVED_HINTS: &str = "j/k move · Enter open · Esc/Tab back · q quit";
 
 /// The footer hint line shown while the note popup (`Mode::EditingNote`)
@@ -104,6 +128,15 @@ const ADD_SOURCE_CONFIRM_HINTS: &str =
 /// split, since there's no "confirm" action for a plain error message.
 const ERROR_HINTS: &str = "any key to dismiss";
 
+/// The footer hint line shown while `Mode::Searching` is open -- every
+/// other keybind is suspended while typing a search query, same reasoning
+/// as `EDITING_NOTE_HINTS`. "Enter confirm" leaves the filtered results
+/// showing and returns to ordinary navigation over them (so `j`/`k`/
+/// `Enter`/`s`/`x`/`n` all work against the matches, same as any other
+/// view); "Esc cancel" drops the query entirely and restores whichever
+/// view's own unfiltered list was showing before `/` was pressed.
+const SEARCH_HINTS: &str = "type to filter · Enter confirm · Esc cancel";
+
 /// How many characters of a saved article's note to show in the saved
 /// view's list before truncating with `…` -- see `truncate_preview` and
 /// its use in `article_item` below. The saved view is a list of many
@@ -114,29 +147,35 @@ const ERROR_HINTS: &str = "any key to dismiss";
 const NOTE_PREVIEW_CHARS: usize = 45;
 
 /// The sidebar's "Keys" reference section (`docs/ARCHITECTURE.md` § 3. TUI)
-/// -- the six main-flow keybinds, as `(key, action)` pairs, rendered one per
+/// -- the main-flow keybinds, as `(key, action)` pairs, rendered one per
 /// line by `render_keys_section` below. A `const` array (rather than
 /// building this `Vec` fresh inside `render_keys_section` every frame) since
 /// it never changes at runtime -- there's no reason to reallocate the same
-/// six pairs on every single draw.
+/// pairs on every single draw.
 ///
 /// This exists specifically because the person building tuxwire has no
 /// prior Rust/TUI-app experience and shouldn't have to memorize the keybind
 /// table before the app is usable -- the reference lives on screen instead,
-/// in both `View::Topic` and `View::Saved` (see `render_sidebar`, which
-/// doesn't take a `View` at all -- these two sections render identically
-/// regardless of which one is showing).
+/// in every `View` (see `render_sidebar`, which doesn't take a `View` at
+/// all -- this section renders identically regardless of which one is
+/// showing).
 ///
 /// `→`/`l` and `←`/`h` (expanding/collapsing a topic in the sidebar tree,
 /// see `SidebarRow`/`sidebar_rows` below) live here rather than in
 /// `KEYBIND_HINTS` -- they're sidebar navigation, not article-list
 /// navigation, and per ARCHITECTURE.md's keybind table this is their
-/// documented home.
-const KEY_HINTS: [(&str, &str); 8] = [
+/// documented home. `y` (history) and `/` (search) join them here for the
+/// same reason `S` (saved view) already did: a whole-app view/mode switch,
+/// not something scoped to whichever list happens to be on screen, so it
+/// belongs in this always-visible reference rather than a footer hint that
+/// only shows up in one particular view.
+const KEY_HINTS: [(&str, &str); 10] = [
     ("s", "save"),
     ("x", "close"),
     ("n", "note"),
     ("S", "saved view"),
+    ("y", "history"),
+    ("/", "search"),
     ("r", "refresh"),
     ("a", "add source"),
     ("→/l", "expand topic"),
@@ -164,22 +203,25 @@ const BANNER: [&str; 6] = [
 ];
 
 /// Which main view is currently showing -- the ordinary per-topic article
-/// list (`Topic`, the default) or every saved article across every topic
-/// (`Saved`, entered/exited with `S`). This is a *separate* piece of state
-/// from `Mode` below rather than another `Mode` variant: `Mode` tracks
-/// whether the note popup is open, which can happen while looking at
-/// *either* view, so folding them into one enum would need a variant for
-/// every combination (`Mode::EditingNote` while saved, while not, ...)
-/// instead of the two independent axes this actually is.
+/// list (`Topic`, the default), every saved article across every topic
+/// (`Saved`, entered/exited with `S`), or every article tuxwire has ever
+/// fetched regardless of state (`History`, entered/exited with `y`). This
+/// is a *separate* piece of state from `Mode` below rather than another
+/// `Mode` variant: `Mode` tracks whether the note popup (or the search
+/// input, or the add-source flow) is open, which can happen while looking
+/// at *any* of these views, so folding them into one enum would need a
+/// variant for every combination instead of the two independent axes this
+/// actually is.
 ///
 /// `PartialEq` is derived so match guards elsewhere in this file can write
-/// plain `view == View::Topic` / `view == View::Saved` comparisons; `Clone,
-/// Copy` because a `View` is just a two-variant tag with no data of its
+/// plain `view == View::Topic` / `view != View::Topic` comparisons; `Clone,
+/// Copy` because a `View` is just a three-variant tag with no data of its
 /// own, cheap to copy by value rather than worth ever borrowing.
 #[derive(Clone, Copy, PartialEq)]
 enum View {
     Topic,
     Saved,
+    History,
 }
 
 /// Which "screen" the draw loop is currently in. `Normal` is the ordinary
@@ -215,6 +257,22 @@ enum Mode {
     /// since there's no follow-up action to take on an error besides
     /// acknowledging it.
     Error { message: String },
+
+    /// The `/` search input is open -- `text` is the live query buffer,
+    /// re-run against `Storage::search_articles` on every keystroke so the
+    /// list underneath updates as the person types (ARCHITECTURE.md's
+    /// "Live-filters whichever view is currently open... as the person
+    /// types"). Same shape as `EditingNote` above and for the same reason:
+    /// there's no valid moment with a live query buffer but no search
+    /// active, or vice versa, so the buffer lives *inside* this variant
+    /// rather than as a separate `bool` + `String` pair that could drift
+    /// out of sync.
+    ///
+    /// Distinct from the *committed* search filter (`draw_until_quit`'s own
+    /// `search: Option<String>`, set once `Enter` confirms this): that's
+    /// what stays active while browsing the filtered results afterward,
+    /// this is only the moment of actively typing the query.
+    Searching { text: String },
 }
 
 /// Which step of the `a` add-source flow is currently showing (`ARCHITECTURE.md`
@@ -356,6 +414,17 @@ fn draw_until_quit(
     let mut expanded_topics: HashSet<String> = HashSet::new();
     let mut selected_source: Option<String> = None;
 
+    // The *committed* search filter, if any -- `Some(query)` once `/` +
+    // typing + `Enter` has confirmed one, `None` otherwise. Distinct from
+    // `Mode::Searching`'s own live buffer (see that variant's doc comment):
+    // this is what stays active while browsing the filtered results
+    // afterward, not the moment of typing itself. Read by `render` (via
+    // `SearchStatus`) purely for display, and by the `S`/`y`/`Tab`/`Esc`
+    // view-switching arms below, which all drop it back to `None` --
+    // switching views means "go look at that view's own list," not "keep
+    // filtering it."
+    let mut search: Option<String> = None;
+
     loop {
         // The sidebar only ever reflects the current *topic* selection,
         // even while `view` is `View::Saved` -- there's no per-row
@@ -383,6 +452,7 @@ fn draw_until_quit(
                 selected_article,
                 &mode,
                 view,
+                search.as_deref(),
             )
         })?;
 
@@ -467,6 +537,68 @@ fn draw_until_quit(
         // `key.code` at all before deciding what to do with it.
         if matches!(mode, Mode::Error { .. }) {
             mode = Mode::Normal;
+            continue;
+        }
+
+        // While the search input is open, every keypress belongs to it,
+        // same isolation reasoning as the note popup just below -- typing
+        // "q" or "j" into a search query must type that character, not
+        // quit or move the article selection. Checked (and `continue`d)
+        // before the `Mode::EditingNote` let-else right after, so a
+        // keypress meant for search never falls through into either that
+        // popup's handling or ordinary navigation.
+        if let Mode::Searching { text } = &mut mode {
+            match key.code {
+                // `Esc` drops the query entirely (not just clears the
+                // buffer) and restores whichever view's own unfiltered
+                // list was showing before `/` was pressed --
+                // ARCHITECTURE.md's "Esc clears the search and restores
+                // the full list."
+                KeyCode::Esc => {
+                    search = None;
+                    mode = Mode::Normal;
+                    articles = articles_for_view(storage, view, topics, topic_index, selected_source.as_deref())?;
+                    article_index = 0;
+                }
+
+                // `Enter` confirms the query and returns to ordinary
+                // navigation over whatever `articles` currently holds (already
+                // live-filtered by the keystrokes below) -- an empty query is
+                // treated the same as `Esc`, restoring the view's own
+                // unfiltered list, rather than committing to a "search for
+                // nothing" that would trivially match everything via `LIKE
+                // '%%'`.
+                KeyCode::Enter => {
+                    let trimmed = text.trim();
+                    if trimmed.is_empty() {
+                        search = None;
+                        articles = articles_for_view(storage, view, topics, topic_index, selected_source.as_deref())?;
+                    } else {
+                        search = Some(trimmed.to_string());
+                        articles = storage.search_articles(trimmed)?;
+                    }
+                    mode = Mode::Normal;
+                    article_index = 0;
+                }
+
+                // `Backspace`/`Char` both re-run the search on every
+                // keystroke -- ARCHITECTURE.md's "Live-filters... as the
+                // person types" -- rather than waiting for `Enter`.
+                // `String::pop` is UTF-8-aware, same reasoning as the note
+                // popup's own `Backspace` handling below.
+                KeyCode::Backspace => {
+                    text.pop();
+                    articles = storage.search_articles(text)?;
+                    article_index = 0;
+                }
+                KeyCode::Char(c) => {
+                    text.push(c);
+                    articles = storage.search_articles(text)?;
+                    article_index = 0;
+                }
+
+                _ => {}
+            }
             continue;
         }
 
@@ -582,13 +714,15 @@ fn draw_until_quit(
                 // `Tab` does double duty depending on `view`: in `View::Topic`
                 // it's just another way to move the topic sidebar forward
                 // (same as `Down` above, clamping at the last topic rather
-                // than wrapping); in `View::Saved` it instead exits back to
-                // the topic view, per ARCHITECTURE.md's "pressing S again (or
-                // Esc, or Tab) returns to the normal topic view." Splitting
-                // this into its own arm (rather than folding it into the
-                // `Down` arm above the way it used to be) is what makes that
-                // second behavior possible -- the two keys now genuinely do
-                // different things depending on `view`.
+                // than wrapping); in `View::Saved` or `View::History` it
+                // instead exits back to the topic view, per
+                // ARCHITECTURE.md's "pressing S again (or Esc, or Tab)
+                // returns to the normal topic view" (the same holds for
+                // `y`/History). Splitting this into its own arm (rather
+                // than folding it into the `Down` arm above the way it
+                // used to be) is what makes that second behavior possible
+                // -- the two keys now genuinely do different things
+                // depending on `view`.
                 //
                 // Deliberately a flat "next topic row" jump, not a walk
                 // through `Up`/`Down`'s expanded-tree order -- `Tab` is the
@@ -597,12 +731,11 @@ fn draw_until_quit(
                 // than stepping into whichever topic's source rows happen
                 // to be expanded.
                 KeyCode::Tab => {
-                    if view == View::Saved {
+                    if view != View::Topic {
                         view = View::Topic;
                         selected_source = None;
-                        if let Some(topic) = topics.get(topic_index) {
-                            articles = storage.articles_by_topic(topic)?;
-                        }
+                        search = None;
+                        articles = articles_for_view(storage, view, topics, topic_index, None)?;
                         article_index = 0;
                     } else if !topics.is_empty() {
                         topic_index = (topic_index + 1).min(topics.len() - 1);
@@ -613,16 +746,15 @@ fn draw_until_quit(
                 }
 
                 // `Esc` outside the note popup only means something in
-                // `View::Saved`: exit back to the topic view, same as `Tab`
-                // above. In `View::Topic` there's nothing for a bare `Esc` to
-                // cancel, so it falls through to the `_ => {}` catch-all
-                // instead.
-                KeyCode::Esc if view == View::Saved => {
+                // `View::Saved`/`View::History`: exit back to the topic
+                // view, same as `Tab` above. In `View::Topic` there's
+                // nothing for a bare `Esc` to cancel, so it falls through
+                // to the `_ => {}` catch-all instead.
+                KeyCode::Esc if view != View::Topic => {
                     view = View::Topic;
                     selected_source = None;
-                    if let Some(topic) = topics.get(topic_index) {
-                        articles = storage.articles_by_topic(topic)?;
-                    }
+                    search = None;
+                    articles = articles_for_view(storage, view, topics, topic_index, None)?;
                     article_index = 0;
                 }
 
@@ -742,36 +874,60 @@ fn draw_until_quit(
                     article_index = article_index.min(articles.len().saturating_sub(1));
                 }
 
-                // `S` toggles between the two main views: `View::Topic`
-                // (the ordinary per-topic list) and `View::Saved` (every
-                // saved article across every topic, via
+                // `S` toggles `View::Saved` on/off: pressing it while
+                // already in `View::Saved` returns to `View::Topic`;
+                // pressing it from `View::Topic` *or* `View::History`
+                // switches straight to `View::Saved` (there's no reason to
+                // require bouncing back through `View::Topic` first to get
+                // from one dedicated view to the other). `View::Saved` is
+                // every saved article across every topic, via
                 // `Storage::saved_articles` -- ARCHITECTURE.md's dedicated
                 // "Saved" view, deliberately independent of the topic
-                // sidebar rather than a pseudo-topic inside it). `j`/`k`,
+                // sidebar rather than a pseudo-topic inside it. `j`/`k`,
                 // `Enter`, `x`, `s`, and `n` all keep working unmodified
                 // afterwards since none of them care *how* `articles` got
                 // populated, only that it's a `Vec<Article>` with a valid
                 // `article_index` into it -- which resetting to `0` here
                 // guarantees, the same as every other list reload above.
                 //
-                // `selected_source` is cleared on the way in either
-                // direction, same reasoning as `Tab`/`Esc` above: `S` always
-                // lands back on a bare topic row rather than trying to
-                // re-derive whether a source-row selection from before the
-                // toggle still makes sense.
+                // `selected_source` is cleared either way, same reasoning
+                // as `Tab`/`Esc` above: `S` always lands back on a bare
+                // topic row (when returning to `View::Topic`) rather than
+                // trying to re-derive whether a source-row selection from
+                // before the toggle still makes sense. Any committed
+                // search is dropped too (`search = None`) -- switching
+                // views is "go look at this view's own list," not "keep
+                // filtering it," so `/` has to be pressed again from
+                // scratch in the new view if that's still wanted.
                 KeyCode::Char('S') => {
-                    view = match view {
-                        View::Topic => View::Saved,
-                        View::Saved => View::Topic,
-                    };
+                    view = if view == View::Saved { View::Topic } else { View::Saved };
                     selected_source = None;
-                    articles = match view {
-                        View::Saved => storage.saved_articles()?,
-                        View::Topic => match topics.get(topic_index) {
-                            Some(topic) => storage.articles_by_topic(topic)?,
-                            None => Vec::new(),
-                        },
-                    };
+                    search = None;
+                    articles = articles_for_view(storage, view, topics, topic_index, None)?;
+                    article_index = 0;
+                }
+
+                // `y` toggles `View::History` on/off -- every article
+                // tuxwire has ever fetched, regardless of read/skipped/
+                // saved state, via `Storage::all_articles`
+                // (`docs/ARCHITECTURE.md`'s "Notes Retrieval & Search":
+                // "solves 'I read something a few days ago, didn't save
+                // it, and want it back' without requiring the person to
+                // have remembered to save it in the moment"). Same
+                // toggle-on/switch-to shape as `S` just above, and for the
+                // same reason: pressing `y` from `View::Saved` jumps
+                // straight to `View::History` rather than requiring a
+                // detour back through `View::Topic` first.
+                //
+                // `j`/`k`, `Enter`, `x`, `s`, and `n` all keep working here
+                // unmodified for the same reason they do in `View::Saved`
+                // -- see `S`'s own comment just above, which applies
+                // identically to this arm.
+                KeyCode::Char('y') => {
+                    view = if view == View::History { View::Topic } else { View::History };
+                    selected_source = None;
+                    search = None;
+                    articles = articles_for_view(storage, view, topics, topic_index, None)?;
                     article_index = 0;
                 }
 
@@ -787,6 +943,23 @@ fn draw_until_quit(
                 // which view happens to be showing.
                 KeyCode::Char('a') => {
                     mode = Mode::AddSource(AddSourceStep::Url { text: String::new(), error: None });
+                }
+
+                // `/` opens the search input (switches `mode` to
+                // `Mode::Searching`), pre-filled with whatever query is
+                // already committed (if any) -- same "pre-fill from
+                // existing state" pattern `n` uses for the note popup,
+                // letting a search be refined rather than always
+                // retyped from scratch. The actual keystrokes that follow
+                // are handled by the `Mode::Searching` branch below, once
+                // this same `loop` iterates back around and reads the next
+                // key. Available regardless of `view`, same reasoning as
+                // `a` just above: which view happens to be showing has no
+                // bearing on whether search should be reachable.
+                KeyCode::Char('/') => {
+                    mode = Mode::Searching {
+                        text: search.clone().unwrap_or_default(),
+                    };
                 }
 
                 _ => {}
@@ -1014,6 +1187,38 @@ fn load_articles_for_selection(storage: &Storage, topic: &str, source: Option<&s
     match source {
         Some(name) => storage.articles_by_topic_and_source(topic, name),
         None => storage.articles_by_topic(topic),
+    }
+}
+
+/// Loads whichever article list `view`'s *own* ordinary (unfiltered by
+/// search) list actually is -- `storage.saved_articles()` for
+/// `View::Saved`, `storage.all_articles()` for `View::History`, or the
+/// current sidebar selection's topic-scoped list (via
+/// `load_articles_for_selection`, same as any other topic-row/source-row
+/// change) for `View::Topic`.
+///
+/// This is the one place every "switch to/return to this view" call site
+/// goes through -- the `S`/`y`/`Tab`/`Esc` handlers in `draw_until_quit`,
+/// the initial load in `draw_until_quit` itself, and the `Mode::Searching`
+/// handlers' "restore the full list" path (`Esc`, or confirming an empty
+/// query) -- instead of each one re-deriving its own `match view { ... }`.
+/// Before this existed, every one of those call sites duplicated that
+/// three-way split; a fourth view (or a future fifth) would otherwise mean
+/// hunting down and updating every one of them individually.
+fn articles_for_view(
+    storage: &Storage,
+    view: View,
+    topics: &[String],
+    topic_index: usize,
+    selected_source: Option<&str>,
+) -> anyhow::Result<Vec<Article>> {
+    match view {
+        View::Saved => storage.saved_articles(),
+        View::History => storage.all_articles(),
+        View::Topic => match topics.get(topic_index) {
+            Some(topic) => load_articles_for_selection(storage, topic, selected_source),
+            None => Ok(Vec::new()),
+        },
     }
 }
 
@@ -1425,6 +1630,7 @@ fn render(
     selected_article: Option<usize>,
     mode: &Mode,
     view: View,
+    search: Option<&str>,
 ) {
     // Painting a plain background-colored block across the whole frame
     // first means every gap between/around the panes below (e.g. if the
@@ -1473,6 +1679,23 @@ fn render(
         selected_topic,
         selected_source,
     );
+    // What (if anything) `render_articles` should show about search --
+    // computed once, here, rather than each of its three call sites (there
+    // is only one, but the same reasoning as `articles_for_view` applies:
+    // one place that knows how `mode`/`search` map onto a `SearchStatus`).
+    // `Mode::Searching` always wins over a previously committed `search`:
+    // while actively typing a *new* query, the live buffer is what's
+    // driving `articles` (see `draw_until_quit`'s `Mode::Searching` key
+    // handling), so that's what the title/cursor should reflect, not
+    // whatever query was committed before `/` was pressed again.
+    let search_status = match mode {
+        Mode::Searching { text } => SearchStatus::Typing(text),
+        _ => match search {
+            Some(query) => SearchStatus::Committed(query),
+            None => SearchStatus::None,
+        },
+    };
+
     render_articles(
         frame,
         theme,
@@ -1481,6 +1704,7 @@ fn render(
         articles,
         selected_article,
         view,
+        search_status,
     );
     render_footer(frame, theme, footer_area, mode, view);
 
@@ -1749,17 +1973,55 @@ fn render_colors_section(frame: &mut Frame, theme: &Theme, area: Rect) {
     frame.render_widget(paragraph, area);
 }
 
-/// The right pane: every article in `articles` (either
-/// `storage.articles_by_topic(selected_topic)` or, while `view` is
-/// `View::Saved`, `storage.saved_articles()` -- see the `S` keybind's arm
-/// in `draw_until_quit` for which), most recent first, styled per its
-/// read/skipped/saved state using the matching `theme.accent_*` color --
-/// ARCHITECTURE.md's "Article States & Behavior" table. `view` decides the
-/// title and whether each item also gets a truncated note preview (see
-/// `article_item`) -- the saved view is the one place a note is worth
-/// surfacing without pressing `n` first, since "which of these did I leave
-/// a note on, and roughly what did it say" is the whole point of browsing
-/// it.
+/// What (if anything) `render_articles` should show about an active
+/// search, layered on top of whatever `view`'s ordinary title would
+/// otherwise be. Computed once in `render` (see its own doc comment on
+/// `search_status`) from `mode` and `draw_until_quit`'s committed `search`,
+/// so `render_articles` itself doesn't need to know about either.
+///
+/// - `None`: no search active -- `view`'s own title shows, unchanged.
+/// - `Typing`: `Mode::Searching` is open and this is its live buffer.
+///   Deliberately rendered *inside the block's own title* (see
+///   `render_articles`'s cursor placement below) rather than as a separate
+///   popup: a popup would cover the very results it's supposed to be
+///   live-filtering, defeating "as the person types."
+/// - `Committed`: a query was confirmed with `Enter` and is still
+///   narrowing whichever list is showing; no live cursor, since typing
+///   has stopped and ordinary navigation (`j`/`k`/`Enter`/`s`/`x`/`n`) is
+///   what's running now.
+enum SearchStatus<'a> {
+    None,
+    Typing(&'a str),
+    Committed(&'a str),
+}
+
+/// The right pane: every article in `articles` -- populated by whichever
+/// query `view` implies (`storage.articles_by_topic(selected_topic)` for
+/// `View::Topic`, `storage.saved_articles()` for `View::Saved`,
+/// `storage.all_articles()` for `View::History` -- see `articles_for_view`,
+/// which every view-switching keybind in `draw_until_quit` goes through),
+/// most recent first, styled per its read/skipped/saved state using the
+/// matching `theme.accent_*` color -- ARCHITECTURE.md's "Article States &
+/// Behavior" table. `view` decides the title and, via `article_item`,
+/// which meta line and whether a truncated note preview render for each
+/// item -- the saved view is the one place a note is worth surfacing
+/// without pressing `n` first, since "which of these did I leave a note
+/// on, and roughly what did it say" is the whole point of browsing it.
+///
+/// `search` overrides that title (see `SearchStatus`) whenever a search is
+/// active -- `articles` itself, by the time this runs, already *is* the
+/// filtered list (`draw_until_quit`'s `Mode::Searching` handling and
+/// `storage.search_articles` calls build it before `render` ever sees it),
+/// so this function's own job re: search is purely presentational: what to
+/// show in the title, and where to put the terminal cursor while typing.
+///
+/// `search` pushes this past clippy's default 7-argument threshold for
+/// `too_many_arguments` -- same reasoning as the `#[allow]` on `render`
+/// itself: `render_articles` has exactly one call site (`render`, which
+/// already computed `search_status` from its own state), so a params
+/// struct here would just be `render`'s params one layer down, with no
+/// other caller to justify it.
+#[allow(clippy::too_many_arguments)]
 fn render_articles(
     frame: &mut Frame,
     theme: &Theme,
@@ -1768,12 +2030,20 @@ fn render_articles(
     articles: &[Article],
     selected_article: Option<usize>,
     view: View,
+    search: SearchStatus,
 ) {
-    let title = match view {
-        View::Saved => " Saved Articles ".to_string(),
-        View::Topic => match selected_topic {
-            Some(topic) => format!(" Articles — {topic} "),
-            None => " Articles ".to_string(),
+    let title = match search {
+        SearchStatus::Typing(text) => format!(" Search: {text} "),
+        SearchStatus::Committed(query) => {
+            format!(" Search: \u{201c}{query}\u{201d} ({} result{}) ", articles.len(), if articles.len() == 1 { "" } else { "s" })
+        }
+        SearchStatus::None => match view {
+            View::Saved => " Saved Articles ".to_string(),
+            View::History => " History ".to_string(),
+            View::Topic => match selected_topic {
+                Some(topic) => format!(" Articles — {topic} "),
+                None => " Articles ".to_string(),
+            },
         },
     };
 
@@ -1783,15 +2053,34 @@ fn render_articles(
         .style(Style::new().bg(theme.background).fg(theme.text_primary))
         .border_style(Style::new().fg(theme.panel_border));
 
+    // While actively typing, the block's own top border/title row doubles
+    // as the input line -- placing the real terminal cursor right after
+    // the live query text is what actually signals "you're typing here,"
+    // the same reasoning as `render_note_popup`'s cursor placement. `+ 9`
+    // is `" Search: "`'s own length (the literal prefix in the `title`
+    // `format!` above), so this has to stay in sync with that string if it
+    // ever changes.
+    if let SearchStatus::Typing(text) = search {
+        let cursor_x = area.x + 1 + 9 + text.chars().count() as u16;
+        let cursor_y = area.y;
+        frame.set_cursor_position((cursor_x, cursor_y));
+    }
+
     if articles.is_empty() {
         // An empty topic (or no topics at all) shouldn't render as a
         // blank pane with no explanation -- that looks indistinguishable
-        // from a bug. Same logic applies to an empty saved view: "nothing
-        // saved yet" is a real, expected state (nobody's pressed `s` yet),
-        // not something to leave the user guessing about.
-        let message = match view {
-            View::Saved => "No saved articles yet -- press s on an article to save it.",
-            View::Topic => "No articles yet -- run a fetcher first.",
+        // from a bug. Same logic applies to an empty saved view ("nothing
+        // saved yet" is a real, expected state, not something to leave the
+        // user guessing about), an empty history view (in practice, only
+        // ever happens on a completely fresh install before the very first
+        // fetch has run), and a search with no matches.
+        let message = match search {
+            SearchStatus::Typing(_) | SearchStatus::Committed(_) => "No matches.",
+            SearchStatus::None => match view {
+                View::Saved => "No saved articles yet -- press s on an article to save it.",
+                View::History => "No articles fetched yet.",
+                View::Topic => "No articles yet -- run a fetcher first.",
+            },
         };
         let empty = Paragraph::new(message)
             .style(Style::new().fg(theme.text_muted))
@@ -1800,10 +2089,9 @@ fn render_articles(
         return;
     }
 
-    let show_note_preview = view == View::Saved;
     let items: Vec<ListItem> = articles
         .iter()
-        .map(|article| article_item(theme, article, show_note_preview))
+        .map(|article| article_item(theme, article, view))
         .collect();
 
     // Each `ListItem` here is two lines (title + source/timestamp, see
@@ -1826,14 +2114,23 @@ fn render_articles(
 }
 
 /// One article's `ListItem`: the title (colored by state) above a dimmer
-/// "source · timestamp" line, plus -- when `show_note_preview` is true and
-/// the article actually has a note -- a third line with a truncated
-/// preview of it (see `truncate_preview`). `show_note_preview` is a plain
-/// `bool` parameter rather than this function reaching for a `View`
-/// itself: whether to show the preview is entirely `render_articles`'s
-/// call (only `View::Saved` wants it), and `article_item` doesn't need to
-/// know *why*, just *whether*.
-fn article_item<'a>(theme: &Theme, article: &'a Article, show_note_preview: bool) -> ListItem<'a> {
+/// meta line, plus -- in `View::Saved` specifically, when the article
+/// actually has a note -- a third line with a truncated preview of it (see
+/// `truncate_preview`). `view` is a plain value parameter rather than this
+/// function reaching for the caller's other state: whether to show the
+/// note preview, and which meta line to build, is entirely
+/// `render_articles`'s call (only `View::Saved` wants either), and
+/// `article_item` doesn't need to know anything else about *why*, just
+/// *which view*.
+///
+/// The meta line itself differs by view: `View::Saved` shows the source
+/// name plus `saved_at` (falling back to `article.timestamp`'s publish
+/// date only when this article was saved before migration 003 started
+/// tracking `saved_at` -- see `saved_meta_line`), since "when did I save
+/// this" is what's actually useful while browsing saved articles.
+/// Everywhere else shows the source name plus the article's own publish
+/// `timestamp`, unchanged from before this view got its own meta line.
+fn article_item<'a>(theme: &Theme, article: &'a Article, view: View) -> ListItem<'a> {
     // Priority order matters here: an article can technically be both
     // `read` and `saved` (saving implies read, per ARCHITECTURE.md), so
     // `saved`/`skipped` are checked first -- they're the more specific,
@@ -1854,24 +2151,37 @@ fn article_item<'a>(theme: &Theme, article: &'a Article, show_note_preview: bool
         Style::new().fg(title_color),
     ));
 
-    let meta_line = Line::from(Span::styled(
-        format!(
-            "  {} · {}",
-            article.source,
-            article.timestamp.format("%Y-%m-%d %H:%M")
-        ),
-        Style::new().fg(theme.text_muted),
-    ));
+    // `article.saved` is checked alongside `view == View::Saved`, not just
+    // `view` alone: search (see `SearchStatus`) runs unscoped across every
+    // article regardless of `saved`, so a search result surfaced while
+    // `View::Saved` is showing can genuinely be an article that was never
+    // saved at all -- claiming "saved <date>" about one (even via
+    // `saved_meta_line`'s pre-migration fallback to `timestamp`) would be
+    // outright wrong, not just an honest gap in the data. Those fall back
+    // to the same plain source/publish-timestamp line every other view
+    // uses.
+    let meta_line = if view == View::Saved && article.saved {
+        saved_meta_line(theme, article)
+    } else {
+        Line::from(Span::styled(
+            format!(
+                "  {} · {}",
+                article.source,
+                article.timestamp.format("%Y-%m-%d %H:%M")
+            ),
+            Style::new().fg(theme.text_muted),
+        ))
+    };
 
     let mut lines = vec![title_line, meta_line];
 
     // `article.note.as_deref()` turns `&Option<String>` into
     // `Option<&str>` without cloning the note just to look at it --
-    // `if let Some(note) = ...` then only runs at all when
-    // `show_note_preview` is set *and* a note actually exists, so an
-    // article saved without one still renders as the plain two-line item
-    // above instead of a blank or missing third line.
-    if show_note_preview && let Some(note) = article.note.as_deref() {
+    // `if let Some(note) = ...` then only runs at all in `View::Saved`
+    // *and* when a note actually exists, so an article saved without one
+    // still renders as the plain two-line item above instead of a blank or
+    // missing third line.
+    if view == View::Saved && let Some(note) = article.note.as_deref() {
         let preview_line = Line::from(Span::styled(
             format!(
                 "  \u{201c}{}\u{201d}",
@@ -1883,6 +2193,48 @@ fn article_item<'a>(theme: &Theme, article: &'a Article, show_note_preview: bool
     }
 
     ListItem::new(lines)
+}
+
+/// `View::Saved`'s own meta line: `"  {source} · saved {date}"`, plus a
+/// trailing `", noted {date}"` when `noted_at` is meaningfully different
+/// from `saved_at` -- ARCHITECTURE.md's "if `noted_at` differs meaningfully
+/// from `saved_at` (note added/edited after the initial save), show that
+/// too."
+///
+/// "Meaningfully differs" is defined here as "renders to a different
+/// day": both dates are formatted to `%Y-%m-%d` first, and the `noted`
+/// clause is only appended if that formatted string actually differs from
+/// `saved`'s. This deliberately ignores same-day differences down to the
+/// second (writing a note minutes after saving, say) -- the two dates
+/// would print identically either way, so appending a second, redundant
+/// "noted <same date>" would tell the reader nothing they didn't already
+/// see in the "saved" clause right next to it.
+///
+/// Returns `Line<'static>` rather than borrowing from `article`: unlike
+/// the source name (a `&str` already living inside `article`), the
+/// formatted date strings are freshly built `String`s with nothing to
+/// borrow from, so there's no lifetime to tie this to `article` in the
+/// first place.
+fn saved_meta_line(theme: &Theme, article: &Article) -> Line<'static> {
+    // `saved_at` is `None` only for a saved article that predates
+    // migration 003 (see the migration's own doc comment) -- an honest gap
+    // in the data, not a bug, so this falls back to the article's publish
+    // `timestamp` rather than showing a blank or a placeholder like "?".
+    let saved_day = article
+        .saved_at
+        .map(|d| d.format("%Y-%m-%d").to_string())
+        .unwrap_or_else(|| article.timestamp.format("%Y-%m-%d").to_string());
+
+    let noted_day = article.noted_at.map(|d| d.format("%Y-%m-%d").to_string());
+
+    let mut text = format!("  {} · saved {saved_day}", article.source);
+    if let Some(noted_day) = noted_day
+        && noted_day != saved_day
+    {
+        text.push_str(&format!(", noted {noted_day}"));
+    }
+
+    Line::from(Span::styled(text, Style::new().fg(theme.text_muted)))
 }
 
 /// Truncates `text` to at most `max_chars` characters, appending `…` if
@@ -1918,25 +2270,29 @@ fn truncate_preview(text: &str, max_chars: usize) -> String {
 }
 
 /// The footer: the keybind hint line, covering exactly the keys wired up
-/// so far -- see `KEYBIND_HINTS`/`SAVED_HINTS`/`EDITING_NOTE_HINTS` and
-/// this module's top-level doc comment for which parts of ARCHITECTURE.md's
-/// full keybind table that excludes. `mode` takes priority over `view`:
-/// while the note popup or the add-source popup is open, every other
-/// keybind (navigation included) is suspended for the duration (see the
-/// `Mode::EditingNote` match arm and the `Mode::AddSource` check in
+/// so far -- see `KEYBIND_HINTS`/`SAVED_HINTS`/`EDITING_NOTE_HINTS`/
+/// `SEARCH_HINTS` and this module's top-level doc comment for which parts
+/// of ARCHITECTURE.md's full keybind table that excludes. `mode` takes
+/// priority over `view`: while the note popup, the add-source popup, or
+/// the search input is open, every other keybind (navigation included) is
+/// suspended for the duration (see the `Mode::EditingNote` match arm, the
+/// `Mode::Searching` check, and the `Mode::AddSource` check in
 /// `draw_until_quit`), so one of `EDITING_NOTE_HINTS` /
-/// `ADD_SOURCE_URL_HINTS` / `ADD_SOURCE_CONFIRM_HINTS` shows regardless of
-/// which view sits underneath it. Otherwise, `view` picks between the two
-/// normal-mode hint lines.
+/// `ADD_SOURCE_URL_HINTS` / `ADD_SOURCE_CONFIRM_HINTS` / `SEARCH_HINTS`
+/// shows regardless of which view sits underneath it. Otherwise, `view`
+/// picks between the normal-mode hint lines -- `View::Saved` and
+/// `View::History` share `SAVED_HINTS` (see its own doc comment for why:
+/// both disable the same keys for the same reason).
 fn render_footer(frame: &mut Frame, theme: &Theme, area: Rect, mode: &Mode, view: View) {
     let hints = match mode {
         Mode::EditingNote { .. } => EDITING_NOTE_HINTS,
         Mode::AddSource(AddSourceStep::Url { .. }) => ADD_SOURCE_URL_HINTS,
         Mode::AddSource(AddSourceStep::Confirm { .. }) => ADD_SOURCE_CONFIRM_HINTS,
         Mode::Error { .. } => ERROR_HINTS,
+        Mode::Searching { .. } => SEARCH_HINTS,
         Mode::Normal => match view {
             View::Topic => KEYBIND_HINTS,
-            View::Saved => SAVED_HINTS,
+            View::Saved | View::History => SAVED_HINTS,
         },
     };
 

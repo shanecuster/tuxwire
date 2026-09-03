@@ -53,6 +53,11 @@ const MIGRATIONS: &[Migration] = &[
         name: "002_unique_article_url",
         sql: include_str!("../../migrations/002_unique_article_url.sql"),
     },
+    Migration {
+        version: 3,
+        name: "003_add_saved_and_noted_at",
+        sql: include_str!("../../migrations/003_add_saved_and_noted_at.sql"),
+    },
 ];
 
 /// Brings `conn`'s schema up to date by running every migration whose

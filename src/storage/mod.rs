@@ -28,6 +28,7 @@ mod migrations;
 
 use crate::models::Article;
 use anyhow::Context;
+use chrono::Utc;
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use std::path::PathBuf;
 
@@ -116,8 +117,8 @@ impl Storage {
         // that looks like SQL (an apostrophe in an article title, say)
         // is never mistaken for part of the query itself.
         self.conn.execute(
-            "INSERT INTO articles (title, url, source, topic, timestamp, read, skipped, saved, note)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+            "INSERT INTO articles (title, url, source, topic, timestamp, read, skipped, saved, note, saved_at, noted_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
              ON CONFLICT(url) DO NOTHING",
             params![
                 article.title,
@@ -129,6 +130,8 @@ impl Storage {
                 article.skipped,
                 article.saved,
                 article.note,
+                article.saved_at,
+                article.noted_at,
             ],
         )?;
 
@@ -161,7 +164,7 @@ impl Storage {
     /// pane: article list for the selected topic, sorted by recency").
     pub fn articles_by_topic(&self, topic: &str) -> anyhow::Result<Vec<Article>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, title, url, source, topic, timestamp, read, skipped, saved, note
+            "SELECT id, title, url, source, topic, timestamp, read, skipped, saved, note, saved_at, noted_at
              FROM articles WHERE topic = ?1 ORDER BY timestamp DESC",
         )?;
 
@@ -198,7 +201,7 @@ impl Storage {
     /// source name.'"
     pub fn articles_by_topic_and_source(&self, topic: &str, source: &str) -> anyhow::Result<Vec<Article>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, title, url, source, topic, timestamp, read, skipped, saved, note
+            "SELECT id, title, url, source, topic, timestamp, read, skipped, saved, note, saved_at, noted_at
              FROM articles WHERE topic = ?1 AND source = ?2 ORDER BY timestamp DESC",
         )?;
 
@@ -211,11 +214,73 @@ impl Storage {
     /// explicitly independent of the topic sidebar.
     pub fn saved_articles(&self) -> anyhow::Result<Vec<Article>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, title, url, source, topic, timestamp, read, skipped, saved, note
+            "SELECT id, title, url, source, topic, timestamp, read, skipped, saved, note, saved_at, noted_at
              FROM articles WHERE saved = 1 ORDER BY timestamp DESC",
         )?;
 
         let rows = stmt.query_map([], row_to_article)?;
+        rows.collect::<rusqlite::Result<Vec<Article>>>().map_err(Into::into)
+    }
+
+    /// Every article tuxwire has ever fetched, regardless of read/skipped/
+    /// saved state, most recent first -- backs the `y` "History" view
+    /// (`docs/ARCHITECTURE.md`'s "Notes Retrieval & Search"). Nothing in
+    /// tuxwire ever deletes a row from `articles`, so this is genuinely
+    /// "every article ever seen," not a query that happens to look that
+    /// way today -- it answers "I read something a few days ago, didn't
+    /// save it, and want it back" without requiring the person to have
+    /// remembered to press `s` in the moment.
+    pub fn all_articles(&self) -> anyhow::Result<Vec<Article>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, title, url, source, topic, timestamp, read, skipped, saved, note, saved_at, noted_at
+             FROM articles ORDER BY timestamp DESC",
+        )?;
+
+        let rows = stmt.query_map([], row_to_article)?;
+        rows.collect::<rusqlite::Result<Vec<Article>>>().map_err(Into::into)
+    }
+
+    /// Every article whose `title` or `note` contains `query` as a
+    /// substring, case-insensitively, most recent first -- the `/` search
+    /// keybind (`docs/ARCHITECTURE.md`'s "Notes Retrieval & Search"). Deliberately
+    /// a plain `LIKE '%term%'` scan, not SQLite's FTS5 extension: per
+    /// ARCHITECTURE.md, "at the scale of one person's article collection
+    /// (realistically hundreds, not thousands), a plain substring match...
+    /// is proportionate and sufficient" -- FTS5 would mean a second virtual
+    /// table kept in sync with `articles` via triggers, a real subsystem
+    /// this doesn't need yet.
+    ///
+    /// Runs against *every* article, unscoped by topic or `saved` -- not
+    /// `articles_by_topic`/`saved_articles` with an extra `AND` clause the
+    /// way `articles_by_topic_and_source` builds on `articles_by_topic`.
+    /// Per ARCHITECTURE.md, "Searches across all articles, not just saved
+    /// ones -- this is what actually answers 'find that thing I read a few
+    /// days ago.'" The caller (`ui::draw_until_quit`) is what decides which
+    /// on-screen view these results replace; this method itself has no
+    /// notion of "current view" at all.
+    ///
+    /// `%` and `_` are SQL `LIKE` wildcard characters -- if `query` itself
+    /// contains either (someone searching for a literal `%`), SQLite treats
+    /// them as wildcards too, matching more broadly than a strict substring
+    /// search would. Not escaped here: a personal search box where that
+    /// only ever makes a search *less* strict, never a security concern
+    /// (this is bound via `params!`, so it's not a SQL-injection risk
+    /// either way -- see `insert_article`'s doc comment on why binding
+    /// values, rather than formatting them into the SQL string, is what
+    /// actually prevents that class of bug).
+    ///
+    /// SQLite's `LIKE` is already case-insensitive for ASCII letters by
+    /// default (its one departure from `=`'s exact-match semantics) --
+    /// nothing extra (a `COLLATE NOCASE`, a `LOWER()` on both sides) is
+    /// needed to satisfy "case-insensitive" here.
+    pub fn search_articles(&self, query: &str) -> anyhow::Result<Vec<Article>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, title, url, source, topic, timestamp, read, skipped, saved, note, saved_at, noted_at
+             FROM articles WHERE title LIKE ?1 OR note LIKE ?1 ORDER BY timestamp DESC",
+        )?;
+
+        let pattern = format!("%{query}%");
+        let rows = stmt.query_map(params![pattern], row_to_article)?;
         rows.collect::<rusqlite::Result<Vec<Article>>>().map_err(Into::into)
     }
 
@@ -258,22 +323,44 @@ impl Storage {
     /// calls) is what actually guarantees that: there's no moment where
     /// the database reflects `saved = true, read = false`.
     ///
+    /// Also stamps `saved_at` with the current instant -- per
+    /// ARCHITECTURE.md, "`saved_at`, set the moment `s` is pressed." Set
+    /// unconditionally on every call rather than only the first: there's
+    /// no separate "unsave" action in tuxwire today, so in practice this
+    /// only ever runs once per article, but even a hypothetical re-save
+    /// should honestly reflect *when the save happened*, not the first
+    /// time it happened.
+    ///
     /// `note: Option<String>` mirrors `Article::note` exactly: passing
     /// `None` saves the article with no note, `Some(text)` saves it with
     /// one attached.
     pub fn save_article(&self, id: i64, note: Option<String>) -> anyhow::Result<()> {
         self.conn.execute(
-            "UPDATE articles SET saved = 1, read = 1, note = ?2 WHERE id = ?1",
-            params![id, note],
+            "UPDATE articles SET saved = 1, read = 1, note = ?2, saved_at = ?3 WHERE id = ?1",
+            params![id, note, Utc::now()],
         )?;
         Ok(())
     }
 
     /// Replaces the note on an already-saved article -- the `n` keybind
     /// ("edit note on a saved article").
+    ///
+    /// Also keeps `noted_at` in sync: per ARCHITECTURE.md, it's "set
+    /// whenever `update_note` stores a non-empty note... If the note is
+    /// cleared back to empty, `noted_at` clears too (`None`), keeping 'no
+    /// note' and 'no note date' consistent with each other." `note.is_some()`
+    /// is exactly "is this call storing a non-empty note" -- the `n`
+    /// popup in `ui/mod.rs` already turns an empty text buffer into `None`
+    /// before ever calling this, so `Some` here always means real text.
+    /// `Option::then` is what turns that `bool` into `Some(Utc::now())` /
+    /// `None` in one expression, matching `note`'s own shape rather than
+    /// writing an `if`/`else` to build the same thing by hand.
     pub fn update_note(&self, id: i64, note: Option<String>) -> anyhow::Result<()> {
-        self.conn
-            .execute("UPDATE articles SET note = ?2 WHERE id = ?1", params![id, note])?;
+        let noted_at = note.is_some().then(Utc::now);
+        self.conn.execute(
+            "UPDATE articles SET note = ?2, noted_at = ?3 WHERE id = ?1",
+            params![id, note, noted_at],
+        )?;
         Ok(())
     }
 
@@ -346,7 +433,8 @@ impl Storage {
 }
 
 /// Maps one row from a `SELECT id, title, url, source, topic, timestamp,
-/// read, skipped, saved, note FROM articles ...` query into an `Article`.
+/// read, skipped, saved, note, saved_at, noted_at FROM articles ...` query
+/// into an `Article`.
 ///
 /// Every query in this module that reads from `articles` lists its
 /// columns in this exact order specifically so this one function can be
@@ -376,6 +464,8 @@ fn row_to_article(row: &Row) -> rusqlite::Result<Article> {
         skipped: row.get(7)?,
         saved: row.get(8)?,
         note: row.get(9)?,
+        saved_at: row.get(10)?,
+        noted_at: row.get(11)?,
     })
 }
 
@@ -418,7 +508,6 @@ fn db_path() -> anyhow::Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Utc;
 
     /// A fresh, fully-migrated `Storage` backed by an in-memory SQLite
     /// database -- `Connection::open_in_memory()` never touches disk at
@@ -573,6 +662,143 @@ mod tests {
         assert!(fetched.read);
         assert!(fetched.skipped);
         assert_eq!(fetched.note.as_deref(), Some("revisit this"));
+    }
+
+    /// `saved_at` starts `None` (never saved) and gets populated the
+    /// moment `save_article` runs -- the `s` keybind's whole point, per
+    /// ARCHITECTURE.md's "`saved_at`, set the moment `s` is pressed."
+    #[test]
+    fn save_article_populates_saved_at() {
+        let storage = test_storage();
+        let article = Article::new(
+            "title".to_string(),
+            "url".to_string(),
+            "source".to_string(),
+            "topic".to_string(),
+            Utc::now(),
+        );
+        let id = storage.insert_article(&article).unwrap();
+
+        let fetched = &storage.articles_by_topic("topic").unwrap()[0];
+        assert_eq!(fetched.saved_at, None, "an article that was never saved has no saved_at");
+
+        let before = Utc::now();
+        storage.save_article(id, None).unwrap();
+        let after = Utc::now();
+
+        let saved = &storage.saved_articles().unwrap()[0];
+        let saved_at = saved.saved_at.expect("save_article must populate saved_at");
+        assert!(
+            saved_at >= before && saved_at <= after,
+            "saved_at should land at the moment save_article ran, not some other time"
+        );
+    }
+
+    /// `noted_at` populates when `update_note` stores a non-empty note, and
+    /// clears back to `None` when the note is cleared back to empty --
+    /// ARCHITECTURE.md's "If the note is cleared back to empty, `noted_at`
+    /// clears too (`None`), keeping 'no note' and 'no note date' consistent
+    /// with each other."
+    #[test]
+    fn update_note_populates_and_clears_noted_at() {
+        let storage = test_storage();
+        let article = Article::new(
+            "title".to_string(),
+            "url".to_string(),
+            "source".to_string(),
+            "topic".to_string(),
+            Utc::now(),
+        );
+        let id = storage.insert_article(&article).unwrap();
+
+        let fetched = &storage.articles_by_topic("topic").unwrap()[0];
+        assert_eq!(fetched.noted_at, None, "an article with no note has no noted_at");
+
+        let before = Utc::now();
+        storage.update_note(id, Some("revisit this".to_string())).unwrap();
+        let after = Utc::now();
+
+        let noted = &storage.articles_by_topic("topic").unwrap()[0];
+        let noted_at = noted.noted_at.expect("a non-empty note must populate noted_at");
+        assert!(
+            noted_at >= before && noted_at <= after,
+            "noted_at should land at the moment update_note ran"
+        );
+
+        // Clearing the note (the `n` popup's "empty buffer -> None"
+        // convention, see `ui/mod.rs`) must clear noted_at right along
+        // with it -- "no note" and "no note date" are never allowed to
+        // disagree.
+        storage.update_note(id, None).unwrap();
+        let cleared = &storage.articles_by_topic("topic").unwrap()[0];
+        assert_eq!(cleared.note, None);
+        assert_eq!(cleared.noted_at, None, "clearing the note must clear noted_at too");
+    }
+
+    #[test]
+    fn all_articles_includes_every_state_regardless_of_read_saved_skipped() {
+        let storage = test_storage();
+        for (i, title) in ["unread", "read-only", "saved", "skipped"].into_iter().enumerate() {
+            let article = Article::new(
+                title.to_string(),
+                format!("https://example.com/{i}"),
+                "source".to_string(),
+                "topic".to_string(),
+                Utc::now(),
+            );
+            storage.insert_article(&article).unwrap();
+        }
+
+        let ids: Vec<i64> = storage.all_articles().unwrap().iter().map(|a| a.id).collect();
+        assert_eq!(ids.len(), 4, "all_articles must return every fetched article, untouched or not");
+
+        storage.mark_read(ids[1]).unwrap();
+        storage.save_article(ids[2], None).unwrap();
+        storage.mark_skipped(ids[3]).unwrap();
+
+        // Still every article, regardless of the state each one is now in
+        // -- this is the whole point of the History view: nothing is ever
+        // filtered out of it based on read/saved/skipped.
+        assert_eq!(storage.all_articles().unwrap().len(), 4);
+    }
+
+    #[test]
+    fn search_articles_matches_title_or_note_case_insensitively_across_all_articles() {
+        let storage = test_storage();
+        let btrfs = Article::new(
+            "Btrfs send/receive got faster".to_string(),
+            "https://example.com/btrfs".to_string(),
+            "LWN.net".to_string(),
+            "linux-news".to_string(),
+            Utc::now(),
+        );
+        let wayland = Article::new(
+            "Wayland compositor update".to_string(),
+            "https://example.com/wayland".to_string(),
+            "Phoronix".to_string(),
+            "linux-news".to_string(),
+            Utc::now(),
+        );
+        let btrfs_id = storage.insert_article(&btrfs).unwrap();
+        storage.insert_article(&wayland).unwrap();
+
+        // Matches by title, mixed case -- SQLite's LIKE is case-insensitive
+        // for ASCII by default.
+        let by_title = storage.search_articles("BTRFS").unwrap();
+        assert_eq!(by_title.len(), 1);
+        assert_eq!(by_title[0].title, "Btrfs send/receive got faster");
+
+        // Matches by note content too, even though the query text doesn't
+        // appear anywhere in the title -- and even though this article was
+        // never saved, since search runs across all articles, not just
+        // saved ones.
+        storage.update_note(btrfs_id, Some("worth trying this weekend".to_string())).unwrap();
+        let by_note = storage.search_articles("weekend").unwrap();
+        assert_eq!(by_note.len(), 1);
+        assert_eq!(by_note[0].id, btrfs_id);
+
+        // No match at all comes back empty, not an error.
+        assert!(storage.search_articles("nonexistent-keyword").unwrap().is_empty());
     }
 
     #[test]

@@ -158,13 +158,14 @@ underneath.
 | `j` / `k` | navigate list                   |
 | `Right` / `l` | expand selected topic (show its sources) |
 | `Left` / `h`  | collapse selected topic          |
-| `Enter`   | open article in `$BROWSER`      |
 | `Enter`   | open article in `w3m` (falls back to `$BROWSER`/`xdg-open` if `w3m` isn't installed) |
 | `x`       | skip article (recolors, no keyword-learning behind it — see below) |
 | `s`       | save article (auto-marks as read) |
 | `n`       | edit note on a saved article     |
 | `r`       | refresh all sources               |
 | `S`       | view saved articles               |
+| `y`       | view history (every article ever fetched) |
+| `/`       | search titles/notes across the current view |
 | `a`       | add a new source                  |
 | `q`       | quit                             |
 
@@ -402,11 +403,13 @@ ready-made post skeleton.
 - Triggered by a keybind from the Saved view (e.g. `E`)
 - One article → one `.md` file, or a "export all saved" batch mode
 - **Must include a link back to the original article** — the note is
-  context, not a replacement for the source. Suggested format:
+  context, not a replacement for the source. Uses the real `saved_at`
+  (and `noted_at`, if the note was added/edited after saving) timestamps
+  — not the article's publish date:
 
 ```markdown
 ## Btrfs send/receive got noticeably faster in 6.18
-Source: [r/linux](https://reddit.com/r/linux/...) — saved 2026-08-12
+Source: [r/linux](https://reddit.com/r/linux/...) — saved 2026-08-12, noted 2026-08-14
 
 > your note goes here, verbatim from the `note` column
 ```
@@ -414,6 +417,80 @@ Source: [r/linux](https://reddit.com/r/linux/...) — saved 2026-08-12
 - Output location configurable in `theme.toml` or a new `export.toml` —
   likely defaulting to a folder that rclone already watches, so saved
   articles can flow into the blog pipeline with no extra manual step
+
+### Notes Retrieval & Search
+
+Notes are currently write-and-forget — saved, but nothing resurfaces them
+or makes them easy to find later beyond scrolling the Saved view. Two
+small, low-complexity additions close that gap without a new subsystem:
+
+**Schema additions:**
+- `saved_at`, set the moment `s` is pressed. The existing `timestamp`
+  column is the article's *publish* date, not when the person saved it —
+  those are genuinely different facts, and export/retrieval both want
+  the latter.
+- `noted_at`, set whenever `update_note` stores a non-empty note (i.e.
+  every time `n` is confirmed with `Enter` and the note isn't empty) —
+  distinct from `saved_at`, since a note can be written or edited well
+  after the article was originally saved. If the note is cleared back to
+  empty, `noted_at` clears too (`None`), keeping "no note" and "no note
+  date" consistent with each other. Small migration, not a redesign —
+  same shape as the `saved_at` addition.
+
+**No new dedicated "notes view" needed.** The existing Saved view (`S`)
+already covers this once it's given two small additions:
+- Show source name and `saved_at` date under each title in the list
+  (currently only shows the truncated note preview); if `noted_at` differs
+  meaningfully from `saved_at` (note added/edited after the initial save),
+  show that too rather than only the save date
+- The existing `n` popup already functions as "read the full note" —
+  since it opens pre-filled with the complete text and `Esc` leaves it
+  untouched, no separate read-only view is needed
+- Opening the article (`Enter`) already provides the link-back
+
+**History view (`y` keybind):** a dedicated view of every article ever
+fetched, regardless of read/saved/skipped state — nothing in tuxwire
+deletes articles today, so this data already exists, this just exposes
+it. Solves "I read something a few days ago, didn't save it, and want it
+back" without requiring the person to have remembered to save it in the
+moment. Same list rendering as Topic/Saved views, reusing existing
+navigation (`j`/`k`, `Enter`, `n`, `s`, `x` all work the same way here).
+
+**Search (`/` keybind, plain substring match, not full-text search):**
+"Keyword search" and "full-text search" aren't the same thing — full-text
+search (SQLite's FTS5 extension) adds ranking, stemming, and fuzzy
+matching, but requires a separate virtual table kept in sync with
+`articles` via triggers — a real extra subsystem. At the scale of one
+person's article collection (realistically hundreds, not thousands), a
+plain `LIKE '%term%'` substring match across `title` + `note` is
+proportionate and sufficient. Searches across **all** articles, not just
+saved ones — this is what actually answers "find that thing I read a
+few days ago," not a separate log/tracking table. Live-filters whichever
+view is currently open (Topic, Saved, or History) as the person types;
+`Esc` clears the search and restores the full list. Revisit FTS5 only if
+the collection ever grows large enough that relevance ranking genuinely
+starts to matter — unlikely for a personal tool at this scale.
+
+**Considered and deliberately not built: a separate reaction/interaction
+log** (a table recording every read/skip/save event over time, auto-
+pruned after 30 days). Unnecessary complexity for what's actually needed
+— nothing currently deletes articles, so the History view + widened
+search already solves the real use case (finding a past article) without
+a second data model to maintain. A **pruning policy** is still worth
+having eventually, just framed differently: unsaved articles could be
+cleaned up after some age to keep the database from growing forever,
+while saved articles are never pruned (same permanence rule already
+established for saved state) — a small housekeeping feature, separate
+from retrieval, and not urgent.
+
+**Deferred, not v1.1:** resurfacing old saved articles back to the person
+periodically (a lightweight "things you meant to try" nudge, distinct from
+search since it's proactive rather than something the person has to
+remember to go look for). Genuinely novel — most readers, terminal or
+GUI, treat "saved" as a one-way archive. Worth building once retrieval
+and search themselves are solid and have seen real use.
+GUI, treat "saved" as a one-way archive. Worth building once retrieval
+and search themselves are solid and have seen real use.
 
 ### Offline Article Caching
 
