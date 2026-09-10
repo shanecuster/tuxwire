@@ -8,7 +8,9 @@ single fast, themeable terminal interface. Save the articles that matter,
 write a note explaining *why* they mattered, and find them again later —
 without ever leaving the terminal.
 
-`[screenshot: main topic view — sidebar, article list, banner]`
+<p align="center">
+  <img src="docs/screenshots/full_app_with_articles.png" alt="tuxwire main view — sidebar, article list, banner" width="900">
+</p>
 
 ---
 
@@ -36,7 +38,9 @@ The sidebar isn't a flat list — each topic can be expanded to show the
 individual sources feeding it. Select a topic to see everything in that
 category, or drill into one specific source to see just its articles.
 
-`[screenshot: expanded topic tree showing nested sources]`
+<p align="center">
+  <img src="docs/screenshots/category_tree.png" alt="Expanded topic tree showing nested sources" width="500">
+</p>
 
 ### Save articles with notes
 Press `s` to save an article permanently (it also marks it read). Press
@@ -46,7 +50,9 @@ tracks both *when you saved* an article and *when you last wrote or
 edited its note* as separate dates, since those are often different
 moments.
 
-`[screenshot: note-editing popup]`
+<p align="center">
+  <img src="docs/screenshots/notes_window.png" alt="Note-editing popup" width="700">
+</p>
 
 ### A persistent, always-visible legend
 No need to memorize what a key does or what a color means. The sidebar
@@ -54,7 +60,9 @@ permanently displays the active keybinds and a color swatch next to each
 article state (unread, read, saved, skipped) — pulled live from your
 actual theme, so it never drifts out of sync with what you're seeing.
 
-`[screenshot: sidebar showing Topics / Keys / Colors sections]`
+<p align="center">
+  <img src="docs/screenshots/sidebar.png" alt="Sidebar showing Topics / Keys / Colors sections" width="400">
+</p>
 
 ### Saved view, History view, and search
 - `S` — every saved article across all topics, with source, save date,
@@ -64,13 +72,19 @@ actual theme, so it never drifts out of sync with what you're seeing.
 - `/` — live substring search across titles and notes, filtering
   whichever view is currently open.
 
-`[screenshot: saved view with note previews]`
+<p align="center">
+  <img src="docs/screenshots/saved_view.png" alt="Saved view with note previews" width="900">
+</p>
 
 ### In-terminal reading via w3m, with automatic fallback
 If [w3m](https://w3m.sourceforge.net/) is installed, pressing `Enter`
 opens the article right inside your terminal — no context switch to a
 browser. If w3m isn't installed, tuxwire automatically falls back to
 your regular default browser instead. Nothing breaks either way.
+
+<p align="center">
+  <img src="docs/screenshots/article_open_w3m.png" alt="Reading an article in-terminal via w3m" width="900">
+</p>
 
 ### Export your saved articles to Markdown
 Press `E` from the Saved view to export everything you've saved — title,
@@ -225,7 +239,9 @@ Launch it:
 tuxwire
 ```
 
-`[screenshot: full app running with real articles]`
+<p align="center">
+  <img src="docs/screenshots/main_topic_view.png" alt="Browsing topics and articles" width="900">
+</p>
 
 ### Keybindings
 
