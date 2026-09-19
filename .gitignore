@@ -1,1 +1,8 @@
 /target
+
+# FreshRSS sync (feature/freshrss, see docs/ARCHITECTURE.md) -- a real
+# freshrss.toml lives in ~/.config/tuxwire/, never in the repo, but this is
+# a safety net in case someone tests against a copy checked out in-tree.
+# *.pass covers the password_file convention freshrss.toml.example uses.
+freshrss.toml
+*.pass

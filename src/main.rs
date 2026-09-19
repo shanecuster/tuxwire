@@ -27,6 +27,17 @@ mod storage;
 mod theme;
 mod ui;
 
+// `#[cfg(feature = "freshrss")]` on a `mod` declaration is the compile-time
+// half of "off means identical to master" (docs/ARCHITECTURE.md's FreshRSS
+// Sync section): without the `freshrss` feature enabled, this line
+// disappears entirely as far as the compiler is concerned -- `src/freshrss/`
+// isn't parsed, isn't type-checked, and contributes zero bytes to the
+// binary, exactly as if the directory didn't exist. `cargo build` (no
+// flags) is unaffected by this line one way or the other; only `cargo
+// build --features freshrss` actually compiles the module in.
+#[cfg(feature = "freshrss")]
+mod freshrss;
+
 // Bringing `Fetcher` into scope is what makes `.fetch()` callable below.
 // This is a Rust-specific quirk worth calling out: trait *methods* are
 // only usable on a value if the trait itself is `use`d somewhere in the

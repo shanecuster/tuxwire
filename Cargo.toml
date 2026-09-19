@@ -17,6 +17,20 @@ version = "0.1.0"
 # brand new project.
 edition = "2024"
 
+# `[features]` lets a crate compile optional pieces of itself in or out.
+# `freshrss = []` declares a feature named `freshrss` with no dependencies
+# of its own (an empty list on the right-hand side) — it exists purely as
+# a compile-time switch `#[cfg(feature = "freshrss")]` can check elsewhere
+# in the code, not to pull in any extra crate. It's deliberately left out
+# of a `default = [...]` list (there isn't one yet, so no feature is on by
+# default): per docs/ARCHITECTURE.md's FreshRSS Sync section, `cargo build`
+# with no flags must produce the exact same program as `master`, and
+# `cargo build --features freshrss` is how the optional sync code gets
+# compiled in for testing. Whether `freshrss` ever joins a `default` list
+# is a decision for when the branch merges, not before.
+[features]
+freshrss = []
+
 [dependencies]
 # --- Error handling --------------------------------------------------
 # `anyhow` gives us a single catch-all error type (`anyhow::Error`, often

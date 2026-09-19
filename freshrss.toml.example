@@ -1,0 +1,32 @@
+# tuxwire FreshRSS sync — docs/ARCHITECTURE.md § FreshRSS Sync (optional).
+#
+# Optional, and off by default. Only takes effect at all when tuxwire was
+# built with `cargo build --features freshrss` *and* this file (copied to
+# ~/.config/tuxwire/freshrss.toml) has enabled = true -- either gate alone
+# is enough to guarantee zero behavior change and zero network requests.
+#
+# This exact file is also compiled directly into the tuxwire binary
+# (src/freshrss/config.rs) as the fallback used when
+# ~/.config/tuxwire/freshrss.toml doesn't exist yet -- unlike sources.toml,
+# that fallback is never written out to disk, since most people running
+# tuxwire will never turn this feature on at all.
+
+[freshrss]
+enabled       = false
+url           = "https://freshrss.example.com"   # base URL only, no /api/greader.php
+username      = "your-username"
+
+# Whether to sync in the background automatically when tuxwire starts, in
+# addition to pressing `r` while a FreshRSS/* topic is selected. Defaults
+# to true when this key is left out entirely.
+sync_on_start = true
+
+# The API password is set under your FreshRSS profile (separate from your
+# account login password) and never goes in this file. Provide it one of
+# two ways:
+#   1. password_file: path to a file containing only the API password
+#      (chmod 600 -- tuxwire will warn if it's readable by group/others),
+#      or
+#   2. the TUXWIRE_FRESHRSS_PASSWORD environment variable, which takes
+#      precedence over password_file when both are set.
+password_file = "~/.config/tuxwire/freshrss.pass"
