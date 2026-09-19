@@ -162,7 +162,7 @@ underneath.
 | `x`       | skip article (recolors, no keyword-learning behind it — see below) |
 | `s`       | save article (auto-marks as read) |
 | `n`       | edit note on a saved article     |
-| `r`       | refresh all sources               |
+| `r`       | refresh sources for the selected topic (`View::Topic` only — no-op in Saved/History; see FreshRSS Sync for the `FreshRSS/*` case) |
 | `S`       | view saved articles               |
 | `y`       | view history (every article ever fetched) |
 | `/`       | search titles/notes across the current view |
@@ -342,6 +342,7 @@ tuxwire/
 │   ├── main.rs
 │   ├── fetchers/        # one module per source type
 │   ├── storage/         # SQLite access + migrations
+│   ├── freshrss/        # PLANNED (feature/freshrss): optional FreshRSS sync, behind the `freshrss` Cargo feature
 │   ├── scoring.rs        # reserved for v2 skip-weighting (unused in v1)
 │   ├── theme.rs           # theme.toml loading
 │   └── ui/                # ratatui views/widgets
@@ -353,6 +354,7 @@ tuxwire/
 ├── CHANGELOG.md            # git-commit / changelog style, matches blog aesthetic
 ├── sources.toml.example
 ├── theme.toml.example
+├── freshrss.toml.example   # PLANNED (feature/freshrss)
 └── Cargo.toml
 ```
 
@@ -566,6 +568,317 @@ out not to be worth solving this way. Not pursuing.
 
 ---
 
+## FreshRSS Sync (optional) — in progress on `feature/freshrss`
+
+**Status: planned, being built on the `feature/freshrss` branch. Not merged
+into `master` until it's been tested and is genuinely liked** — same process
+as the `w3m` integration. Until that merge, nothing in this section
+describes code that exists on `master`.
+
+### Goals and non-goals
+
+**Goals:** let someone who runs a FreshRSS server pull their subscriptions
+into tuxwire, keep read state in sync with the server, and optionally add a
+new feed to FreshRSS from inside tuxwire.
+
+**Non-goals:**
+- FreshRSS is **never** the main or only source. Local `sources.toml`
+  sources and the existing `a` flow stay the default, unchanged.
+- No change of any kind to existing behavior when FreshRSS is off.
+- No saved/starred sync, no notes sync, no skip sync in the first version
+  (see "Deferred" below). Skipped, saved, and notes are local-only.
+- No managing the FreshRSS server itself (no deleting feeds, renaming
+  categories, OPML import/export).
+
+### The prime rule: off means identical to `master`
+
+Two independent layers gate the feature:
+
+1. **Compile time:** a Cargo feature named `freshrss` (not in `default`
+   while on the branch). Without it, none of the FreshRSS code is compiled,
+   so `cargo build` produces the same program as `master`.
+2. **Run time:** a `freshrss.toml` config file. If it's missing, or has
+   `enabled = false`, no FreshRSS code path runs and no network request is
+   made.
+
+Whether `freshrss` joins the `default` features is decided at merge time,
+not before.
+
+### Protocol: the Google Reader-compatible API
+
+FreshRSS exposes a Google Reader-style HTTP API at
+`<base-url>/api/greader.php`. It's plain HTTP + form posts + JSON, all
+already covered by `reqwest` and `serde_json` — **no new dependencies
+should be needed.**
+
+On the server, the person has to (a) allow API access in FreshRSS's
+authentication settings and (b) set an **API password** under their profile.
+The API password is separate from the account login password.
+
+Summary of the calls needed (paths relative to `/api/greader.php`).
+**Verify each against FreshRSS's own API documentation before coding —
+treat this table as a starting map, not a spec:**
+
+| Purpose | Call |
+|---|---|
+| Log in | `POST /accounts/ClientLogin` with `Email` + `Passwd`; the plain-text response contains an `Auth=` token, sent on later requests as `Authorization: GoogleLogin auth=<token>` |
+| List subscriptions (feeds + their categories) | `GET /reader/api/0/subscription/list?output=json` |
+| List unread item IDs | `GET /reader/api/0/stream/items/ids?output=json&s=user/-/state/com.google/reading-list&xt=user/-/state/com.google/read` |
+| Fetch item contents by ID | `POST /reader/api/0/stream/items/contents` with the item IDs |
+| Get a write token | `GET /reader/api/0/token` |
+| Mark items read | `POST /reader/api/0/edit-tag` with `a=user/-/state/com.google/read`, the item IDs, and the write token |
+| Subscribe to a new feed | `POST /reader/api/0/subscription/quickadd` with the feed URL and the write token |
+
+Item ID formats can differ between endpoints (short numeric vs. long-form).
+Normalize them in exactly one place in the client so the rest of the code
+only ever sees one form.
+
+### How it fits the existing architecture
+
+```
+  freshrss/ module ──▶ normalizes into the same Article struct ──▶ Storage ──▶ TUI
+```
+
+The three-layer design doesn't change. FreshRSS is one more thing that
+feeds the fetch layer, and everything downstream (storage, TUI) keeps
+working on `Article` values without caring where they came from.
+
+- **New module `src/freshrss/`**, compiled only with the `freshrss`
+  feature, split into: `config` (parse `freshrss.toml`), `client` (HTTP and
+  protocol only — knows nothing about `Storage` or the UI), `mapping`
+  (turns the client's raw subscription/item shapes into `Article` values
+  and normalized IDs), and `sync` (reconciles FreshRSS state with
+  `Storage`).
+  - **Deliberately not a `Fetcher` impl.** The existing `Fetcher` trait
+    (`src/fetchers/mod.rs`) is shaped around "one source, one independent
+    fetch" — `main`'s fetch loop and `refresh_topic` call `.fetch()` once
+    per `ConfiguredSource`, catching each one's failure separately. The
+    Google Reader API is the opposite shape: one login + one write token
+    covers *every* subscribed feed, and unread items are fetched as a
+    single batch across the whole reading list, not per-feed. Forcing that
+    into one `Fetcher` per FreshRSS feed would mean re-logging-in and
+    re-fetching the full unread-ID list once per feed for no benefit.
+    Instead, `freshrss::sync` owns the whole batch (log in once, fetch
+    once, fan out to every feed's items) and produces `Article` values
+    itself via `freshrss::mapping` — it's driven directly (see "Sync
+    behavior" below and "Refresh triggers"), not through the `Fetcher`
+    trait.
+- **Hard boundary: nothing under `src/freshrss/` may import `ratatui`,
+  `crossterm`, or anything from `src/ui/`**, and it must not hardcode
+  filesystem paths (paths and config are passed in by the caller). This
+  keeps the module extractable: the Tier 3 native Android app plans to
+  move fetchers/storage into a shared Rust core (see Distribution Roadmap),
+  and this module should then be a move, not a rewrite.
+- **Mapping FreshRSS onto the one-topic-per-source rule:** a FreshRSS feed
+  becomes a source (name = the feed's title), and its FreshRSS category
+  becomes its topic, namespaced as `FreshRSS/<category>` (uncategorized
+  feeds go under `FreshRSS/Uncategorized`). The namespace means FreshRSS
+  topics can never collide with or merge into a local topic of the same
+  name, and they group together in the sidebar.
+- **Sidebar integration (resolved in Phase 0):** the top-level topic list
+  needs no change — `Storage::topics()` already does a plain `SELECT
+  DISTINCT topic FROM articles`, so a `FreshRSS/<category>` topic shows up
+  automatically the moment a FreshRSS article is inserted. The nested
+  *source* rows under an expanded topic are the part that doesn't fall out
+  for free: `ui::run` builds an immutable `HashMap<String, Vec<String>>`
+  (topic → source names) once at startup, from `sources.toml`-configured
+  sources only (`group_sources_by_topic`), and `sidebar_rows` reads that
+  map to decide what to draw. The fix is additive, not a rework: after
+  `group_sources_by_topic` runs, merge in FreshRSS source names from a
+  small new `Storage` query — distinct `(topic, source)` pairs where
+  `topic LIKE 'FreshRSS/%'` — into the same map, gated behind the
+  `freshrss` feature so the merge step doesn't exist at all when the
+  feature is off. This merge is re-run after every sync completes (not
+  just once at startup), so a feed added to FreshRSS mid-session appears
+  in the sidebar without restarting tuxwire, matching how the `a` flow
+  already updates `topics` live for local sources.
+  - **Zero-article-feed limitation:** because the sidebar merge queries
+    distinct `(topic, source)` pairs out of `articles` itself (not the
+    subscription list), a FreshRSS feed with **zero articles synced so
+    far** has no row to be distinct over yet, so it won't appear in the
+    sidebar at all — unlike a local `sources.toml` source, which shows up
+    from config alone regardless of whether it's produced any articles.
+    In practice this only matters for the brief window between
+    subscribing to a feed (via `a`'s FreshRSS destination, or directly on
+    the server) and the first sync that pulls at least one item from it;
+    a feed that's simply empty or fully read on the server has the same
+    "not visible until it has content" gap as any topic with no articles
+    at all. Not fixed in the first version — see "Deferred" below.
+- **Duplicates across origins:** if the same feed exists both locally and
+  in FreshRSS, its articles will appear twice (once per origin). That's
+  accepted for the first version and folds into the existing open question
+  about duplicate-article detection.
+
+### Storage additions (additive only)
+
+One new numbered migration in `migrations/` (use the next number after the
+highest existing file — check the directory, don't assume). **New tables
+only; no `ALTER` on `articles` or any other existing table**, keeping the
+no-destructive-schema-changes rule and letting an old database open cleanly
+with or without the feature.
+
+```
+freshrss_items
+  article_id         INTEGER PRIMARY KEY REFERENCES articles(id)
+  remote_id          TEXT UNIQUE NOT NULL   -- FreshRSS item ID; dedupe + read sync
+  feed_id            TEXT NOT NULL          -- FreshRSS feed identifier
+  pending_read_push  BOOLEAN DEFAULT 0      -- local read change not yet sent
+
+freshrss_meta
+  key                TEXT PRIMARY KEY       -- e.g. last successful sync time
+  value              TEXT
+```
+
+### Refresh triggers
+
+Unlike local sources, FreshRSS sync is never scoped to "the currently
+selected topic" — one login covers every subscribed feed at once (see
+"Deliberately not a `Fetcher` impl" above), so it doesn't fit `r`'s
+existing per-topic shape. Concretely, `r` today (`ui::draw_until_quit`)
+only refreshes sources filed under whichever topic is selected in
+`View::Topic`, and does nothing at all in `View::Saved`/`View::History` —
+FreshRSS sync piggybacks on that same key rather than replacing it:
+
+1. **At startup**, when the feature is on, `freshrss.toml` has
+   `enabled = true`, and `sync_on_start` is `true` (see Configuration
+   below) — runs once in the background before/alongside the TUI opening,
+   the same "must never block or fail a local refresh" guarantee as
+   below.
+2. **On `r`**, but only while a `FreshRSS/*` topic is selected in
+   `View::Topic`. `r` on any local topic behaves exactly as it does on
+   `master` today (refreshes that topic's local sources only, via
+   `refresh_topic`) — FreshRSS sync never runs as a side effect of
+   refreshing an unrelated topic. `r` remains a no-op in `View::Saved` and
+   `View::History` for both local and FreshRSS sources, unchanged from
+   today.
+
+Both triggers run the same sync steps, described next, **never blocking
+local sources' own fetch/refresh** (same principle as the existing
+concurrent fetches: one slow or dead source never blocks the rest).
+
+### Sync behavior
+
+1. Log in and get a token.
+2. Fetch the subscription list (feeds → categories).
+3. Fetch unread item IDs; fetch contents only for IDs not already in
+   `freshrss_items`; insert `articles` rows plus their `freshrss_items` link
+   rows.
+4. **Pull read state:** any locally-unread FreshRSS-origin article whose ID
+   is no longer in the server's unread set was read elsewhere → mark it
+   read locally.
+5. **Push read state:** for rows with `pending_read_push = 1`, send
+   `edit-tag` read, and clear the flag only after the server confirms.
+
+When the person marks a FreshRSS-origin article read locally (`Enter` or
+`s`), set `pending_read_push = 1`. **Conflict rule:** a pending local change
+wins until it has been pushed; otherwise the server's state wins.
+
+**Failure handling:** if FreshRSS is unreachable, times out, or rejects the
+login, show a short message in the footer and carry on — local sources
+refresh normally, pending flags persist, and the next trigger (the next
+startup, or the next `r` on a `FreshRSS/*` topic) retries. A failed startup
+sync must never delay or block the TUI opening. All requests have explicit
+timeouts. A FreshRSS problem must never fail or delay a local refresh.
+
+### Adding feeds
+
+The default `a` flow is **unchanged**: paste a URL, validate with `feed-rs`,
+write to `sources.toml`. When FreshRSS is enabled, the confirm screen gains
+one optional choice of **destination: Local (default) or FreshRSS**.
+Choosing FreshRSS sends the feed URL via `quickadd` instead of writing to
+`sources.toml`; it appears in the sidebar after the next sync. If FreshRSS
+can't be reached, show the error and let the person retry or switch to
+Local — never lose the typed URL.
+
+### Configuration: `freshrss.toml`
+
+Follows the existing pattern (`sources.toml`, `theme.toml`, `export.toml`):
+config-driven, no interactive prompts, lives in `~/.config/tuxwire/`.
+
+```toml
+[freshrss]
+enabled       = false
+url           = "https://freshrss.example.com"   # base URL only, no /api/greader.php
+username      = "your-username"
+# Whether to run a sync in the background at startup (see "Refresh
+# triggers" above), in addition to `r` on a FreshRSS/* topic. Defaults to
+# true -- most people who enable FreshRSS at all want it current as soon
+# as tuxwire opens, without needing to remember to press `r` first.
+sync_on_start = true
+
+# The API password never goes in this file. Provide it one of two ways:
+#   1. password_file: path to a file containing only the API password
+#      (chmod 600), or
+#   2. the TUXWIRE_FRESHRSS_PASSWORD environment variable, which takes
+#      precedence over password_file when both are set.
+password_file = "~/.config/tuxwire/freshrss.pass"
+```
+
+Ship `freshrss.toml.example` in the repo. Add `freshrss.toml` and `*.pass`
+to `.gitignore` as a safety net.
+
+### Security rules
+
+- Never disable TLS verification. Warn if `url` is `http://` and the host is
+  not localhost.
+- The password and auth/write tokens are never logged, never included in
+  error messages, and never printed by `Debug` (wrap them in a small secret
+  type or implement `Debug` by hand to redact them).
+- On Unix, warn if `password_file` is readable by group or others.
+- Tokens live in memory only; log in again per refresh session.
+
+### Testing plan
+
+1. **Regression, feature off.** Build without `--features freshrss` and
+   confirm the program behaves exactly like `master`: adding sources, the
+   sidebar, `w3m`, and an existing database loading unchanged. Use a *copy*
+   of a real database.
+2. **Feature on, against a throwaway server.** Run FreshRSS in Docker
+   (`freshrss/freshrss`), enable API access, set an API password, add a few
+   test feeds, and exercise login, import, read sync both directions, and
+   adding a feed. Never point development at the real FreshRSS instance or
+   the real tuxwire database.
+3. **Unit tests** for parsing subscription/item JSON from saved fixture
+   files, ID normalization, and the reconcile logic — none of which need a
+   network.
+4. **Termux check.** `git fetch` and check out the branch in the existing
+   Termux clone; build and run there.
+
+### Build phases (stop and report after each)
+
+- **Phase 0 — read only.** Read this document and the code; report how
+  `Fetcher`, `Storage::topics()`, the sidebar, and the `a` flow actually
+  work, whether the `Fetcher` trait fits FreshRSS as-is, and what the next
+  migration number is. No code changes.
+- **Phase 1 — skeleton.** `freshrss` Cargo feature, empty `src/freshrss/`
+  module, `freshrss.toml` parsing, `freshrss.toml.example`. Off by default,
+  no behavior change.
+- **Phase 2 — storage.** The additive migration and the `Storage` methods
+  the sync needs, with tests.
+- **Phase 3 — client.** Login, subscription list, unread IDs, item
+  contents, against fixtures. No storage or UI yet.
+- **Phase 4 — pull.** Normalize items to `Article`, insert, dedupe by
+  `remote_id`, surface FreshRSS sources/topics in the sidebar, hook into
+  `r` with graceful failure.
+- **Phase 5 — read sync.** Pull reconcile + `pending_read_push` + push.
+- **Phase 6 — add feed.** The destination choice in the `a` flow.
+- **Phase 7 — polish.** README configuration section, `CHANGELOG.md` entry,
+  update this document from "planned" to describing what was actually
+  built, and full doc-comment pass per the Documentation Standards.
+
+### Deferred, not in the first version
+
+- Syncing **saved** as FreshRSS **starred** (and back). Saved articles are
+  permanent and carry notes, so the mapping deserves its own design.
+- Category/folder management, OPML.
+- Making the `freshrss` Cargo feature part of `default` — a merge-time
+  decision.
+- Android: when the shared core is extracted, revisit the TLS backend
+  (`rustls` is generally easier to cross-compile for Android than
+  OpenSSL). Do **not** change `reqwest`'s features on this branch.
+
+---
+
 ## Distribution Roadmap — the next chapter, not the current one
 
 **Explicitly not started.** We're still in the build phase — the app
@@ -595,6 +908,10 @@ manifest, Activity), not CLI binaries running inside Termux. Realistically
 weeks-to-months of casual evening work, several genuinely new skill areas
 (Kotlin, Compose, Android's build toolchain, cross-compiling via
 `uniffi-rs`). A long-term "someday" chapter, not a near-term target.
+The optional `src/freshrss/` module is deliberately written with no UI or
+terminal dependencies so it can move into that shared core as-is. The Android
+app will live in its own separate repository so `master` here stays untouched
+while that work happens.
 
 **Packaging niceties already decided, ready for whenever Tier 1 starts:**
 `w3m` should be listed as an `optdepends` (AUR) / `Recommends` (COPR) —
