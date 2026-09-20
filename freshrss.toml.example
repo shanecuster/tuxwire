@@ -21,6 +21,14 @@ username      = "your-username"
 # to true when this key is left out entirely.
 sync_on_start = true
 
+# The most items any *one* sync will fetch full contents for and store,
+# even if more unread items than this are waiting on the server. Defaults
+# to 500 when left out. A first sync against an account with thousands of
+# unread items backfills gradually across several syncs rather than
+# trying to pull everything in a single pass. Must be between 1 and
+# 10,000 -- tuxwire will refuse to start with a clear error otherwise.
+max_items_per_sync = 500
+
 # The API password is set under your FreshRSS profile (separate from your
 # account login password) and never goes in this file. Provide it one of
 # two ways:

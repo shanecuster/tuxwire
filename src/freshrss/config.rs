@@ -55,6 +55,16 @@ pub enum FreshRssConfig {
         /// triggers." Defaults to `true` (see `default_sync_on_start`
         /// below) when the key is omitted from the file entirely.
         sync_on_start: bool,
+        /// The most items any *one* sync will fetch full contents for and
+        /// insert, even when there are more unread items than this
+        /// waiting on the server. Already validated to a sensible range
+        /// by `into_config` below -- see `validate_max_items_per_sync`.
+        /// Defaults to 500 (see `default_max_items_per_sync`) when the
+        /// key is omitted. Per ARCHITECTURE.md's Phase 4 design: a first
+        /// sync against an account with thousands of unread items
+        /// backfills gradually across several syncs instead of trying to
+        /// pull everything in one pass.
+        max_items_per_sync: usize,
     },
 }
 
@@ -78,11 +88,24 @@ impl Password {
     /// plain getter (or implementing `Deref<Target = str>`, which would
     /// let it leak through ordinary-looking string operations without a
     /// trace) so every call site that reaches for the real secret says so
-    /// in its own source. The one caller that will exist once the client
-    /// (a later build phase) is written is the login request body — this
-    /// is deliberately *not* used anywhere yet.
+    /// in its own source. As of Phase 3, its one real caller is
+    /// `freshrss::client::Client::login`, which reads it right at the
+    /// point of building the login request body and nowhere else.
     pub fn expose_secret(&self) -> &str {
         &self.0
+    }
+
+    /// Builds a `Password` directly from plain text, bypassing every
+    /// normal resolution path (`freshrss.toml`'s `password_file`, the
+    /// `TUXWIRE_FRESHRSS_PASSWORD` env var). Test-only, `pub(crate)` (not
+    /// `pub`) -- the one real caller outside this module is
+    /// `freshrss::sync`'s manual live-server test, which needs a
+    /// `Password` built straight from an environment variable it reads
+    /// itself, without going through a real `freshrss.toml` file that
+    /// test has no reason to create.
+    #[cfg(test)]
+    pub(crate) fn from_plain_text_for_tests(text: String) -> Self {
+        Self(text)
     }
 }
 
@@ -139,6 +162,12 @@ struct RawFreshRss {
     /// expansion or the file itself has been read -- see
     /// `resolve_password`.
     password_file: Option<String>,
+    /// Defaults to 500 when omitted (see `default_max_items_per_sync`) --
+    /// not yet checked against `validate_max_items_per_sync`'s sensible
+    /// range, since that check belongs in `into_config` alongside every
+    /// other field's validation, not scattered into deserialization.
+    #[serde(default = "default_max_items_per_sync")]
+    max_items_per_sync: usize,
 }
 
 /// The default `sync_on_start` value when `freshrss.toml` omits the key
@@ -149,6 +178,28 @@ struct RawFreshRss {
 fn default_sync_on_start() -> bool {
     true
 }
+
+/// The default `max_items_per_sync` when `freshrss.toml` omits the key --
+/// 500 is the number the plan settled on: generous enough that a normal,
+/// regularly-synced account never notices the cap, small enough that a
+/// first sync against an account with thousands of unread items doesn't
+/// try to fetch and insert all of them in one pass (see
+/// `Client::CONTENTS_CHUNK_SIZE`'s doc comment -- at 100 items per
+/// request, 500 is 5 chunked requests, not 50+).
+fn default_max_items_per_sync() -> usize {
+    500
+}
+
+/// The range `max_items_per_sync` must fall in, checked by
+/// `validate_max_items_per_sync` below. `0` would make every sync
+/// silently fetch nothing forever, which is almost certainly a typo, not
+/// an intentional choice -- so the minimum is 1, not 0. The maximum
+/// (10,000) isn't a hard technical limit (there's no reason a larger
+/// value would actually break anything), just a sanity ceiling: a value
+/// far beyond it is more likely a mistyped extra zero than a deliberate
+/// choice, and it keeps one misconfigured sync from trying to fetch tens
+/// of thousands of items' full contents in a single pass.
+const MAX_ITEMS_PER_SYNC_RANGE: std::ops::RangeInclusive<usize> = 1..=10_000;
 
 impl RawFreshRss {
     /// Turns the raw, possibly-incomplete parse into a real
@@ -161,10 +212,17 @@ impl RawFreshRss {
     /// Fields are validated one at a time (rather than, say, collecting
     /// every problem into one combined error) so a person fixing
     /// `freshrss.toml` sees one clear, specific complaint at a time — same
-    /// pattern `RawSource::validate` uses for `sources.toml`.
-    fn into_config(self) -> anyhow::Result<FreshRssConfig> {
+    /// pattern `RawSource::validate` uses for `sources.toml`. That's for
+    /// hard *errors* -- fatal, `enabled = true` is unusable without this
+    /// fixed. Non-fatal *warnings* (an insecure URL, a loosely-permissioned
+    /// password file) are a different thing entirely: collected into the
+    /// returned `Vec<String>` instead of stopping anything, since `main`
+    /// now decides how to show them (the footer, once the TUI is up --
+    /// see ARCHITECTURE.md's "Config warnings in the footer" note) rather
+    /// than this module assuming stderr is always the right place.
+    fn into_config(self) -> anyhow::Result<(FreshRssConfig, Vec<String>)> {
         if !self.enabled {
-            return Ok(FreshRssConfig::Disabled);
+            return Ok((FreshRssConfig::Disabled, Vec::new()));
         }
 
         let url = self
@@ -173,15 +231,49 @@ impl RawFreshRss {
         let username = self.username.ok_or_else(|| {
             anyhow!("freshrss.toml has enabled = true but is missing a required 'username' field")
         })?;
+        validate_max_items_per_sync(self.max_items_per_sync)?;
 
+        // Every warning collected below goes into this one `Vec` instead
+        // of being printed as it's found -- `mut` because pushing onto it
+        // happens in more than one place (here, and inside
+        // `resolve_password`, which needs to add its own warning about
+        // `password_file`'s permissions without also owning the *rest* of
+        // this function's warnings).
+        let mut warnings = Vec::new();
         if let Some(warning) = insecure_url_warning(&url) {
-            eprintln!("warning: {warning}");
+            warnings.push(warning);
         }
 
-        let password = resolve_password(self.password_file.as_deref())?;
+        let password = resolve_password(self.password_file.as_deref(), &mut warnings)?;
 
-        Ok(FreshRssConfig::Enabled { url, username, password, sync_on_start: self.sync_on_start })
+        let config = FreshRssConfig::Enabled {
+            url,
+            username,
+            password,
+            sync_on_start: self.sync_on_start,
+            max_items_per_sync: self.max_items_per_sync,
+        };
+        Ok((config, warnings))
     }
+}
+
+/// Checks `value` against `MAX_ITEMS_PER_SYNC_RANGE`, returning a clear,
+/// specific error naming both the bad value and the acceptable range when
+/// it's out of bounds -- same "name what's wrong" contract as the
+/// `url`/`username` missing-field checks in `into_config` above, just for
+/// a value that's present but nonsensical rather than absent.
+fn validate_max_items_per_sync(value: usize) -> anyhow::Result<()> {
+    if MAX_ITEMS_PER_SYNC_RANGE.contains(&value) {
+        return Ok(());
+    }
+
+    bail!(
+        "freshrss.toml's max_items_per_sync ({value}) must be between {} and {} -- \
+         0 would make every sync fetch nothing, and a much larger value risks one sync \
+         trying to pull an unreasonable number of items at once",
+        MAX_ITEMS_PER_SYNC_RANGE.start(),
+        MAX_ITEMS_PER_SYNC_RANGE.end()
+    );
 }
 
 /// The bundled fallback `freshrss.toml`, embedded into the compiled binary
@@ -212,7 +304,19 @@ impl FreshRssConfig {
     /// it's propagated with `?`/`with_context` rather than silently
     /// falling back, same reasoning as every other loader in this
     /// codebase.
-    pub fn load() -> anyhow::Result<FreshRssConfig> {
+    ///
+    /// Returns the config *and* a `Vec<String>` of non-fatal warnings
+    /// (insecure URL, loosely-permissioned password file) rather than
+    /// printing them itself -- `main` is the one place that knows whether
+    /// the TUI is up yet, so it's the one place that can decide whether a
+    /// warning belongs on stderr (still nothing running) or in the
+    /// footer (see ARCHITECTURE.md's "Config warnings in the footer"
+    /// note). An empty `Vec` (not `None`) when there's nothing to warn
+    /// about, or when the config is `Disabled` -- a plain, always-there
+    /// `Vec` is simpler for every caller to iterate than an
+    /// `Option<Vec<String>>` that's only ever `None` in the "nothing to
+    /// say" case anyway.
+    pub fn load() -> anyhow::Result<(FreshRssConfig, Vec<String>)> {
         let path = freshrss_toml_path()?;
 
         let contents = match std::fs::read_to_string(&path) {
@@ -237,7 +341,14 @@ impl FreshRssConfig {
 /// The env var is checked first specifically so a person can override a
 /// committed/shared `freshrss.toml`'s `password_file` for one run (a
 /// throwaway test server, say) without editing the file itself.
-fn resolve_password(password_file: Option<&str>) -> anyhow::Result<Password> {
+///
+/// `warnings: &mut Vec<String>` rather than returning its own warning
+/// alongside the password (e.g. as a tuple) -- this function already has
+/// one job (produce a `Password` or a clear error), and threading the
+/// same `Vec` `into_config` is already building through means the
+/// person fixing `freshrss.toml` sees every warning together, in one
+/// place, regardless of which internal function happened to notice it.
+fn resolve_password(password_file: Option<&str>, warnings: &mut Vec<String>) -> anyhow::Result<Password> {
     if let Ok(from_env) = std::env::var("TUXWIRE_FRESHRSS_PASSWORD") {
         return Ok(Password(from_env));
     }
@@ -253,7 +364,7 @@ fn resolve_password(password_file: Option<&str>) -> anyhow::Result<Password> {
     let path = expand_tilde(password_file)?;
 
     if let Some(warning) = loose_permissions_warning(&path) {
-        eprintln!("warning: {warning}");
+        warnings.push(warning);
     }
 
     // The file's contents *are* the secret, so unlike every other
@@ -391,9 +502,10 @@ mod tests {
     #[test]
     fn disabled_config_ignores_missing_fields() {
         let raw: RawFreshRssFile = toml::from_str("[freshrss]\nenabled = false\n").unwrap();
-        let config = raw.freshrss.into_config().unwrap();
+        let (config, warnings) = raw.freshrss.into_config().unwrap();
 
         assert!(matches!(config, FreshRssConfig::Disabled));
+        assert!(warnings.is_empty());
     }
 
     /// A `freshrss.toml` with no `[freshrss]` section at all is a parse
@@ -406,6 +518,22 @@ mod tests {
     fn missing_freshrss_table_fails_to_parse() {
         let result: Result<RawFreshRssFile, _> = toml::from_str("");
         assert!(result.is_err());
+    }
+
+    /// The bundled `freshrss.toml.example` (embedded via `include_str!` as
+    /// `DEFAULT_FRESHRSS_TOML`, used as the fallback when no real
+    /// `freshrss.toml` exists yet) must itself parse and resolve cleanly
+    /// -- a comment-only edit to that file that accidentally breaks its
+    /// TOML syntax, or sets a `max_items_per_sync` outside the valid
+    /// range, would otherwise only surface the first time someone with no
+    /// `freshrss.toml` ran a `--features freshrss` build.
+    #[test]
+    fn bundled_default_freshrss_toml_parses_and_resolves() {
+        let raw: RawFreshRssFile = toml::from_str(DEFAULT_FRESHRSS_TOML).unwrap();
+        let (config, warnings) = raw.freshrss.into_config().unwrap();
+
+        assert!(matches!(config, FreshRssConfig::Disabled), "the bundled default ships with enabled = false");
+        assert!(warnings.is_empty());
     }
 
     /// `enabled = true` with no `url` fails with a message naming the
@@ -426,6 +554,76 @@ mod tests {
 
         let err = raw.freshrss.into_config().unwrap_err();
         assert!(err.to_string().contains("url"), "error should name the missing field: {err}");
+    }
+
+    /// `max_items_per_sync` defaults to 500 when the key is entirely
+    /// absent -- same "defaults are honored" contract as
+    /// `sync_on_start_defaults_to_true_when_omitted` above.
+    #[test]
+    fn max_items_per_sync_defaults_to_500_when_omitted() {
+        let file_path = temp_password_file("test-password");
+        let raw: RawFreshRssFile = toml::from_str(&format!(
+            r#"
+            [freshrss]
+            enabled = true
+            url = "https://freshrss.example.com"
+            username = "me"
+            password_file = {:?}
+            "#,
+            file_path.to_str().unwrap()
+        ))
+        .unwrap();
+
+        let (config, _warnings) = raw.freshrss.into_config().unwrap();
+        std::fs::remove_file(&file_path).ok();
+
+        match config {
+            FreshRssConfig::Enabled { max_items_per_sync, .. } => assert_eq!(max_items_per_sync, 500),
+            FreshRssConfig::Disabled => panic!("expected an enabled config"),
+        }
+    }
+
+    /// `max_items_per_sync = 0` is rejected with a clear error rather than
+    /// silently producing a sync that never fetches anything -- see
+    /// `validate_max_items_per_sync`'s doc comment for why 0 specifically
+    /// is treated as almost certainly a mistake.
+    #[test]
+    fn max_items_per_sync_of_zero_fails_with_clear_message() {
+        let raw: RawFreshRssFile = toml::from_str(
+            r#"
+            [freshrss]
+            enabled = true
+            url = "https://freshrss.example.com"
+            username = "me"
+            password_file = "/nonexistent"
+            max_items_per_sync = 0
+            "#,
+        )
+        .unwrap();
+
+        let err = raw.freshrss.into_config().unwrap_err();
+        assert!(err.to_string().contains("max_items_per_sync"), "error should name the field: {err}");
+    }
+
+    /// An absurdly large `max_items_per_sync` (almost certainly a typo,
+    /// e.g. an extra zero) is rejected the same way as zero, not silently
+    /// accepted just because it's technically a positive number.
+    #[test]
+    fn max_items_per_sync_above_the_sensible_range_fails_with_clear_message() {
+        let raw: RawFreshRssFile = toml::from_str(
+            r#"
+            [freshrss]
+            enabled = true
+            url = "https://freshrss.example.com"
+            username = "me"
+            password_file = "/nonexistent"
+            max_items_per_sync = 5000000
+            "#,
+        )
+        .unwrap();
+
+        let err = raw.freshrss.into_config().unwrap_err();
+        assert!(err.to_string().contains("max_items_per_sync"), "error should name the field: {err}");
     }
 
     /// `sync_on_start` defaults to `true` when the key is entirely absent
@@ -451,7 +649,7 @@ mod tests {
         ))
         .unwrap();
 
-        let config = raw.freshrss.into_config().unwrap();
+        let (config, _warnings) = raw.freshrss.into_config().unwrap();
         std::fs::remove_file(&file_path).ok();
 
         match config {
@@ -479,7 +677,7 @@ mod tests {
         ))
         .unwrap();
 
-        let config = raw.freshrss.into_config().unwrap();
+        let (config, _warnings) = raw.freshrss.into_config().unwrap();
         std::fs::remove_file(&file_path).ok();
 
         match config {
@@ -515,7 +713,8 @@ mod tests {
         unsafe {
             std::env::set_var("TUXWIRE_FRESHRSS_PASSWORD", "password-from-env");
         }
-        let password = resolve_password(Some(file_path.to_str().unwrap())).unwrap();
+        let mut warnings = Vec::new();
+        let password = resolve_password(Some(file_path.to_str().unwrap()), &mut warnings).unwrap();
         unsafe {
             std::env::remove_var("TUXWIRE_FRESHRSS_PASSWORD");
         }
@@ -535,7 +734,8 @@ mod tests {
         }
 
         let file_path = temp_password_file("real-password-with-trailing-newline\n");
-        let password = resolve_password(Some(file_path.to_str().unwrap())).unwrap();
+        let mut warnings = Vec::new();
+        let password = resolve_password(Some(file_path.to_str().unwrap()), &mut warnings).unwrap();
         std::fs::remove_file(&file_path).ok();
 
         assert_eq!(password.expose_secret(), "real-password-with-trailing-newline");
@@ -551,7 +751,8 @@ mod tests {
             std::env::remove_var("TUXWIRE_FRESHRSS_PASSWORD");
         }
 
-        let err = resolve_password(None).unwrap_err();
+        let mut warnings = Vec::new();
+        let err = resolve_password(None, &mut warnings).unwrap_err();
         assert!(err.to_string().contains("password"), "error should mention the password: {err}");
     }
 
@@ -580,6 +781,7 @@ mod tests {
             username: "me".to_string(),
             password: Password("super-secret-value".to_string()),
             sync_on_start: true,
+            max_items_per_sync: 500,
         };
 
         assert!(!format!("{config:?}").contains("super-secret-value"));
@@ -595,6 +797,42 @@ mod tests {
 
         let warning = insecure_url_warning("http://freshrss.example.com").unwrap();
         assert!(warning.contains("freshrss.example.com"));
+    }
+
+    /// `into_config` actually surfaces `insecure_url_warning`'s result in
+    /// its returned `Vec<String>` -- this is the integration point that
+    /// matters: the pure function above being correct doesn't by itself
+    /// guarantee `into_config` is threading its result anywhere, since it
+    /// used to just `eprintln!` it directly instead of collecting it.
+    #[test]
+    fn into_config_collects_the_insecure_url_warning() {
+        let file_path = temp_password_file("test-password");
+        // `chmod 600` so `loose_permissions_warning` stays quiet -- this
+        // test is only about the URL warning; a stray second warning from
+        // whatever the OS umask happened to leave the temp file at would
+        // make the length assertion below flaky/misleading.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&file_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let raw: RawFreshRssFile = toml::from_str(&format!(
+            r#"
+            [freshrss]
+            enabled = true
+            url = "http://freshrss.example.com"
+            username = "me"
+            password_file = {:?}
+            "#,
+            file_path.to_str().unwrap()
+        ))
+        .unwrap();
+
+        let (_config, warnings) = raw.freshrss.into_config().unwrap();
+        std::fs::remove_file(&file_path).ok();
+
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("freshrss.example.com"));
     }
 
     /// `chmod 600` (owner-only) is fine; anything readable by group or

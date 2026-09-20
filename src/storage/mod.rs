@@ -576,6 +576,113 @@ impl Storage {
         let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
         rows.collect::<rusqlite::Result<Vec<(String, String)>>>().map_err(Into::into)
     }
+
+    /// Inserts `article`, but -- unlike `insert_article` above -- refuses
+    /// to ever return an existing row's ID. `insert_article` deliberately
+    /// treats "a row with this URL already exists" as success (that's
+    /// exactly what a local re-fetch of an unchanged feed wants: the
+    /// second run is a harmless no-op, and the caller still gets a valid
+    /// `article_id` back either way). FreshRSS sync needs the opposite
+    /// answer to the same question: if a synced item's URL collides with
+    /// an article that's *already* in `articles` -- local-origin, or
+    /// somehow a different FreshRSS item -- linking a new
+    /// `freshrss_items` row to that existing article's ID would silently
+    /// attach FreshRSS bookkeeping (and, later, remote read-state pushes)
+    /// to a row this sync never actually created and doesn't own. Per
+    /// ARCHITECTURE.md: that existing row's topic, source, read/saved
+    /// state, and note must never be touched or reinterpreted this way --
+    /// the conflicting FreshRSS item is skipped instead.
+    ///
+    /// Returns `Some(id)` only when a *new* row was actually inserted,
+    /// `None` when `ON CONFLICT(url) DO NOTHING` discarded the insert --
+    /// the caller (`freshrss::sync`) uses `None` as its signal to skip
+    /// linking this item and count it as a URL conflict, rather than
+    /// proceeding as if the insert had succeeded.
+    #[cfg(feature = "freshrss")]
+    pub fn insert_article_if_new_url(&self, article: &Article) -> anyhow::Result<Option<i64>> {
+        // `Connection::execute` returns the number of rows the statement
+        // actually changed -- `usize`, not a `bool` or the row's ID. With
+        // `ON CONFLICT(url) DO NOTHING`, a colliding insert changes zero
+        // rows (SQLite discarded it before it ever became a real row),
+        // while a genuinely new row changes exactly one. Checking this
+        // count is what makes the distinction atomic: there's no separate
+        // "does this URL already exist?" query racing against this
+        // insert, because the single `INSERT` statement itself is both
+        // the check and the write.
+        let rows_changed = self.conn.execute(
+            "INSERT INTO articles (title, url, source, topic, timestamp, read, skipped, saved, note, saved_at, noted_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+             ON CONFLICT(url) DO NOTHING",
+            params![
+                article.title,
+                article.url,
+                article.source,
+                article.topic,
+                article.timestamp,
+                article.read,
+                article.skipped,
+                article.saved,
+                article.note,
+                article.saved_at,
+                article.noted_at,
+            ],
+        )?;
+
+        if rows_changed == 0 {
+            return Ok(None);
+        }
+
+        // `last_insert_rowid()` is only trustworthy immediately after a
+        // statement that's known to have actually inserted a row on
+        // *this* connection -- the `rows_changed == 0` check above is
+        // what guarantees that's the case here, unlike `insert_article`'s
+        // own `SELECT ... WHERE url = ?1` fallback, which has to work
+        // whether or not this exact call was the one that inserted it.
+        Ok(Some(self.conn.last_insert_rowid()))
+    }
+
+    /// Sets how long this connection will wait and retry, instead of
+    /// immediately failing with `SQLITE_BUSY`, when a write finds SQLite's
+    /// single-writer lock already held by another connection to the same
+    /// database file. Matters specifically once a FreshRSS sync gets its
+    /// own separate `Storage::open()` connection (Phase 4's startup sync
+    /// runs on its own thread, deliberately not sharing the UI's
+    /// connection -- see ARCHITECTURE.md's "How the background sync
+    /// shares Storage with the UI"): two independent connections to one
+    /// `tuxwire.db` file can now genuinely both want to write at close to
+    /// the same moment, and rusqlite's out-of-the-box default is *no*
+    /// retry at all (an immediate error) rather than a sensible wait.
+    /// Every regular single-connection use of `Storage` (the UI's own
+    /// connection when FreshRSS is off, or on but not mid-sync) never
+    /// contends with itself, so this has nothing to do there -- callers
+    /// opt in explicitly instead of `Storage::open` setting this
+    /// unconditionally for every connection.
+    #[cfg(feature = "freshrss")]
+    pub fn set_busy_timeout(&self, timeout: std::time::Duration) -> anyhow::Result<()> {
+        self.conn.busy_timeout(timeout).map_err(Into::into)
+    }
+
+    /// Deletes the `articles` row at `url`, and its `freshrss_items` link
+    /// row if it has one -- test-only, `pub(crate)`. Two separate
+    /// `DELETE`s, not one relying on a foreign-key cascade: this
+    /// codebase never turns SQLite's foreign-key enforcement on (see
+    /// migration 004's own comment on `REFERENCES articles(id)` being
+    /// documentation, not an enforced constraint, by default), so nothing
+    /// here would automatically remove a `freshrss_items` row just
+    /// because its `articles` row disappeared -- explicit is what's
+    /// actually correct given that. The one real caller is
+    /// `freshrss::sync`'s manual live-server test, which needs to free up
+    /// a URL a real sync already claimed in order to set up a URL-conflict
+    /// scenario against real server data.
+    #[cfg(all(test, feature = "freshrss"))]
+    pub(crate) fn delete_article_for_tests(&self, url: &str) -> anyhow::Result<()> {
+        self.conn.execute(
+            "DELETE FROM freshrss_items WHERE article_id = (SELECT id FROM articles WHERE url = ?1)",
+            params![url],
+        )?;
+        self.conn.execute("DELETE FROM articles WHERE url = ?1", params![url])?;
+        Ok(())
+    }
 }
 
 /// Maps one row from a `SELECT id, title, url, source, topic, timestamp,
@@ -1172,6 +1279,66 @@ mod tests {
             storage.insert_freshrss_item(article_id, "item-1", "feed-1").unwrap();
 
             assert_eq!(storage.freshrss_article_id_by_remote_id("item-1").unwrap(), Some(article_id));
+        }
+
+        /// A genuinely new URL inserts normally and returns `Some(id)` --
+        /// `insert_article_if_new_url`'s ordinary, non-conflicting path.
+        #[test]
+        fn insert_article_if_new_url_inserts_a_genuinely_new_url() {
+            let storage = test_storage();
+            let article = Article::new(
+                "New from FreshRSS".to_string(),
+                "https://example.com/new".to_string(),
+                "Some Feed".to_string(),
+                "FreshRSS/tech".to_string(),
+                Utc::now(),
+            );
+
+            let id = storage.insert_article_if_new_url(&article).unwrap();
+
+            assert!(id.is_some());
+            assert_eq!(storage.article_count().unwrap(), 1);
+        }
+
+        /// The exact scenario ARCHITECTURE.md's URL-conflict rule exists
+        /// for: a local (non-FreshRSS) article already occupies this URL.
+        /// `insert_article_if_new_url` must return `None` -- never the
+        /// existing row's id -- and must leave that row completely
+        /// unchanged (topic, source, read state all still whatever the
+        /// local article had), so a caller has no way to accidentally
+        /// treat someone's existing local article as a FreshRSS item.
+        #[test]
+        fn insert_article_if_new_url_never_returns_or_touches_a_conflicting_row() {
+            let storage = test_storage();
+            let local_article = Article::new(
+                "A locally-added article".to_string(),
+                "https://example.com/shared".to_string(),
+                "Phoronix".to_string(),
+                "kernel".to_string(),
+                Utc::now(),
+            );
+            let local_id = storage.insert_article(&local_article).unwrap();
+            storage.mark_read(local_id).unwrap();
+
+            let freshrss_item = Article::new(
+                "The same story, from FreshRSS".to_string(),
+                "https://example.com/shared".to_string(),
+                "Some Feed".to_string(),
+                "FreshRSS/tech".to_string(),
+                Utc::now(),
+            );
+
+            let result = storage.insert_article_if_new_url(&freshrss_item).unwrap();
+
+            assert_eq!(result, None, "a colliding URL must never hand back the existing row's id");
+            assert_eq!(storage.article_count().unwrap(), 1, "no second row should have been created");
+
+            let articles = storage.articles_by_topic("kernel").unwrap();
+            assert_eq!(articles.len(), 1);
+            assert_eq!(articles[0].id, local_id);
+            assert_eq!(articles[0].source, "Phoronix", "the existing row's source must be untouched");
+            assert_eq!(articles[0].topic, "kernel", "the existing row's topic must be untouched");
+            assert!(articles[0].read, "the existing row's read state must be untouched");
         }
 
         /// `set_pending_read_push`/`clear_pending_read_push` toggle the

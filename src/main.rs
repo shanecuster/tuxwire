@@ -143,6 +143,57 @@ async fn main() -> anyhow::Result<()> {
     // screen swaps to a blank buffer -- that's expected, not a bug losing
     // that output.
     let theme = Theme::load()?;
+
+    // FreshRSS startup sync (Phase 4). Entirely absent from the compiled
+    // program without the `freshrss` feature -- the `#[cfg(...)]` on
+    // this whole block, not a runtime `if`, is what guarantees that, the
+    // same "off means identical to master" compile-time gate every other
+    // FreshRSS hook point in this file... well, there is no other one
+    // yet, but the pattern matches `#[cfg(feature = "freshrss")] mod
+    // freshrss;` above.
+    //
+    // Building `freshrss_startup` here (rather than inside `ui::run`
+    // itself) is what keeps `ui::run`'s non-FreshRSS callers -- there
+    // are none today, but the shape matters -- from ever needing to know
+    // how a `Client`/background thread get constructed; `ui` only ever
+    // sees the already-built `FreshRssStartup` (warnings plus an
+    // `Option` receiver), never `freshrss::config`/`freshrss::client`
+    // types directly at this call site.
+    #[cfg(feature = "freshrss")]
+    let freshrss_startup = {
+        // `FreshRssConfig::load` never touches the network -- it's a
+        // TOML read plus a password-file read, both fast and local, so
+        // doing this synchronously right here (rather than also
+        // backgrounding it) doesn't risk delaying the TUI opening the
+        // way an actual sync would.
+        let (config, warnings) = freshrss::config::FreshRssConfig::load()?;
+
+        // Only `Enabled { sync_on_start: true, .. }` actually spawns a
+        // sync -- `Disabled` and `Enabled { sync_on_start: false, .. }`
+        // both produce a `FreshRssStartup` with `sync_receiver: None`,
+        // still carrying whatever `warnings` `load` collected (a
+        // disabled config never has any; an enabled-but-manual-sync one
+        // still might, e.g. an insecure `url`).
+        let sync_receiver = match config {
+            freshrss::config::FreshRssConfig::Enabled { url, username, password, sync_on_start: true, max_items_per_sync } => {
+                Some(freshrss::sync::spawn_startup_sync(url, username, password, max_items_per_sync))
+            }
+            _ => None,
+        };
+
+        ui::FreshRssStartup { warnings, sync_receiver }
+    };
+
+    // `ui::run` reads `~/.local/share/tuxwire/tuxwire.db` and
+    // `~/.config/tuxwire/theme.toml` (already loaded above) and takes
+    // over the terminal until `q` is pressed. Everything printed above
+    // (the fetch log, the storage summary) will already have scrolled
+    // off by the time this happens, since entering the alternate screen
+    // swaps to a blank buffer -- that's expected, not a bug losing that
+    // output.
+    #[cfg(feature = "freshrss")]
+    ui::run(&storage, &theme, &sources, freshrss_startup)?;
+    #[cfg(not(feature = "freshrss"))]
     ui::run(&storage, &theme, &sources)?;
 
     Ok(())

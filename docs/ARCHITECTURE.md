@@ -829,10 +829,22 @@ working on `Article` values without caring where they came from.
     a feed that's simply empty or fully read on the server has the same
     "not visible until it has content" gap as any topic with no articles
     at all. Not fixed in the first version — see "Deferred" below.
-- **Duplicates across origins:** if the same feed exists both locally and
-  in FreshRSS, its articles will appear twice (once per origin). That's
-  accepted for the first version and folds into the existing open question
-  about duplicate-article detection.
+- **Duplicates across origins (corrected in Phase 4):** an earlier version
+  of this section said a story that exists both locally and in FreshRSS
+  "will appear twice (once per origin)." Building the actual insert path
+  surfaced a sharper rule than that: `articles.url` is `UNIQUE`, so the
+  *second* origin to try to insert a given URL was always going to hit a
+  conflict one way or another — the only real design question was what
+  happens at that conflict, not whether one occurs. The answer Phase 4
+  implements: the FreshRSS item is **silently skipped**, not duplicated,
+  and whichever article got there first (almost always the local one,
+  since local sources typically sync faster/more often) keeps sole
+  ownership of that row — its topic, source, read/saved state, and note
+  are never touched or reinterpreted as FreshRSS's, and no
+  `freshrss_items` row is ever created for the skipped item. See "URL
+  conflicts" under Phase 4's notes below for the exact mechanism
+  (`Storage::insert_article_if_new_url`) and why "skip and count" was
+  chosen over "let FreshRSS's insert win" or "merge the two somehow."
 
 ### Storage additions (additive only)
 
@@ -905,6 +917,112 @@ startup, or the next `r` on a `FreshRSS/*` topic) retries. A failed startup
 sync must never delay or block the TUI opening. All requests have explicit
 timeouts. A FreshRSS problem must never fail or delay a local refresh.
 
+### Phase 4 implementation notes
+
+Decisions made while actually building the pull path, beyond what was
+already settled above:
+
+- **How the background sync shares `Storage` with the UI.** Two different
+  triggers, two different mechanisms:
+  - **`r` on a `FreshRSS/*` topic** is synchronous, same thread, same
+    `&Storage` the rest of the UI already has in scope — it drives
+    `freshrss::sync::run`'s `.await`s with `tokio::task::block_in_place` +
+    `Handle::current().block_on(...)`, the exact same pattern
+    `ui::refresh_topic` already uses for local sources' async fetches.
+    Nothing else touches `storage` while this blocks, so there's no real
+    concurrency to reason about here at all.
+  - **The startup sync** genuinely runs concurrently with the TUI opening
+    (the whole point of "must never delay the TUI opening"), and
+    `rusqlite::Connection` is `Send` but not `Sync` — a `&Storage` cannot
+    be shared between two threads. Rather than wrap the UI's `Storage` in
+    an `Arc<Mutex<_>>` (which every existing call site would then have to
+    route through), the startup sync runs on its own `std::thread::spawn`
+    (not `tokio::spawn` — see below) and opens its **own, independent**
+    `Storage::open()` connection to the same `tuxwire.db` file. SQLite
+    itself arbitrates access between the two connections;
+    `Storage::set_busy_timeout` (called on both connections once the
+    feature is on) turns a rare moment of write contention into a short
+    wait instead of an immediate `SQLITE_BUSY` error.
+  - **Why `std::thread::spawn`, not `tokio::spawn`:** the sync needs to
+    interleave `.await`s with plain synchronous `Storage` calls on a
+    *borrowed* `&Storage`. `tokio::spawn` requires its future to be
+    `Send`, and a future holding a `&Storage` across an `.await` point
+    needs `Storage: Sync` to be `Send` — which it isn't, for the same
+    `Connection` reason as above. A plain OS thread has no such
+    requirement; a small single-threaded tokio runtime
+    (`Builder::new_current_thread()`) is built *inside* that thread just
+    to drive `run`'s `.await`s via `.block_on(...)`, and `#[tokio::main]`'s
+    own runtime never has to schedule any of this work.
+  - The startup sync reports back to the TUI over a plain
+    `std::sync::mpsc::Receiver<anyhow::Result<SyncSummary>>` —
+    `draw_until_quit`'s event-wait loop polls with a short timeout
+    (instead of blocking forever on `event::read()`) only while that
+    receiver is still waiting on something, so the sync's result shows up
+    promptly without the person needing to press a key first, and the
+    loop falls back to the ordinary blocking read for the rest of the
+    session the moment a result (or a disconnect) arrives.
+
+- **`max_items_per_sync` (default 500, `freshrss.toml`, validated to
+  1–10,000).** Applied *after* filtering out ids already linked in
+  `freshrss_items`: of whatever's left, only the newest `max_items_per_sync`
+  are fetched this round (unread ids arrive newest-first — see below), so
+  a first sync against an account with thousands of unread items
+  backfills gradually across several syncs instead of trying to pull
+  everything in one pass.
+
+- **Unread ids are newest-first, confirmed twice.** Verified directly
+  against a live server in Phase 3 (a page's items came back in
+  decreasing id order), and the ids themselves are assigned in increasing
+  crawl order — so the front of the list is always the newest unread
+  item. `freshrss::mapping::select_ids_to_fetch` relies on this directly:
+  it doesn't re-sort anything, it just filters and takes the first
+  `max_items_per_sync` of whatever order `stream/items/ids` already
+  returned.
+
+- **A truncated unread-id list skips the read-state reconcile, not the
+  whole sync.** `Client::unread_item_ids` hitting its own `MAX_ID_PAGES`
+  cap no longer fails the request — it returns `UnreadItemIds { ids,
+  truncated: true }`, everything collected so far plus a flag. New items
+  still get fetched and inserted normally; `SyncSummary::truncated`
+  carries the flag forward so that Phase 5's "pull read state" step (item
+  4 above) can skip itself entirely for a truncated sync — "this item
+  isn't in my unread list" is meaningless when the list itself is known
+  to be missing an unknown number of genuinely-unread items. Not
+  implemented yet (Phase 5), but the plumbing for it exists now.
+
+- **URL conflicts never touch or link the existing row.**
+  `Storage::insert_article_if_new_url` runs the same
+  `INSERT ... ON CONFLICT(url) DO NOTHING` as `insert_article`, but checks
+  `Connection::execute`'s own rows-changed count instead of falling back
+  to a `SELECT ... WHERE url = ?1` — a colliding insert changes zero rows,
+  and only a genuine zero-row result is trusted with `None`; anything else
+  calls `last_insert_rowid()`. `freshrss::sync::run` never links a
+  `freshrss_items` row unless this returns `Some(id)`, so a URL collision
+  with a pre-existing (local, or otherwise-origin) article is always
+  skipped and counted, never adopted. See the corrected "Duplicates
+  across origins" bullet above.
+
+- **Config warnings move to the footer.** `FreshRssConfig::load` no longer
+  `eprintln!`s `insecure_url_warning`/`loose_permissions_warning` directly
+  — it returns them in a `Vec<String>` alongside the config, and `main.rs`
+  hands that `Vec` to `ui::run`, which shows the first one in the footer
+  once the TUI is actually up (an `eprintln!` before that point would
+  scroll away the instant the alternate screen opens, unseen).
+
+- **Title text and HTML entities.** Checked directly against a live
+  server rather than guessing: FreshRSS does **not** emit HTML entities
+  (`&amp;`, etc.) in any JSON text field. Instead, at least for `&`, it
+  substitutes a visually similar full-width Unicode character —
+  `subscription/list` returned a real subscribed feed's title as
+  `"Engadget - Technology News \u{FF06} Expert Reviews"` (`U+FF06
+  FULLWIDTH AMPERSAND`, confirmed by codepoint, not `&amp;` or a plain
+  `&`). `freshrss::mapping` therefore does **no** entity-decoding step on
+  titles — there's nothing in `&amp;`/`&lt;`/`&gt;` form to decode, and
+  adding a decode step would do nothing useful against text that's
+  already plain, displayable UTF-8 (just occasionally with an unexpected
+  substituted character, which is FreshRSS's own behavior to display,
+  not a bug in tuxwire's mapping).
+
 ### Adding feeds
 
 The default `a` flow is **unchanged**: paste a URL, validate with `feed-rs`,
@@ -930,6 +1048,13 @@ username      = "your-username"
 # true -- most people who enable FreshRSS at all want it current as soon
 # as tuxwire opens, without needing to remember to press `r` first.
 sync_on_start = true
+
+# The most items any *one* sync will fetch full contents for and store,
+# even with more unread items than this waiting on the server. Defaults
+# to 500. Must be between 1 and 10,000 -- tuxwire refuses to start with a
+# clear error otherwise. See Phase 4's implementation notes above for why
+# this backfills gradually rather than trying to pull everything at once.
+max_items_per_sync = 500
 
 # The API password never goes in this file. Provide it one of two ways:
 #   1. password_file: path to a file containing only the API password
@@ -982,9 +1107,15 @@ to `.gitignore` as a safety net.
   the sync needs, with tests.
 - **Phase 3 — client.** Login, subscription list, unread IDs, item
   contents, against fixtures. No storage or UI yet.
-- **Phase 4 — pull.** Normalize items to `Article`, insert, dedupe by
-  `remote_id`, surface FreshRSS sources/topics in the sidebar, hook into
-  `r` with graceful failure.
+- **Phase 4 — pull. Done.** Normalize items to `Article`
+  (`freshrss::mapping`), insert with URL-conflict protection
+  (`Storage::insert_article_if_new_url`), dedupe by `remote_id`, surface
+  FreshRSS sources/topics in the sidebar (`merge_freshrss_sources`), and
+  hook into both refresh triggers — startup (its own background thread +
+  `Storage` connection) and `r` on a `FreshRSS/*` topic (synchronous,
+  mirroring `refresh_topic`) — with graceful failure shown in the footer
+  either way. See "Phase 4 implementation notes" above for the design
+  decisions this surfaced.
 - **Phase 5 — read sync.** Pull reconcile + `pending_read_push` + push.
 - **Phase 6 — add feed.** The destination choice in the `a` flow.
 - **Phase 7 — polish.** README configuration section, `CHANGELOG.md` entry,

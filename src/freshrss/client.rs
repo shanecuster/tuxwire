@@ -53,8 +53,9 @@ const ITEMS_PER_PAGE: u32 = 1000;
 /// missing" is trusting the server to eventually say so. This constant is
 /// the fallback that keeps a bug, or a FreshRSS instance that never
 /// terminates the stream, from turning into an infinite loop: at
-/// `ITEMS_PER_PAGE` × `MAX_ID_PAGES` = 50,000 IDs, `unread_item_ids` gives
-/// up and returns a clear error instead of hanging the app.
+/// `ITEMS_PER_PAGE` × `MAX_ID_PAGES` = 50,000 IDs, `unread_item_ids` stops
+/// and returns whatever it collected with `UnreadItemIds::truncated` set,
+/// instead of hanging the app or failing the whole sync outright.
 const MAX_ID_PAGES: usize = 50;
 
 /// How many item IDs go into a single `stream/items/contents` request.
@@ -206,6 +207,23 @@ struct ItemRefsPage {
     /// missing field as a parse error.
     #[serde(default)]
     continuation: Option<String>,
+}
+
+/// What `Client::unread_item_ids` hands back: every id it managed to
+/// collect, and whether it stopped early because `MAX_ID_PAGES` was hit
+/// rather than because the server actually ran out of items. Not a
+/// `Result`/error for the truncated case -- see `unread_item_ids`'s doc
+/// comment for why a truncated set is still useful data, not a failure.
+#[derive(Debug)]
+pub struct UnreadItemIds {
+    /// Every id collected before this call stopped, newest first.
+    pub ids: Vec<String>,
+    /// `true` if pagination stopped because `MAX_ID_PAGES` was reached,
+    /// not because the server signaled an empty final page. A caller
+    /// (`freshrss::sync`) must treat `ids` as an incomplete view of the
+    /// server's real unread set when this is `true` -- see
+    /// `unread_item_ids`'s doc comment.
+    pub truncated: bool,
 }
 
 /// One synced article's full content, as `stream/items/contents` returns
@@ -397,7 +415,10 @@ impl Client {
 
     /// Fetches every unread item's ID across all subscribed feeds,
     /// following FreshRSS's `c=`/`continuation` pagination until the
-    /// server reports it's out of items.
+    /// server reports it's out of items -- newest item first, oldest
+    /// last (verified against a live server: item IDs are assigned in
+    /// increasing crawl order, and `stream/items/ids` returns them
+    /// largest-ID-first).
     ///
     /// ## Why this isn't just "loop until `continuation` is missing"
     ///
@@ -413,17 +434,24 @@ impl Client {
     /// true last page, this still terminates correctly instead of making
     /// one pointless extra request).
     ///
-    /// ## The hard cap
+    /// ## The hard cap doesn't fail the sync
     ///
     /// `for _ in 0..MAX_ID_PAGES` bounds the loop unconditionally: even if
     /// every single response somehow kept sending a `continuation`
     /// forever (a server bug, or two servers disagreeing about the
     /// protocol), this function gives up after `MAX_ID_PAGES` requests
-    /// rather than hanging the app. A `loop { ... }` with no such bound
-    /// would trust the server completely -- exactly the kind of trust
-    /// ARCHITECTURE.md's "never blocking local sources' own fetch" rule
-    /// says not to extend to FreshRSS.
-    pub async fn unread_item_ids(&self, auth: &AuthToken) -> anyhow::Result<Vec<String>> {
+    /// rather than hanging the app. Unlike an earlier version of this
+    /// function, hitting the cap is **not** treated as an error -- it
+    /// returns everything collected so far with `truncated: true` instead
+    /// of a `bail!`. A caller (`freshrss::sync`) that got a full,
+    /// untruncated set can safely reconcile "this item is no longer in
+    /// the unread set, so it must have been read elsewhere" (Phase 5); a
+    /// caller that got a truncated set cannot draw that conclusion at
+    /// all, since a truncated set is missing an unknown number of ids
+    /// that are still genuinely unread -- but there's no reason to fail
+    /// the *whole* sync (new items, read-state pushes) just because that
+    /// one downstream reconcile step has to be skipped for this round.
+    pub async fn unread_item_ids(&self, auth: &AuthToken) -> anyhow::Result<UnreadItemIds> {
         let mut ids = Vec::new();
         let mut continuation: Option<String> = None;
 
@@ -448,7 +476,7 @@ impl Client {
             // An empty page is the one unambiguous "done" signal -- see
             // the doc comment above.
             if page.item_refs.is_empty() {
-                return Ok(ids);
+                return Ok(UnreadItemIds { ids, truncated: false });
             }
 
             // Normalize every ID right here, at the one place raw
@@ -466,19 +494,17 @@ impl Client {
                 // No continuation on a non-empty page: treat it the same
                 // as an empty next page would have -- see the doc comment
                 // above for why this belt-and-suspenders check exists.
-                None => return Ok(ids),
+                None => return Ok(UnreadItemIds { ids, truncated: false }),
             }
         }
 
         // Every iteration above returns early the moment the server signals
         // "done" -- reaching here means it never did, across MAX_ID_PAGES
-        // requests. Fail loudly instead of silently handing back a
-        // partial, possibly-misleading list of unread items.
-        bail!(
-            "FreshRSS unread item id pagination did not terminate after {MAX_ID_PAGES} pages ({} items so far) -- \
-             stopping to avoid an unbounded loop",
-            ids.len()
-        );
+        // requests. `truncated: true` is this function's way of telling
+        // the caller "here's everything I got, but I stopped before the
+        // server said to" -- see the doc comment above for why that's not
+        // the same as failing outright.
+        Ok(UnreadItemIds { ids, truncated: true })
     }
 
     /// Fetches full item contents (title, URL, body, feed of origin...)

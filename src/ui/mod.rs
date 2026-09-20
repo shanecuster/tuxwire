@@ -60,16 +60,57 @@
 
 use crate::export::{self, ExportConfig};
 use crate::fetchers::{self, ConfiguredSource, Fetcher};
+// Only reachable at all when the crate was built with `--features
+// freshrss` -- `mod freshrss;` in `main.rs` is itself behind the same
+// `#[cfg(...)]`, so this `use` (and everything below that depends on it)
+// simply doesn't exist in a feature-off build. This is the one place
+// `ui/mod.rs` reaches into `src/freshrss/` -- allowed, since the "hard
+// boundary" ARCHITECTURE.md describes is one-directional (`freshrss/`
+// must never import `ui`, not the other way around).
+#[cfg(feature = "freshrss")]
+use crate::freshrss;
 use crate::models::Article;
 use crate::storage::Storage;
 use crate::theme::Theme;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use std::collections::{HashMap, HashSet};
+#[cfg(feature = "freshrss")]
+use std::time::Duration;
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
+
+/// How often the event-wait loop wakes up to check on a running FreshRSS
+/// startup sync when no terminal event has happened -- see the `key =
+/// match &sync_receiver { ... }` block in `draw_until_quit`. Short enough
+/// that the sync's result shows up promptly once it's ready, long enough
+/// that this polling loop doesn't burn a noticeable amount of CPU while
+/// otherwise idle.
+#[cfg(feature = "freshrss")]
+const FRESHRSS_SYNC_POLL_INTERVAL: Duration = Duration::from_millis(250);
+
+/// Everything `main.rs` hands `ui::run` about the FreshRSS startup sync --
+/// bundled into one struct (rather than two separate parameters) so
+/// `ui::run`'s and `draw_until_quit`'s signatures only need one
+/// `#[cfg(feature = "freshrss")]` parameter apiece instead of two.
+#[cfg(feature = "freshrss")]
+pub struct FreshRssStartup {
+    /// Non-fatal warnings `freshrss::config::FreshRssConfig::load`
+    /// collected (an insecure `url`, a loosely-permissioned password
+    /// file) -- shown in the footer once the TUI opens instead of
+    /// `eprintln!`'d to a terminal about to be swapped to the alternate
+    /// screen, where the person would never see them. Empty when the
+    /// config is disabled, or enabled with nothing to warn about.
+    pub warnings: Vec<String>,
+    /// The channel `freshrss::sync::spawn_startup_sync` returns, if a
+    /// startup sync was actually started (`enabled = true` *and*
+    /// `sync_on_start = true`) -- `None` otherwise, meaning
+    /// `draw_until_quit` never polls for one and behaves exactly like the
+    /// no-startup-sync case.
+    pub sync_receiver: Option<std::sync::mpsc::Receiver<anyhow::Result<freshrss::sync::SyncSummary>>>,
+}
 
 /// Keybind hints for the footer, for the normal (not editing-a-note,
 /// not adding-a-source) state while `View::Topic` is showing -- see
@@ -354,7 +395,12 @@ enum ConfirmField {
 /// in and grouped by topic once, right here, so the sidebar's expandable
 /// topic tree (see `SidebarRow`/`sidebar_rows`) can list each topic's
 /// sources with no new `sources.toml` read and no new database query.
-pub fn run(storage: &Storage, theme: &Theme, sources: &[ConfiguredSource]) -> anyhow::Result<()> {
+pub fn run(
+    storage: &Storage,
+    theme: &Theme,
+    sources: &[ConfiguredSource],
+    #[cfg(feature = "freshrss")] freshrss_startup: FreshRssStartup,
+) -> anyhow::Result<()> {
     // `mut` (and passed to `draw_until_quit` as `&mut` below) because the
     // `a` add-source flow can grow this list: a brand-new topic typed on
     // the confirm screen needs to show up in the sidebar immediately (per
@@ -362,7 +408,20 @@ pub fn run(storage: &Storage, theme: &Theme, sources: &[ConfiguredSource]) -> an
     // mutating this same `Vec` in place rather than only ever reading it
     // once here at startup.
     let mut topics = storage.topics()?;
-    let sources_by_topic = group_sources_by_topic(sources);
+    // `mut`, not just `&mut` at the call site below -- a FreshRSS sync can
+    // add to this map too (see `merge_freshrss_sources`), same reasoning
+    // as `topics` needing to be `mut` for the `a` flow.
+    let mut sources_by_topic = group_sources_by_topic(sources);
+
+    // The initial sidebar merge (ARCHITECTURE.md's "Sidebar integration"):
+    // fold in every FreshRSS `(topic, source)` pair *already* synced from
+    // a previous session, before the TUI ever opens, so a person who
+    // synced yesterday sees their FreshRSS sources in the sidebar
+    // immediately -- not just after the first sync of *this* session
+    // completes. `merge_freshrss_sources` is exactly the same function a
+    // completed sync calls again later; nothing here duplicates its logic.
+    #[cfg(feature = "freshrss")]
+    merge_freshrss_sources(storage, &mut sources_by_topic)?;
 
     // `ratatui::run` (see the doc comment on it in the `ratatui` crate)
     // is the "simplest path" helper: it puts the terminal into raw mode +
@@ -372,7 +431,16 @@ pub fn run(storage: &Storage, theme: &Theme, sources: &[ConfiguredSource]) -> an
     // exactly the guarantee this function needs: if `draw_until_quit`
     // below hits an error partway through, the user's shell must not be
     // left in raw mode / the alternate screen.
-    ratatui::run(|terminal| draw_until_quit(terminal, theme, storage, &mut topics, &sources_by_topic))
+    #[cfg(feature = "freshrss")]
+    {
+        ratatui::run(|terminal| {
+            draw_until_quit(terminal, theme, storage, &mut topics, &mut sources_by_topic, freshrss_startup)
+        })
+    }
+    #[cfg(not(feature = "freshrss"))]
+    {
+        ratatui::run(|terminal| draw_until_quit(terminal, theme, storage, &mut topics, &mut sources_by_topic))
+    }
 }
 
 /// Groups every configured source's name under its one topic
@@ -403,6 +471,47 @@ fn group_sources_by_topic(sources: &[ConfiguredSource]) -> HashMap<String, Vec<S
 /// switching topics always reflects whatever's actually in the database
 /// for that topic.
 ///
+/// Renders one frame and nothing else -- pulled out of `draw_until_quit`'s
+/// loop as its own function specifically so a second call site (the
+/// forced "Syncing FreshRSS…" redraw before a blocking `r`-triggered
+/// sync, added in Phase 4) doesn't have to repeat this same 13-argument
+/// `terminal.draw(|frame| render(...))` call verbatim.
+#[allow(clippy::too_many_arguments)]
+fn draw_frame(
+    terminal: &mut ratatui::DefaultTerminal,
+    theme: &Theme,
+    topics: &[String],
+    sources_by_topic: &HashMap<String, Vec<String>>,
+    expanded_topics: &HashSet<String>,
+    selected_topic: Option<&str>,
+    selected_source: Option<&str>,
+    articles: &[Article],
+    selected_article: Option<usize>,
+    mode: &Mode,
+    view: View,
+    search: Option<&str>,
+    footer_status: Option<&str>,
+) -> anyhow::Result<()> {
+    terminal.draw(|frame| {
+        render(
+            frame,
+            theme,
+            topics,
+            sources_by_topic,
+            expanded_topics,
+            selected_topic,
+            selected_source,
+            articles,
+            selected_article,
+            mode,
+            view,
+            search,
+            footer_status,
+        )
+    })?;
+    Ok(())
+}
+
 /// Also owns the sidebar tree's own state: `expanded_topics` (which topics
 /// currently show their nested source rows) and `selected_source` (`Some`
 /// when the cursor is actually sitting on one of those source rows rather
@@ -418,7 +527,15 @@ fn draw_until_quit(
     theme: &Theme,
     storage: &Storage,
     topics: &mut Vec<String>,
-    sources_by_topic: &HashMap<String, Vec<String>>,
+    // `&mut`, not `&` -- a FreshRSS sync (startup, or `r` on a `FreshRSS/*`
+    // topic) can introduce a brand-new source row under an existing
+    // topic, and `merge_freshrss_sources` needs to write that in, in
+    // place, right here, the same map `sidebar_rows` reads from. Feature
+    // off, nothing ever mutates it after `run` builds it -- same
+    // "unconditional type, conditional behavior" reasoning as
+    // `footer_status` below.
+    sources_by_topic: &mut HashMap<String, Vec<String>>,
+    #[cfg(feature = "freshrss")] freshrss_startup: FreshRssStartup,
 ) -> anyhow::Result<()> {
     let mut topic_index: usize = 0;
     let mut article_index: usize = 0;
@@ -442,6 +559,48 @@ fn draw_until_quit(
     // filtering it."
     let mut search: Option<String> = None;
 
+    // A transient footer message -- see `render`'s doc comment on the
+    // parameter this feeds. Always declared (a plain `Option<String>`,
+    // not a FreshRSS type), but only ever set to `Some(...)` from inside
+    // `#[cfg(feature = "freshrss")]` code below, so it provably stays
+    // `None` for the lifetime of this function when the feature is off --
+    // `mut` only in the feature-on build, since that's the only build
+    // where anything ever actually reassigns it.
+    #[cfg(feature = "freshrss")]
+    let mut footer_status: Option<String> = None;
+    #[cfg(not(feature = "freshrss"))]
+    let footer_status: Option<String> = None;
+
+    // Seed `footer_status` with `freshrss.toml`'s own warnings (an
+    // insecure `url`, a loosely-permissioned password file), collected
+    // by `FreshRssConfig::load` rather than printed to stderr -- see
+    // ARCHITECTURE.md's "Config warnings in the footer" note. Only the
+    // first warning is shown if there's more than one; a `freshrss.toml`
+    // with several problems at once is unusual enough that "fix the
+    // first one, see what's next" is a reasonable enough flow, and the
+    // footer is one line with no room to enumerate them all.
+    #[cfg(feature = "freshrss")]
+    if let Some(first) = freshrss_startup.warnings.first() {
+        let remaining = freshrss_startup.warnings.len() - 1;
+        footer_status = Some(if remaining == 0 {
+            first.clone()
+        } else {
+            format!("{first} (+{remaining} more warning(s) in freshrss.toml)")
+        });
+    }
+
+    // The startup sync's result-reporting channel, if a sync was actually
+    // started (see `main.rs`: only `sync_on_start = true` spawns one).
+    // `mut` and moved out of `freshrss_startup` here (rather than read
+    // through the struct field each time) because the event-wait loop
+    // below needs to set this back to `None` itself the moment a result
+    // arrives -- a one-shot channel only ever has one message to receive,
+    // and polling a receiver after that would just see it as permanently
+    // disconnected forever after, which is harmless but pointless to keep
+    // doing every loop iteration.
+    #[cfg(feature = "freshrss")]
+    let mut sync_receiver = freshrss_startup.sync_receiver;
+
     loop {
         // The sidebar only ever reflects the current *topic* selection,
         // even while `view` is `View::Saved` -- there's no per-row
@@ -456,36 +615,97 @@ fn draw_until_quit(
             Some(article_index)
         };
 
-        terminal.draw(|frame| {
-            render(
-                frame,
-                theme,
-                topics.as_slice(),
-                sources_by_topic,
-                &expanded_topics,
-                selected_topic,
-                selected_source.as_deref(),
-                &articles,
-                selected_article,
-                &mode,
-                view,
-                search.as_deref(),
-            )
-        })?;
+        draw_frame(
+            terminal,
+            theme,
+            topics.as_slice(),
+            sources_by_topic,
+            &expanded_topics,
+            selected_topic,
+            selected_source.as_deref(),
+            &articles,
+            selected_article,
+            &mode,
+            view,
+            search.as_deref(),
+            footer_status.as_deref(),
+        )?;
 
-        // `event::read()` blocks until the next terminal event -- no
-        // polling loop or timer needed, since nothing here animates or
-        // refreshes on its own. `KeyEventKind::Press` matters because some
-        // terminals (with the right protocol enabled) report *both* a key
-        // press and its later release as separate events; without this
-        // check, releasing one key after pressing another first could be
-        // misread as a second, unrelated keystroke.
-        let Event::Key(key) = event::read()? else {
-            continue;
+        // Get the next key to act on. Normally (and always, with the
+        // FreshRSS feature off) this is `event::read()`, which blocks
+        // until the next terminal event -- no polling loop or timer
+        // needed, since nothing here animates or refreshes on its own.
+        // `KeyEventKind::Press` matters because some terminals (with the
+        // right protocol enabled) report *both* a key press and its
+        // later release as separate events; without this check, releasing
+        // one key after pressing another first could be misread as a
+        // second, unrelated keystroke.
+        //
+        // With the FreshRSS feature on *and* a startup sync actually
+        // running (`sync_receiver` is `Some`), blocking forever on
+        // `event::read()` would mean the sync's result never gets shown
+        // until the person happens to press a key of their own -- so this
+        // polls with a short timeout instead, and checks the sync channel
+        // on every timeout, going around the outer `loop` (which redraws
+        // at its top) either way. Once a result has been received (or the
+        // sender's been dropped without sending, e.g. the thread
+        // panicked), `sync_receiver` is set back to `None` and this falls
+        // back to the plain blocking read for the rest of the session --
+        // a one-shot channel has nothing left to ever say twice.
+        #[cfg(not(feature = "freshrss"))]
+        let key = {
+            let Event::Key(key) = event::read()? else {
+                continue;
+            };
+            if key.kind != KeyEventKind::Press {
+                continue;
+            }
+            key
         };
-        if key.kind != KeyEventKind::Press {
-            continue;
-        }
+        #[cfg(feature = "freshrss")]
+        let key = match &sync_receiver {
+            None => {
+                let Event::Key(key) = event::read()? else {
+                    continue;
+                };
+                if key.kind != KeyEventKind::Press {
+                    continue;
+                }
+                key
+            }
+            Some(receiver) => {
+                if event::poll(FRESHRSS_SYNC_POLL_INTERVAL)? {
+                    let Event::Key(key) = event::read()? else {
+                        continue;
+                    };
+                    if key.kind != KeyEventKind::Press {
+                        continue;
+                    }
+                    key
+                } else {
+                    // No terminal event arrived within the timeout --
+                    // check whether the background sync has finished.
+                    match receiver.try_recv() {
+                        Ok(result) => {
+                            footer_status = Some(apply_freshrss_sync_result(result, storage, topics, sources_by_topic)?);
+                            sync_receiver = None;
+                        }
+                        Err(std::sync::mpsc::TryRecvError::Empty) => {
+                            // Still running -- go around the loop again
+                            // (a harmless redraw of the same frame) and
+                            // poll again.
+                        }
+                        Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                            // The sending thread panicked before it could
+                            // send anything -- stop polling; there's
+                            // nothing more to wait for.
+                            sync_receiver = None;
+                        }
+                    }
+                    continue;
+                }
+            }
+        };
 
         // While the add-source popup is open, every keypress belongs to
         // it, same reasoning as the note-popup split just below -- and
@@ -887,9 +1107,73 @@ fn draw_until_quit(
                 // article across every topic", and would otherwise silently
                 // swap the saved view out for a single topic's list without
                 // actually leaving `View::Saved`.
+                //
+                // A `FreshRSS/*` topic takes a completely different path
+                // (ARCHITECTURE.md's "Refresh triggers," item 2): there are
+                // no `sources.toml`-configured local sources filed under
+                // it for `refresh_topic` to find (its filter would just
+                // match zero sources, a silent no-op), so `r` here instead
+                // runs a full FreshRSS sync -- one login covering every
+                // subscribed feed, not "this topic's sources" the way a
+                // local refresh works. `topic_name` is captured *before*
+                // the sync runs because a sync can add a brand-new
+                // `FreshRSS/<category>` topic, which re-sorts `topics`
+                // (`Storage::topics()` returns alphabetical order) and can
+                // shift what `topic_index` used to point at -- re-finding
+                // the row by name afterwards (mirroring the `a` add-source
+                // flow's own `previously_selected_topic` pattern) is what
+                // keeps the sidebar selection on the *same* topic through
+                // that reshuffle rather than landing on whatever now
+                // happens to sit at the old numeric index.
                 KeyCode::Char('r') if view == View::Topic && !topics.is_empty() => {
-                    articles = refresh_topic(storage, &topics[topic_index], selected_source.as_deref())?;
-                    article_index = article_index.min(articles.len().saturating_sub(1));
+                    let topic_name = topics[topic_index].clone();
+
+                    #[cfg(feature = "freshrss")]
+                    let is_freshrss_topic = topic_name.starts_with("FreshRSS/");
+                    #[cfg(not(feature = "freshrss"))]
+                    let is_freshrss_topic = false;
+
+                    if is_freshrss_topic {
+                        #[cfg(feature = "freshrss")]
+                        {
+                            // Show *something* before the blocking network
+                            // call below, rather than leaving the previous
+                            // frame frozen on screen for however long the
+                            // sync takes with no indication anything is
+                            // happening.
+                            footer_status = Some("Syncing FreshRSS…".to_string());
+                            draw_frame(
+                                terminal,
+                                theme,
+                                topics.as_slice(),
+                                sources_by_topic,
+                                &expanded_topics,
+                                selected_topic,
+                                selected_source.as_deref(),
+                                &articles,
+                                selected_article,
+                                &mode,
+                                view,
+                                search.as_deref(),
+                                footer_status.as_deref(),
+                            )?;
+
+                            let result = run_freshrss_sync_via_r_keybind(storage);
+                            footer_status =
+                                Some(apply_freshrss_sync_result(result, storage, topics, sources_by_topic)?);
+
+                            topic_index = topics.iter().position(|t| *t == topic_name).unwrap_or(0);
+                            articles = load_articles_for_selection(
+                                storage,
+                                &topics[topic_index],
+                                selected_source.as_deref(),
+                            )?;
+                            article_index = article_index.min(articles.len().saturating_sub(1));
+                        }
+                    } else {
+                        articles = refresh_topic(storage, &topic_name, selected_source.as_deref())?;
+                        article_index = article_index.min(articles.len().saturating_sub(1));
+                    }
                 }
 
                 // `S` toggles `View::Saved` on/off: pressing it while
@@ -1222,6 +1506,121 @@ fn refresh_topic(storage: &Storage, topic: &str, source: Option<&str>) -> anyhow
     }
 
     load_articles_for_selection(storage, topic, source)
+}
+
+/// Runs one FreshRSS sync for the `r`-on-a-`FreshRSS/*`-topic trigger
+/// (ARCHITECTURE.md's "Refresh triggers," item 2) and returns its raw
+/// outcome -- `Ok(summary)` on a real sync, `Err(_)` for *anything* that
+/// kept a sync from happening at all, including FreshRSS being disabled.
+/// `apply_freshrss_sync_result` (below) is what turns either case into a
+/// footer message; this function's only job is producing the
+/// `anyhow::Result` for it to format, same "one function per concern"
+/// split `mapping`/`sync`/`client` already established.
+///
+/// Reloads `freshrss.toml` fresh on every call rather than reusing
+/// whatever `main.rs` loaded once at startup -- deliberately mirroring
+/// `refresh_topic` just above, which does the same thing for
+/// `sources.toml` via a fresh `fetchers::configured_sources()?` call
+/// every time `r` is pressed. A person editing `freshrss.toml` (a new
+/// password, a corrected URL) between presses of `r` sees that change
+/// take effect immediately, the same way editing `sources.toml` already
+/// does -- no reason for FreshRSS's config to behave differently just
+/// because it happens to also support a startup sync.
+///
+/// The `block_in_place` + `block_on` dance is exactly `refresh_topic`'s
+/// own -- see its doc comment for the full explanation of why a
+/// synchronous draw loop can drive an `async` call this way at all.
+#[cfg(feature = "freshrss")]
+fn run_freshrss_sync_via_r_keybind(storage: &Storage) -> anyhow::Result<freshrss::sync::SyncSummary> {
+    let (config, _warnings) = freshrss::config::FreshRssConfig::load()?;
+
+    // `_warnings` here is deliberately discarded, not folded into the
+    // eventual footer message -- those same warnings were already shown
+    // once at startup (see `draw_until_quit`'s `footer_status` seeding),
+    // and re-showing them on every single `r` press (they're extremely
+    // unlikely to change turn to turn) would just be noise crowding out
+    // the sync result itself, which is what this particular footer
+    // message is actually for.
+    let freshrss::config::FreshRssConfig::Enabled { url, username, password, max_items_per_sync, .. } = config
+    else {
+        // The topic being refreshed is namespaced `FreshRSS/...` because
+        // some *past* sync created it -- but the feature could have been
+        // disabled, or `freshrss.toml` deleted, since then. The topic
+        // (and its already-synced articles) don't go anywhere; there's
+        // just nothing this press of `r` can do about it right now.
+        anyhow::bail!("FreshRSS is disabled in freshrss.toml -- can't sync");
+    };
+
+    let client = freshrss::client::Client::new(url, username, password);
+
+    tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::current().block_on(freshrss::sync::run(storage, &client, max_items_per_sync))
+    })
+}
+
+/// Turns a sync's raw `anyhow::Result<SyncSummary>` (from either
+/// `run_freshrss_sync_via_r_keybind` or the startup sync's channel) into
+/// a footer message, and applies the *other* side effect every finished
+/// sync needs regardless of success or failure: refreshing `topics` and
+/// the sidebar's FreshRSS source rows, since even a sync that ultimately
+/// failed partway through could have inserted a few articles -- and
+/// therefore introduced a new topic or source row -- before hitting
+/// whatever stopped it.
+///
+/// Shared by both callers specifically so the message format and the
+/// topics/sidebar refresh can never drift out of sync with each other by
+/// only being updated in one of the two places that need it.
+#[cfg(feature = "freshrss")]
+fn apply_freshrss_sync_result(
+    result: anyhow::Result<freshrss::sync::SyncSummary>,
+    storage: &Storage,
+    topics: &mut Vec<String>,
+    sources_by_topic: &mut HashMap<String, Vec<String>>,
+) -> anyhow::Result<String> {
+    let message = match &result {
+        Ok(summary) => format!(
+            "FreshRSS sync: {} new, {} already synced, {} skipped (URL conflict){}",
+            summary.new_articles,
+            summary.already_synced,
+            summary.url_conflicts,
+            if summary.truncated { " -- unread list was truncated, will resume next sync" } else { "" }
+        ),
+        // `{err:#}` (anyhow's "alternate" Display) prints the full
+        // context chain (e.g. "FreshRSS login to ... failed with HTTP
+        // 401 -- check the configured username and password"), not just
+        // the outermost wrapper message -- same formatting `main.rs`
+        // already uses for a failed local fetch.
+        Err(err) => format!("FreshRSS sync failed: {err:#}"),
+    };
+
+    // `Storage::topics()` is a plain `SELECT DISTINCT topic FROM
+    // articles` -- cheap enough to just always re-run here rather than
+    // only when `result` was `Ok`, since a sync that failed midway
+    // through (e.g. the network dropped after inserting a few items) can
+    // still have created a new topic.
+    *topics = storage.topics()?;
+    merge_freshrss_sources(storage, sources_by_topic)?;
+
+    Ok(message)
+}
+
+/// Merges every currently-synced FreshRSS `(topic, source)` pair
+/// (`Storage::freshrss_topic_source_pairs`) into `sources_by_topic`, the
+/// same map `group_sources_by_topic` builds from `sources.toml` --
+/// ARCHITECTURE.md's "Sidebar integration" merge. Safe to call after
+/// every sync, not just once at startup: `.entry(...).or_default()` plus
+/// the `!sources.contains(...)` check make re-adding a source that's
+/// already there a no-op, so a sync that introduces nothing new leaves
+/// this map exactly as it was.
+#[cfg(feature = "freshrss")]
+fn merge_freshrss_sources(storage: &Storage, sources_by_topic: &mut HashMap<String, Vec<String>>) -> anyhow::Result<()> {
+    for (topic, source) in storage.freshrss_topic_source_pairs()? {
+        let sources = sources_by_topic.entry(topic).or_default();
+        if !sources.contains(&source) {
+            sources.push(source);
+        }
+    }
+    Ok(())
 }
 
 /// Loads the article list a sidebar row's selection actually implies:
@@ -1683,6 +2082,18 @@ fn render(
     mode: &Mode,
     view: View,
     search: Option<&str>,
+    // A transient message (FreshRSS sync progress/results, config
+    // warnings) that takes over the footer in place of the normal keybind
+    // hints when `Some`. This parameter exists in every build, FreshRSS
+    // feature on or off -- it's a plain `Option<&str>`, not a FreshRSS
+    // type, so there's no compile-time reason to gate it away. What
+    // *does* stay behind `#[cfg(feature = "freshrss")]` is anything that
+    // could ever actually set it to `Some(...)` (see `draw_until_quit`):
+    // with the feature off, nothing in this codebase ever constructs a
+    // FreshRSS status message, so this parameter is always `None` and
+    // `render_footer` always falls through to its ordinary hint-line
+    // behavior -- observably identical to before this parameter existed.
+    footer_status: Option<&str>,
 ) {
     // Painting a plain background-colored block across the whole frame
     // first means every gap between/around the panes below (e.g. if the
@@ -1758,7 +2169,7 @@ fn render(
         view,
         search_status,
     );
-    render_footer(frame, theme, footer_area, mode, view);
+    render_footer(frame, theme, footer_area, mode, view, footer_status);
 
     // The note popup, if open, paints on top of everything drawn above --
     // see `render_note_popup` for why it has to come last (after the panes
@@ -2335,7 +2746,18 @@ fn truncate_preview(text: &str, max_chars: usize) -> String {
 /// picks between the normal-mode hint lines -- `View::Saved` and
 /// `View::History` share `SAVED_HINTS` (see its own doc comment for why:
 /// both disable the same keys for the same reason).
-fn render_footer(frame: &mut Frame, theme: &Theme, area: Rect, mode: &Mode, view: View) {
+fn render_footer(frame: &mut Frame, theme: &Theme, area: Rect, mode: &Mode, view: View, status: Option<&str>) {
+    // A status message (see `render`'s own doc comment on this same
+    // parameter) always wins over the ordinary hint line -- there's
+    // nowhere else in the footer's one row to show both at once, and a
+    // sync result/warning is more important in the moment than a
+    // reminder of what `s`/`n`/`x` do.
+    if let Some(status) = status {
+        let footer = Paragraph::new(status.to_string()).style(Style::new().bg(theme.background).fg(theme.text_muted));
+        frame.render_widget(footer, area);
+        return;
+    }
+
     let hints = match mode {
         Mode::EditingNote { .. } => EDITING_NOTE_HINTS,
         Mode::AddSource(AddSourceStep::Url { .. }) => ADD_SOURCE_URL_HINTS,

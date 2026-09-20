@@ -46,15 +46,15 @@
 //!
 //! ## What exists so far
 //!
-//! `config` (parsing and validating `freshrss.toml`) and now `client`
-//! (login, subscription list, unread item IDs, item contents -- Phase 3).
-//! `client` knows nothing about `Storage` or the UI, same boundary as
-//! `config`: it takes a URL/username/password and returns plain Rust
-//! values, nothing more. The `mapping` (raw API shapes -> `Article`) and
-//! `sync` (reconciling with `Storage`) submodules described in
-//! ARCHITECTURE.md land in later build phases -- see that document's
-//! "Build phases" section. Nothing in this module is called from
-//! `main.rs` yet; there is no behavior to observe even with the feature
-//! enabled until a later phase wires it in.
+//! All four submodules ARCHITECTURE.md describes: `config` (parsing
+//! `freshrss.toml`), `client` (HTTP/protocol -- Phase 3), `mapping` (raw
+//! API shapes -> `Article`, plus the pure "which ids to fetch" decision
+//! -- Phase 4), and `sync` (the async orchestration that ties `client`,
+//! `mapping`, and `Storage` together for one sync -- Phase 4). `sync` is
+//! wired into `main.rs`/`ui/mod.rs` (startup sync, and `r` on a
+//! `FreshRSS/*` topic) as of Phase 4; see this module's own doc comment
+//! and `sync`'s for exactly how.
 pub mod client;
 pub mod config;
+pub mod mapping;
+pub mod sync;
