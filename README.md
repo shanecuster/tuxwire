@@ -311,6 +311,88 @@ land — a synced folder, a notes vault, anywhere you have write access.
 
 ---
 
+## FreshRSS Sync (optional)
+
+If you already run a [FreshRSS](https://freshrss.org/) server, tuxwire
+can pull your subscriptions in, keep read state in sync with the server,
+and add new feeds to FreshRSS instead of (or alongside) your local
+`sources.toml`. Entirely optional and off by default — with the feature
+not compiled in, or `freshrss.toml` absent/disabled, tuxwire behaves
+exactly as described everywhere else in this README.
+
+### Building with FreshRSS support
+
+```bash
+cargo build --release --features freshrss
+```
+
+A plain `cargo build --release` (no flags) never compiles any of this
+in — the `freshrss` feature is off by default.
+
+### Server setup
+
+FreshRSS's sync API is off by default and needs a password separate from
+your normal login:
+
+1. In FreshRSS, go to **Settings → Authentication** and enable **Allow
+   API access**.
+2. Under **Settings → Profile**, set an **API password**. This is not
+   the same as your account login password — it's a second, API-only
+   credential.
+
+### `freshrss.toml`
+
+Create `~/.config/tuxwire/freshrss.toml` (see
+[`freshrss.toml.example`](freshrss.toml.example) for a template):
+
+```toml
+[freshrss]
+enabled       = true
+url           = "https://freshrss.example.com"   # base URL only, no /api/greader.php
+username      = "your-username"
+sync_on_start = true
+max_items_per_sync = 500
+push_read_state    = true
+password_file = "~/.config/tuxwire/freshrss.pass"
+```
+
+| Key | Meaning |
+|---|---|
+| `enabled` | Master on/off switch. `false` (or the file missing entirely) behaves identically to a build without `--features freshrss`. |
+| `url` | Your FreshRSS server's base URL — no `/api/greader.php` suffix. |
+| `username` | Your FreshRSS account name. |
+| `sync_on_start` | Sync automatically in the background when tuxwire opens, in addition to `r` on a `FreshRSS/*` topic. Defaults to `true`. |
+| `max_items_per_sync` | The most items any one sync fetches and stores, even if more are waiting — a first sync against thousands of unread items backfills gradually across several syncs instead of pulling everything at once. Defaults to `500`, must be between `1` and `10,000`. |
+| `push_read_state` | Whether a sync sends anything back to FreshRSS at all (marking items you've read locally as read on the server). `false` leaves the pull direction untouched — the server's own read state still flows in — it only stops tuxwire from writing back. Defaults to `true`. |
+| `password_file` | Path to a file containing *only* the API password (`chmod 600` — tuxwire warns if it's readable by group/others). |
+
+**The API password never goes directly in `freshrss.toml`.** Provide it
+one of two ways:
+- `password_file`, above, or
+- the `TUXWIRE_FRESHRSS_PASSWORD` environment variable, which takes
+  precedence over `password_file` when both are set (handy for
+  overriding a shared/committed `freshrss.toml` for one run, e.g.
+  against a throwaway test server).
+
+### Using it
+
+Once configured, FreshRSS feeds show up in the sidebar under
+`FreshRSS/<category>` topics (`FreshRSS/Uncategorized` for anything
+without one) after the first sync. `r` on a `FreshRSS/*` topic triggers a
+sync the same way `r` refreshes a local topic's sources.
+
+Pressing `a` to add a feed gains a **Destination: Local / FreshRSS**
+choice on the confirm screen when FreshRSS is enabled — choosing
+FreshRSS subscribes the feed on the server (via `quickadd`) instead of
+writing to `sources.toml`, and skips the name/topic prompts entirely
+(FreshRSS assigns neither; the feed lands in `FreshRSS/Uncategorized`
+once it has synced articles). **Adding a feed this way is not affected
+by `push_read_state`** — it's a direct action you just took, not an
+automatic side effect of read-state changes, so it always goes through
+regardless of that setting.
+
+---
+
 ## Uninstalling
 
 ```bash
