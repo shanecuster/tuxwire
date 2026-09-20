@@ -683,6 +683,65 @@ impl Storage {
         self.conn.execute("DELETE FROM articles WHERE url = ?1", params![url])?;
         Ok(())
     }
+
+    /// Every FreshRSS-origin article that's currently unread locally *and*
+    /// has no pending local read-state change of its own -- what a sync's
+    /// "Pull read state" step (ARCHITECTURE.md's Sync behavior, item 4)
+    /// starts from: for each `(article_id, remote_id)` pair this returns,
+    /// `freshrss::sync` checks whether `remote_id` is still in the
+    /// server's own unread set, and calls `mark_read_batch` with whichever
+    /// ones aren't.
+    ///
+    /// The `pending_read_push = 0` filter is defensive rather than
+    /// strictly load-bearing: nothing in this codebase ever sets
+    /// `pending_read_push = 1` without also setting `articles.read = 1` in
+    /// the same action (see `set_pending_read_push`'s call sites), so a
+    /// pending row can never actually be locally-unread in practice. It's
+    /// kept explicit anyway -- matching ARCHITECTURE.md's conflict rule
+    /// ("a pending local change wins until it has been pushed") literally
+    /// in the query itself, rather than leaning on an invariant holding
+    /// forever elsewhere in the codebase.
+    #[cfg(feature = "freshrss")]
+    pub fn freshrss_unread_remote_ids(&self) -> anyhow::Result<Vec<(i64, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT a.id, f.remote_id
+             FROM articles a
+             JOIN freshrss_items f ON f.article_id = a.id
+             WHERE a.read = 0 AND f.pending_read_push = 0",
+        )?;
+
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        rows.collect::<rusqlite::Result<Vec<(i64, String)>>>().map_err(Into::into)
+    }
+
+    /// Marks every id in `article_ids` read, all inside **one** SQL
+    /// transaction -- the pull reconcile step can mark anywhere from zero
+    /// to hundreds of articles read in a single sync, and applying them
+    /// one auto-committed `UPDATE` at a time would mean a person watching
+    /// the database (or a crash partway through) could observe a sync
+    /// half-applied. `unchecked_transaction()` (not the `&mut
+    /// self`-requiring `transaction()`) is what lets this stay a `&self`
+    /// method like every other one here -- "unchecked" only means SQLite
+    /// itself, not the Rust compiler, is what would catch two of these
+    /// somehow overlapping, which can't happen given this codebase's
+    /// single-connection-per-thread usage. If any single `UPDATE` in the
+    /// loop fails, `?` returns before `tx.commit()` runs, and
+    /// `Transaction`'s `Drop` impl rolls back everything applied so far
+    /// automatically -- there's no explicit `ROLLBACK` call needed.
+    #[cfg(feature = "freshrss")]
+    pub fn mark_read_batch(&self, article_ids: &[i64]) -> anyhow::Result<()> {
+        if article_ids.is_empty() {
+            return Ok(());
+        }
+
+        let tx = self.conn.unchecked_transaction()?;
+        for &id in article_ids {
+            tx.execute("UPDATE articles SET read = 1 WHERE id = ?1", params![id])?;
+        }
+        tx.commit()?;
+
+        Ok(())
+    }
 }
 
 /// Maps one row from a `SELECT id, title, url, source, topic, timestamp,
@@ -1339,6 +1398,104 @@ mod tests {
             assert_eq!(articles[0].source, "Phoronix", "the existing row's source must be untouched");
             assert_eq!(articles[0].topic, "kernel", "the existing row's topic must be untouched");
             assert!(articles[0].read, "the existing row's read state must be untouched");
+        }
+
+        /// `freshrss_unread_remote_ids` returns only FreshRSS-origin,
+        /// locally-unread, not-pending articles -- three articles set up
+        /// to cover each way a row can be excluded: read, pending, and
+        /// (implicitly, by never appearing) local-origin.
+        #[test]
+        fn freshrss_unread_remote_ids_excludes_read_and_pending_rows() {
+            let storage = test_storage();
+
+            let unread_article = Article::new(
+                "Still unread".to_string(),
+                "https://example.com/unread".to_string(),
+                "Some Feed".to_string(),
+                "FreshRSS/tech".to_string(),
+                Utc::now(),
+            );
+            let unread_id = storage.insert_article(&unread_article).unwrap();
+            storage.insert_freshrss_item(unread_id, "remote-unread", "feed-1").unwrap();
+
+            let read_article = Article::new(
+                "Already read".to_string(),
+                "https://example.com/read".to_string(),
+                "Some Feed".to_string(),
+                "FreshRSS/tech".to_string(),
+                Utc::now(),
+            );
+            let read_id = storage.insert_article(&read_article).unwrap();
+            storage.insert_freshrss_item(read_id, "remote-read", "feed-1").unwrap();
+            storage.mark_read(read_id).unwrap();
+
+            let pending_article = Article::new(
+                "Read locally, not yet pushed".to_string(),
+                "https://example.com/pending".to_string(),
+                "Some Feed".to_string(),
+                "FreshRSS/tech".to_string(),
+                Utc::now(),
+            );
+            let pending_id = storage.insert_article(&pending_article).unwrap();
+            storage.insert_freshrss_item(pending_id, "remote-pending", "feed-1").unwrap();
+            storage.mark_read(pending_id).unwrap();
+            storage.set_pending_read_push(pending_id).unwrap();
+
+            let unread = storage.freshrss_unread_remote_ids().unwrap();
+            assert_eq!(unread, vec![(unread_id, "remote-unread".to_string())]);
+        }
+
+        /// `mark_read_batch` marks every id it's given, and an empty slice
+        /// is a harmless no-op (the caller doesn't need to check
+        /// "is there anything to do" itself before calling this).
+        #[test]
+        fn mark_read_batch_marks_every_given_id() {
+            let storage = test_storage();
+            let ids: Vec<i64> = (0..3)
+                .map(|i| {
+                    let article = Article::new(
+                        format!("Article {i}"),
+                        format!("https://example.com/{i}"),
+                        "Some Feed".to_string(),
+                        "FreshRSS/tech".to_string(),
+                        Utc::now(),
+                    );
+                    storage.insert_article(&article).unwrap()
+                })
+                .collect();
+
+            storage.mark_read_batch(&[]).unwrap();
+            storage.mark_read_batch(&ids[..2]).unwrap();
+
+            let articles = storage.articles_by_topic("FreshRSS/tech").unwrap();
+            let read_count = articles.iter().filter(|a| a.read).count();
+            assert_eq!(read_count, 2, "exactly the two ids passed in should be marked read");
+        }
+
+        /// A failure partway through `mark_read_batch` must not leave any
+        /// of the batch marked read -- simulated here by passing a
+        /// nonexistent id alongside two real ones. `UPDATE ... WHERE id =
+        /// ?` matching zero rows isn't itself a SQL error (so this test
+        /// doesn't actually trigger the rollback path -- rusqlite has no
+        /// built-in "row must exist" failure mode for a plain `UPDATE`),
+        /// but it does confirm the everyday case: real ids in the batch
+        /// are unaffected by an unrelated id also being present.
+        #[test]
+        fn mark_read_batch_is_unaffected_by_a_nonexistent_id_in_the_same_batch() {
+            let storage = test_storage();
+            let article = Article::new(
+                "title".to_string(),
+                "url".to_string(),
+                "source".to_string(),
+                "FreshRSS/topic".to_string(),
+                Utc::now(),
+            );
+            let id = storage.insert_article(&article).unwrap();
+
+            storage.mark_read_batch(&[id, 999_999]).unwrap();
+
+            let articles = storage.articles_by_topic("FreshRSS/topic").unwrap();
+            assert!(articles[0].read);
         }
 
         /// `set_pending_read_push`/`clear_pending_read_push` toggle the

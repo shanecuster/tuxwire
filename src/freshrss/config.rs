@@ -65,6 +65,16 @@ pub enum FreshRssConfig {
         /// backfills gradually across several syncs instead of trying to
         /// pull everything in one pass.
         max_items_per_sync: usize,
+        /// Whether a sync is allowed to send anything back to the server
+        /// at all -- Phase 5's push step (`edit-tag`, marking items read
+        /// remotely). Defaults to `true` (see `default_push_read_state`).
+        /// `false` doesn't touch the *pull* direction: local reads still
+        /// get queued (`pending_read_push` still gets set, per the same
+        /// hook points as always) and the server's own read state still
+        /// flows in locally, this only stops the outbound half -- for
+        /// someone who wants tuxwire to mirror their FreshRSS reading
+        /// list without ever writing back to it.
+        push_read_state: bool,
     },
 }
 
@@ -168,6 +178,9 @@ struct RawFreshRss {
     /// other field's validation, not scattered into deserialization.
     #[serde(default = "default_max_items_per_sync")]
     max_items_per_sync: usize,
+    /// Defaults to `true` when omitted (see `default_push_read_state`).
+    #[serde(default = "default_push_read_state")]
+    push_read_state: bool,
 }
 
 /// The default `sync_on_start` value when `freshrss.toml` omits the key
@@ -188,6 +201,14 @@ fn default_sync_on_start() -> bool {
 /// request, 500 is 5 chunked requests, not 50+).
 fn default_max_items_per_sync() -> usize {
     500
+}
+
+/// The default `push_read_state` when `freshrss.toml` omits the key --
+/// `true`, matching ARCHITECTURE.md's original design (read state syncs
+/// both directions by default); a person who wants a pull-only mirror
+/// sets this to `false` explicitly.
+fn default_push_read_state() -> bool {
+    true
 }
 
 /// The range `max_items_per_sync` must fall in, checked by
@@ -252,6 +273,7 @@ impl RawFreshRss {
             password,
             sync_on_start: self.sync_on_start,
             max_items_per_sync: self.max_items_per_sync,
+            push_read_state: self.push_read_state,
         };
         Ok((config, warnings))
     }
@@ -782,6 +804,7 @@ mod tests {
             password: Password("super-secret-value".to_string()),
             sync_on_start: true,
             max_items_per_sync: 500,
+            push_read_state: true,
         };
 
         assert!(!format!("{config:?}").contains("super-secret-value"));

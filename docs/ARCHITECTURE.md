@@ -1023,6 +1023,68 @@ already settled above:
   substituted character, which is FreshRSS's own behavior to display,
   not a bug in tuxwire's mapping).
 
+### Phase 5 implementation notes
+
+- **`edit-tag`'s exact request/response shape, verified against a live
+  server before writing any code.** Request: `POST edit-tag` with
+  `a=user/-/state/com.google/read`, one or more repeated `i=<id>` fields
+  (the plain decimal form, same as `stream/items/ids`/`stream/items/contents`
+  accept — no conversion needed), and `T=<write token>` (from
+  `GET reader/api/0/token`, a second, separate secret from the login
+  `Auth=` token). A real batch of 2 ids in one request marked both read.
+  Success: `HTTP 200` with a body of **exactly** `"OK"` — checked
+  explicitly in `Client::mark_read` (not just the status code), since a
+  2xx status alone doesn't prove the server understood and applied the
+  edit. Failure (a bad write token): `HTTP 401`, body `Unauthorized!` —
+  the same shape as a bad login.
+
+- **The pull reconcile only runs on a fully-successful, untruncated
+  fetch**, and applies as one SQL transaction
+  (`Storage::mark_read_batch`, via `unchecked_transaction()` — see its
+  doc comment for why `&self`, not `&mut self`, is safe here). Both sides
+  of the "is this id still in the server's unread set" comparison already
+  passed through `Client`'s single `normalize_item_id` function before
+  `sync::run` ever sees them — `unread.ids` inside
+  `Client::unread_item_ids`, stored `remote_id`s inside
+  `parse_item_contents` at insert time — so the comparison is a plain,
+  correct string match with no risk of the two sides disagreeing over id
+  *shape*.
+
+- **The UI hook points never propagate a FreshRSS bookkeeping failure
+  with `?`.** `note_pending_read_push_failure` (`ui/mod.rs`) catches
+  `Storage::set_pending_read_push`'s own `Result` and turns a failure
+  into a footer message instead of aborting the keypress that triggered
+  it — opening or saving an article must never be blocked by FreshRSS
+  bookkeeping. In the overwhelmingly common case this function has
+  nothing to report at all: `set_pending_read_push`'s `UPDATE` is a
+  silent no-op for a local, non-FreshRSS article, so it runs
+  unconditionally on every read/save regardless of origin.
+
+- **A finished sync reloads the currently-displayed article list, not
+  just `topics`.** `apply_freshrss_sync_result` (`ui/mod.rs`) re-finds the
+  selected topic by name (a sync can add a new topic, re-sorting
+  `Storage::topics()`'s alphabetical order) and calls `articles_for_view`
+  for whatever `View` is actually open — both the startup sync's result
+  and `r`'s synchronous one go through this same function, so a pull
+  reconcile marking something read (or a new item landing) shows up
+  immediately without waiting for the next unrelated redraw.
+
+- **`push_read_state` (default `true`, `freshrss.toml`).** `false` only
+  gates the outbound half in `sync::run` — the UI hook points still set
+  `pending_read_push` regardless (there's no reason for that bookkeeping
+  to know or care whether pushing is currently enabled), and the pull
+  direction is completely unaffected. A person can flip this back to
+  `true` later and everything queued while it was `false` gets pushed on
+  the next sync.
+
+- **Manual verification, both directions, against the live test
+  server** (not just fixtures/unit tests): pushed a locally-marked-read
+  article and confirmed the server's own unread count actually dropped
+  (`pushed_read_state: 1`); separately marked a different item read
+  directly on the server (bypassing tuxwire entirely) and confirmed the
+  next sync pulled it in as read locally (`marked_read_from_server: 1`).
+  See `freshrss::sync::tests::manual_sync_against_a_live_server`.
+
 ### Adding feeds
 
 The default `a` flow is **unchanged**: paste a URL, validate with `feed-rs`,
@@ -1055,6 +1117,12 @@ sync_on_start = true
 # clear error otherwise. See Phase 4's implementation notes above for why
 # this backfills gradually rather than trying to pull everything at once.
 max_items_per_sync = 500
+
+# Whether a sync may send anything back to the server at all -- Phase 5's
+# push step (edit-tag, marking items read remotely). Defaults to true.
+# false leaves the pull direction untouched (server state still flows in
+# locally); it only stops tuxwire from ever writing back.
+push_read_state = true
 
 # The API password never goes in this file. Provide it one of two ways:
 #   1. password_file: path to a file containing only the API password
@@ -1116,7 +1184,13 @@ to `.gitignore` as a safety net.
   mirroring `refresh_topic`) — with graceful failure shown in the footer
   either way. See "Phase 4 implementation notes" above for the design
   decisions this surfaced.
-- **Phase 5 — read sync.** Pull reconcile + `pending_read_push` + push.
+- **Phase 5 — read sync. Done.** Pull reconcile (`Storage::freshrss_unread_remote_ids`
+  + `mark_read_batch`, skipped when `truncated`), the two UI hook points
+  (`Enter`, `s`) setting `pending_read_push`, and push (`Client::token` +
+  chunked `Client::mark_read`, clearing the flag only once the server's
+  `edit-tag` response body confirms `"OK"`). Gated by `freshrss.toml`'s
+  new `push_read_state` (default `true`). See "Phase 5 implementation
+  notes" below.
 - **Phase 6 — add feed.** The destination choice in the `a` flow.
 - **Phase 7 — polish.** README configuration section, `CHANGELOG.md` entry,
   update this document from "planned" to describing what was actually

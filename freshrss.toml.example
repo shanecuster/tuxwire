@@ -29,6 +29,14 @@ sync_on_start = true
 # 10,000 -- tuxwire will refuse to start with a clear error otherwise.
 max_items_per_sync = 500
 
+# Whether a sync is allowed to send anything back to the server -- marking
+# items read remotely (via edit-tag) when you've read them locally.
+# Defaults to true. Setting this to false doesn't touch the pull
+# direction: the server's own read state still flows in locally, this
+# only stops tuxwire from ever writing back to your FreshRSS account --
+# for a read-only mirror of your reading list.
+push_read_state = true
+
 # The API password is set under your FreshRSS profile (separate from your
 # account login password) and never goes in this file. Provide it one of
 # two ways:

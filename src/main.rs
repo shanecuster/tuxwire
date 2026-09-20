@@ -175,9 +175,14 @@ async fn main() -> anyhow::Result<()> {
         // disabled config never has any; an enabled-but-manual-sync one
         // still might, e.g. an insecure `url`).
         let sync_receiver = match config {
-            freshrss::config::FreshRssConfig::Enabled { url, username, password, sync_on_start: true, max_items_per_sync } => {
-                Some(freshrss::sync::spawn_startup_sync(url, username, password, max_items_per_sync))
-            }
+            freshrss::config::FreshRssConfig::Enabled {
+                url,
+                username,
+                password,
+                sync_on_start: true,
+                max_items_per_sync,
+                push_read_state,
+            } => Some(freshrss::sync::spawn_startup_sync(url, username, password, max_items_per_sync, push_read_state)),
             _ => None,
         };
 

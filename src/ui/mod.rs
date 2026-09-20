@@ -687,7 +687,23 @@ fn draw_until_quit(
                     // check whether the background sync has finished.
                     match receiver.try_recv() {
                         Ok(result) => {
-                            footer_status = Some(apply_freshrss_sync_result(result, storage, topics, sources_by_topic)?);
+                            // Owned, not borrowed from `topics` -- this
+                            // call needs to pass `topics` itself as
+                            // `&mut`, which a `selected_topic: &str`
+                            // still borrowed from it would conflict with.
+                            let selected_topic_name = selected_topic.map(str::to_string);
+                            footer_status = Some(apply_freshrss_sync_result(
+                                result,
+                                storage,
+                                topics,
+                                sources_by_topic,
+                                &mut topic_index,
+                                selected_topic_name.as_deref(),
+                                selected_source.as_deref(),
+                                view,
+                                &mut articles,
+                                &mut article_index,
+                            )?);
                             sync_receiver = None;
                         }
                         Err(std::sync::mpsc::TryRecvError::Empty) => {
@@ -1012,7 +1028,9 @@ fn draw_until_quit(
                 // article read the same way regardless of which path
                 // succeeded -- both on disk via `Storage::mark_read` and in
                 // the in-memory `articles` list, mirroring how `x` and `s`
-                // update their entry directly -- but only once something
+                // update their entry directly -- plus, when the feature is
+                // on, queuing a FreshRSS read-state push
+                // (`note_pending_read_push_failure`) -- but only once something
                 // has actually opened; the `Mode::Error` branch leaves
                 // `read` untouched, since nothing was.
                 KeyCode::Enter => {
@@ -1021,9 +1039,13 @@ fn draw_until_quit(
                             open_in_w3m(terminal, &article.url)?;
                             storage.mark_read(article.id)?;
                             article.read = true;
+                            #[cfg(feature = "freshrss")]
+                            note_pending_read_push_failure(storage, article.id, &mut footer_status);
                         } else if open_in_browser(&article.url) {
                             storage.mark_read(article.id)?;
                             article.read = true;
+                            #[cfg(feature = "freshrss")]
+                            note_pending_read_push_failure(storage, article.id, &mut footer_status);
                         } else {
                             mode = Mode::Error {
                                 title: "Error",
@@ -1069,6 +1091,8 @@ fn draw_until_quit(
                         storage.save_article(article.id, article.note.clone())?;
                         article.saved = true;
                         article.read = true;
+                        #[cfg(feature = "freshrss")]
+                        note_pending_read_push_failure(storage, article.id, &mut footer_status);
                     }
                 }
 
@@ -1159,16 +1183,26 @@ fn draw_until_quit(
                             )?;
 
                             let result = run_freshrss_sync_via_r_keybind(storage);
-                            footer_status =
-                                Some(apply_freshrss_sync_result(result, storage, topics, sources_by_topic)?);
-
-                            topic_index = topics.iter().position(|t| *t == topic_name).unwrap_or(0);
-                            articles = load_articles_for_selection(
+                            // `apply_freshrss_sync_result` handles
+                            // everything from here: the footer message,
+                            // reloading `topics`/the sidebar merge,
+                            // re-finding `topic_index` by `topic_name`
+                            // (owned above, so this call is free to take
+                            // `topics` as `&mut`), and reloading
+                            // `articles`/`article_index` for whatever
+                            // ends up selected.
+                            footer_status = Some(apply_freshrss_sync_result(
+                                result,
                                 storage,
-                                &topics[topic_index],
+                                topics,
+                                sources_by_topic,
+                                &mut topic_index,
+                                Some(&topic_name),
                                 selected_source.as_deref(),
-                            )?;
-                            article_index = article_index.min(articles.len().saturating_sub(1));
+                                view,
+                                &mut articles,
+                                &mut article_index,
+                            )?);
                         }
                     } else {
                         articles = refresh_topic(storage, &topic_name, selected_source.as_deref())?;
@@ -1541,7 +1575,8 @@ fn run_freshrss_sync_via_r_keybind(storage: &Storage) -> anyhow::Result<freshrss
     // unlikely to change turn to turn) would just be noise crowding out
     // the sync result itself, which is what this particular footer
     // message is actually for.
-    let freshrss::config::FreshRssConfig::Enabled { url, username, password, max_items_per_sync, .. } = config
+    let freshrss::config::FreshRssConfig::Enabled { url, username, password, max_items_per_sync, push_read_state, .. } =
+        config
     else {
         // The topic being refreshed is namespaced `FreshRSS/...` because
         // some *past* sync created it -- but the feature could have been
@@ -1554,7 +1589,8 @@ fn run_freshrss_sync_via_r_keybind(storage: &Storage) -> anyhow::Result<freshrss
     let client = freshrss::client::Client::new(url, username, password);
 
     tokio::task::block_in_place(|| {
-        tokio::runtime::Handle::current().block_on(freshrss::sync::run(storage, &client, max_items_per_sync))
+        tokio::runtime::Handle::current()
+            .block_on(freshrss::sync::run(storage, &client, max_items_per_sync, push_read_state))
     })
 }
 
@@ -1571,18 +1607,29 @@ fn run_freshrss_sync_via_r_keybind(storage: &Storage) -> anyhow::Result<freshrss
 /// topics/sidebar refresh can never drift out of sync with each other by
 /// only being updated in one of the two places that need it.
 #[cfg(feature = "freshrss")]
+#[allow(clippy::too_many_arguments)]
 fn apply_freshrss_sync_result(
     result: anyhow::Result<freshrss::sync::SyncSummary>,
     storage: &Storage,
     topics: &mut Vec<String>,
     sources_by_topic: &mut HashMap<String, Vec<String>>,
+    topic_index: &mut usize,
+    selected_topic_name: Option<&str>,
+    selected_source: Option<&str>,
+    view: View,
+    articles: &mut Vec<Article>,
+    article_index: &mut usize,
 ) -> anyhow::Result<String> {
     let message = match &result {
         Ok(summary) => format!(
-            "FreshRSS sync: {} new, {} already synced, {} skipped (URL conflict){}",
+            "FreshRSS sync: {} new, {} already synced, {} skipped (URL conflict), {} marked read from server, \
+             {} read-state pushed{}{}",
             summary.new_articles,
             summary.already_synced,
             summary.url_conflicts,
+            summary.marked_read_from_server,
+            summary.pushed_read_state,
+            if summary.push_failures > 0 { format!(", {} push chunk(s) failed (will retry)", summary.push_failures) } else { String::new() },
             if summary.truncated { " -- unread list was truncated, will resume next sync" } else { "" }
         ),
         // `{err:#}` (anyhow's "alternate" Display) prints the full
@@ -1600,6 +1647,27 @@ fn apply_freshrss_sync_result(
     // still have created a new topic.
     *topics = storage.topics()?;
     merge_freshrss_sources(storage, sources_by_topic)?;
+
+    // Re-find the selected topic by name -- a sync can add a brand-new
+    // topic, which re-sorts `topics` (alphabetical, per
+    // `Storage::topics()`) and can shift what `topic_index` used to point
+    // at. Same pattern as the `a` add-source flow's own
+    // `previously_selected_topic`. `selected_topic_name` is `None` in
+    // `View::Saved`/`View::History`, where there's no topic-row selection
+    // to preserve at all.
+    if let Some(name) = selected_topic_name {
+        *topic_index = topics.iter().position(|t| t == name).unwrap_or(0);
+    }
+
+    // Reload whatever's actually on screen right now, not just the topic
+    // list -- a new item, or the pull reconcile marking an existing one
+    // read, can change what this exact view/selection should show,
+    // regardless of which topic the sync happened to touch (a startup
+    // sync's result can arrive while any view is open, and the `r`
+    // keybind itself only reaches this function from `View::Topic`, but
+    // `articles_for_view` handles every `View` uniformly either way).
+    *articles = articles_for_view(storage, view, topics, *topic_index, selected_source)?;
+    *article_index = (*article_index).min(articles.len().saturating_sub(1));
 
     Ok(message)
 }
@@ -1621,6 +1689,29 @@ fn merge_freshrss_sources(storage: &Storage, sources_by_topic: &mut HashMap<Stri
         }
     }
     Ok(())
+}
+
+/// Queues `article_id` for a FreshRSS read-state push on the next sync
+/// (`Storage::set_pending_read_push`) -- called from all three local
+/// read-marking hook points (`Enter`'s two success paths, `s`), per
+/// ARCHITECTURE.md's "When the person marks a FreshRSS-origin article
+/// read locally... set `pending_read_push = 1`."
+///
+/// Deliberately does **not** propagate the `Storage` call's error with
+/// `?` -- a FreshRSS bookkeeping failure (a locked database, say, however
+/// unlikely) must never stop the article the person just opened or saved
+/// from actually opening or saving. The overwhelming common case never
+/// even reaches a fallible path worth worrying about here in the first
+/// place: `set_pending_read_push`'s own `UPDATE ... WHERE article_id =
+/// ?1` is a silent no-op for a local, non-FreshRSS article, so this
+/// function runs on every read/save regardless of origin and almost
+/// always has nothing to report. A real failure surfaces as a footer
+/// note instead of aborting anything.
+#[cfg(feature = "freshrss")]
+fn note_pending_read_push_failure(storage: &Storage, article_id: i64, footer_status: &mut Option<String>) {
+    if let Err(err) = storage.set_pending_read_push(article_id) {
+        *footer_status = Some(format!("FreshRSS: couldn't queue read-state push: {err:#}"));
+    }
 }
 
 /// Loads the article list a sidebar row's selection actually implies:

@@ -69,6 +69,18 @@ const MAX_ID_PAGES: usize = 50;
 /// bounded regardless of how large the unread list gets.
 const CONTENTS_CHUNK_SIZE: usize = 100;
 
+/// How many ids `sync::run`'s push step batches into a single
+/// `edit-tag` call. `pub(crate)`, not private -- unlike
+/// `CONTENTS_CHUNK_SIZE`, the chunking loop this sizes lives in
+/// `freshrss::sync`, not in this module (see `Client::mark_read`'s doc
+/// comment for exactly why). Verified a batch of 2 works against a live
+/// server; picked the same value as `CONTENTS_CHUNK_SIZE` for
+/// consistency rather than because 100 specifically was tested against
+/// `edit-tag` -- both endpoints take the same repeated-`i=` form shape,
+/// so there's no reason to expect a meaningfully different practical
+/// limit between them.
+pub(crate) const MARK_READ_CHUNK_SIZE: usize = 100;
+
 /// The `reqwest::Client` every request in this module shares. See the
 /// module doc comment above for why this exists instead of reusing
 /// `fetchers::rss::HTTP_CLIENT`, and `fetchers::rss::HTTP_CLIENT`'s own
@@ -124,6 +136,37 @@ impl std::fmt::Debug for AuthToken {
     /// never printed by `Debug`, same as the password itself.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("AuthToken(<redacted>)")
+    }
+}
+
+/// The write token `token` (below) returns -- a second, separate secret
+/// from `AuthToken`, required on every request that *changes* something
+/// server-side (`edit-tag`, `subscription/quickadd`) as basic protection
+/// against cross-site request forgery. Its own type, not a reused
+/// `AuthToken`, because the two are genuinely different credentials with
+/// different lifetimes (ARCHITECTURE.md: "Tokens live in memory only; log
+/// in again per refresh session" applies to both, but they're fetched by
+/// two different calls and are never interchangeable) -- keeping them as
+/// distinct types is what makes it a compile error to accidentally pass
+/// one where the other belongs, rather than a subtle runtime bug.
+pub struct WriteToken(String);
+
+impl WriteToken {
+    /// The raw token text, exactly as `edit-tag`'s `T=` form field
+    /// expects it (no `GoogleLogin auth=`-style wrapping, unlike
+    /// `AuthToken::header_value` -- the write token travels in the
+    /// request *body*, not a header).
+    fn as_form_value(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for WriteToken {
+    /// Same reasoning as `AuthToken`'s hand-written `Debug` -- this is a
+    /// credential too, and ARCHITECTURE.md's Security rules don't carve
+    /// out an exception for "the write token specifically."
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("WriteToken(<redacted>)")
     }
 }
 
@@ -552,10 +595,64 @@ impl Client {
         Ok(items)
     }
 
-    /// Shared plumbing for the two simple `GET`-and-parse-the-body calls
-    /// (`subscriptions`, and each page inside `unread_item_ids`) --
-    /// `item_contents` doesn't use this since it's a `POST` with a form
-    /// body instead of a bare authenticated `GET`.
+    /// Fetches a write token -- required on `edit-tag` (and
+    /// `subscription/quickadd`, a later phase) as basic CSRF protection
+    /// for any request that changes server state. Plain-text body, the
+    /// whole response *is* the token (no `Key=Value` parsing the way
+    /// `login`'s response needs).
+    pub async fn token(&self, auth: &AuthToken) -> anyhow::Result<WriteToken> {
+        let body =
+            self.authorized_get(auth, "/reader/api/0/token").await.with_context(|| "failed to fetch FreshRSS write token")?;
+        Ok(WriteToken(body))
+    }
+
+    /// Marks every id in `remote_ids` read on the server, in **one**
+    /// `edit-tag` request -- unlike `item_contents`, this does *not*
+    /// chunk internally. That's deliberate: `freshrss::sync`'s push step
+    /// needs to know exactly which chunk of ids actually succeeded before
+    /// it's safe to clear their local `pending_read_push` flags (per
+    /// ARCHITECTURE.md's push step: "clear the flag only after the server
+    /// confirms"), and it can only know that at the granularity it
+    /// controls its own chunking at -- if this function silently
+    /// chunked a 500-id call into five requests and the third one failed,
+    /// the caller would have no way to tell which 100 of the 500 actually
+    /// went through. So the caller (`sync::run`) owns the `.chunks(...)`
+    /// loop and calls this once per chunk; `MARK_READ_CHUNK_SIZE` is
+    /// still defined here (client-protocol sizing belongs with the rest
+    /// of `client`'s constants) for `sync` to chunk by.
+    ///
+    /// Verified against a live server that a genuine success is `HTTP
+    /// 200` with a body of exactly `"OK"` -- checked here explicitly
+    /// (not just the status code), since nothing about a 2xx status alone
+    /// guarantees the server actually understood and applied the tag
+    /// edit rather than, say, silently ignoring a malformed `a=` value.
+    pub async fn mark_read(&self, auth: &AuthToken, write_token: &WriteToken, remote_ids: &[String]) -> anyhow::Result<()> {
+        let mut form: Vec<(&str, &str)> = remote_ids.iter().map(|id| ("i", id.as_str())).collect();
+        form.push(("a", "user/-/state/com.google/read"));
+        form.push(("T", write_token.as_form_value()));
+
+        let response = HTTP_CLIENT
+            .post(self.api_url("/reader/api/0/edit-tag"))
+            .header("Authorization", auth.header_value())
+            .form(&form)
+            .send()
+            .await
+            .with_context(|| "failed to reach FreshRSS edit-tag")?;
+
+        if !response.status().is_success() {
+            bail!("FreshRSS edit-tag failed with HTTP {}", response.status());
+        }
+
+        let body = response.text().await.with_context(|| "failed to read FreshRSS edit-tag response body")?;
+
+        parse_mark_read_response(&body)
+    }
+
+    /// Shared plumbing for every simple `GET`-and-return-the-body call
+    /// (`subscriptions`, each page inside `unread_item_ids`, and `token`)
+    /// -- `item_contents` and `mark_read` don't use this since they're
+    /// both `POST`s with a form body instead of a bare authenticated
+    /// `GET`.
     async fn authorized_get(&self, auth: &AuthToken, path_and_query: &str) -> anyhow::Result<String> {
         let response = HTTP_CLIENT
             .get(self.api_url(path_and_query))
@@ -570,6 +667,20 @@ impl Client {
 
         response.text().await.with_context(|| "failed to read FreshRSS response body")
     }
+}
+
+/// Checks whether an `edit-tag` response body actually confirms success --
+/// verified against a live server that a genuine success is the literal
+/// text `"OK"` (`.trim()`ed first, in case a trailing newline sneaks in).
+/// Pulled out of `Client::mark_read` for the same fixture-testability
+/// reason as `parse_login_response` below: this is the one place that
+/// decides "did the server really confirm this," and it should be
+/// checkable against a plain string without a real HTTP round trip.
+fn parse_mark_read_response(body: &str) -> anyhow::Result<()> {
+    if body.trim() != "OK" {
+        bail!("FreshRSS edit-tag did not confirm success (response body was {body:?})");
+    }
+    Ok(())
 }
 
 /// Parses a `ClientLogin` success body (plain text, three `Key=Value`
@@ -720,6 +831,33 @@ mod tests {
 
         assert!(!debug_output.contains("FIXTURE-AUTH-TOKEN-NOT-REAL"));
         assert!(debug_output.contains("redacted"));
+    }
+
+    /// Same guarantee as `AuthToken`'s, checked for `WriteToken`
+    /// specifically since it has its own separate hand-written `Debug`.
+    #[test]
+    fn write_token_debug_output_never_contains_the_real_token() {
+        let token = WriteToken("super-secret-write-token".to_string());
+        let debug_output = format!("{token:?}");
+
+        assert!(!debug_output.contains("super-secret-write-token"));
+        assert!(debug_output.contains("redacted"));
+    }
+
+    /// The real success body verified against a live server.
+    #[test]
+    fn parses_a_real_edit_tag_success_response() {
+        assert!(parse_mark_read_response("OK").is_ok());
+        // A trailing newline (which some servers add) shouldn't matter.
+        assert!(parse_mark_read_response("OK\n").is_ok());
+    }
+
+    /// Anything else -- including the exact failure body verified against
+    /// a live server for a bad write token -- is not a confirmed success.
+    #[test]
+    fn rejects_anything_that_is_not_a_literal_ok() {
+        assert!(parse_mark_read_response("Unauthorized!").is_err());
+        assert!(parse_mark_read_response("").is_err());
     }
 
     /// The real failure body FreshRSS sends back for a bad password
