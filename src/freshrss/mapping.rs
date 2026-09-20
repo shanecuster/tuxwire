@@ -119,6 +119,67 @@ pub fn select_ids_to_fetch(unread_ids: &[String], already_synced: &HashSet<Strin
     unread_ids.iter().filter(|id| !already_synced.contains(id.as_str())).take(max_items).cloned().collect()
 }
 
+/// The longest a sanitized server message is allowed to be (in `char`s,
+/// not bytes -- see below), after which it's truncated with a trailing
+/// `…`. Long enough to show a genuinely useful `quickadd` rejection
+/// message in full (the longest one verified against a live server,
+/// `"URL is not allowed to be resolved: <url> [<url>]"`, repeats the URL
+/// twice and still comes in well under this), short enough that a
+/// server returning something absurdly long can't blow out the Confirm
+/// popup's fixed-height layout.
+const MAX_SANITIZED_MESSAGE_LEN: usize = 200;
+
+/// Makes server-supplied free text safe to show verbatim inside the TUI
+/// -- currently `quickadd`'s `error` field is the only text this
+/// codebase ever displays that a FreshRSS server chose the exact wording
+/// of, rather than a static string this codebase wrote itself. Two
+/// things happen, in order:
+///
+/// 1. **Strip every control character**, via `char::is_control()` --
+///    this covers the whole C0 range (0x00-0x1F, including `ESC`,
+///    0x1B, which is what every ANSI escape sequence starts with) and
+///    the C1 range (0x80-0x9F). Removing the introducer character alone
+///    is enough to neutralize an escape sequence -- whatever printable
+///    characters followed it (`[31m`, say) are left behind as harmless
+///    literal text instead of control codes a terminal would try to
+///    interpret. `ratatui` itself never writes a `Line`'s text to the
+///    terminal as raw bytes (every draw goes through its own styled-cell
+///    buffer, not `print!`), so this isn't defending against an exploit
+///    that reaches the screen through *this* code path specifically --
+///    it's defending the text itself, in case it's ever `println!`'d,
+///    logged, or copied somewhere else that would interpret it literally.
+/// 2. **Cap the length** at `MAX_SANITIZED_MESSAGE_LEN` *characters* (via
+///    `.chars()`, not byte slicing) -- slicing a `String` by raw byte
+///    index can panic or produce invalid UTF-8 if the cut lands in the
+///    middle of a multi-byte character; walking `.chars()` and
+///    `.take(...)`ing a fixed number of them can't split one apart, no
+///    matter what the text contains.
+pub fn sanitize_server_message(raw: &str) -> String {
+    // `.filter(...)` here processes the *iterator* of `char`s lazily --
+    // nothing is allocated until `.collect()` below actually builds the
+    // `String`, so this is one pass over `raw`, not a stripped copy
+    // followed by a separate truncation pass.
+    let mut cleaned = raw.chars().filter(|c| !c.is_control());
+
+    // `.by_ref()` is what makes `.take(...)` below only consume up to
+    // `MAX_SANITIZED_MESSAGE_LEN` characters from `cleaned` *without*
+    // dropping the iterator itself -- without it, `cleaned.take(...)`
+    // would move `cleaned` into a new, separate iterator, leaving no way
+    // to check afterward (`cleaned.next()`) whether there was more text
+    // left over than what got taken.
+    let truncated: String = cleaned.by_ref().take(MAX_SANITIZED_MESSAGE_LEN).collect();
+
+    // If `cleaned` still has at least one character left after taking
+    // `MAX_SANITIZED_MESSAGE_LEN` of them, the original text was longer
+    // than the cap -- append `…` so it's visually obvious this is a
+    // truncated message, not the server's complete, oddly-clipped one.
+    if cleaned.next().is_some() {
+        format!("{truncated}…")
+    } else {
+        truncated
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -242,5 +303,70 @@ mod tests {
         already_synced.insert("2".to_string());
 
         assert!(select_ids_to_fetch(&unread_ids, &already_synced, 500).is_empty());
+    }
+
+    /// A normal, well-behaved message passes through completely
+    /// unchanged -- sanitizing shouldn't have any visible effect on the
+    /// overwhelming common case (a plain English error sentence).
+    #[test]
+    fn sanitize_server_message_leaves_a_plain_message_untouched() {
+        let message = "URL is not allowed to be resolved: http://127.0.0.1:9099/nope.xml";
+        assert_eq!(sanitize_server_message(message), message);
+    }
+
+    /// A hostile string: a real ANSI escape sequence (`\x1b[31m`, "set
+    /// foreground red"), a bell character (`\x07`), and a C1 control
+    /// character (`\u{9b}`, the same family as `ESC`) mixed into
+    /// otherwise-normal text. None of the control characters should
+    /// survive; every printable character around them should.
+    #[test]
+    fn sanitize_server_message_strips_control_characters_from_a_hostile_string() {
+        let hostile = "Already \x1b[31msubscribed\x1b[0m! \x07\u{9b}https://example.com/feed.xml";
+        let cleaned = sanitize_server_message(hostile);
+
+        assert!(!cleaned.contains('\x1b'), "the ESC character itself must be gone");
+        assert!(!cleaned.contains('\x07'), "the bell character must be gone");
+        assert!(!cleaned.contains('\u{9b}'), "the C1 control character must be gone");
+        assert!(cleaned.contains("Already"));
+        assert!(cleaned.contains("subscribed"));
+        assert!(cleaned.contains("https://example.com/feed.xml"));
+        // The escape sequence's own printable characters ("[31m", "[0m")
+        // are left behind as harmless literal text, per this function's
+        // own doc comment -- not stripped themselves, just neutralized.
+        assert!(cleaned.contains("[31m"));
+    }
+
+    /// A message longer than `MAX_SANITIZED_MESSAGE_LEN` is truncated
+    /// with a trailing `…`; one at or under the limit is left exactly as
+    /// long as it started.
+    #[test]
+    fn sanitize_server_message_truncates_long_messages() {
+        let long_message = "x".repeat(MAX_SANITIZED_MESSAGE_LEN + 50);
+        let cleaned = sanitize_server_message(&long_message);
+        assert_eq!(cleaned.chars().count(), MAX_SANITIZED_MESSAGE_LEN + 1); // +1 for the trailing …
+        assert!(cleaned.ends_with('…'));
+
+        let exact_length_message = "x".repeat(MAX_SANITIZED_MESSAGE_LEN);
+        let cleaned = sanitize_server_message(&exact_length_message);
+        assert_eq!(cleaned, exact_length_message);
+        assert!(!cleaned.ends_with('…'));
+    }
+
+    /// Truncation counts `char`s, not bytes -- a message made entirely of
+    /// multi-byte UTF-8 characters must never be cut mid-character (which
+    /// would either panic on a byte-index slice or produce invalid
+    /// UTF-8). A multi-byte emoji repeated past the cap is the sharpest
+    /// version of this check.
+    #[test]
+    fn sanitize_server_message_truncates_by_chars_not_bytes() {
+        let multibyte_message = "🦀".repeat(MAX_SANITIZED_MESSAGE_LEN + 10);
+        let cleaned = sanitize_server_message(&multibyte_message);
+
+        assert_eq!(cleaned.chars().count(), MAX_SANITIZED_MESSAGE_LEN + 1);
+        assert!(cleaned.ends_with('…'));
+        // If this were a byte-index slice instead of a char-based one,
+        // this call would have already panicked on an invalid UTF-8
+        // boundary before this assertion ever ran.
+        assert!(cleaned.is_char_boundary(cleaned.len()));
     }
 }

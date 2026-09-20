@@ -1085,15 +1085,64 @@ already settled above:
   next sync pulled it in as read locally (`marked_read_from_server: 1`).
   See `freshrss::sync::tests::manual_sync_against_a_live_server`.
 
-### Adding feeds
+### Adding feeds — built in Phase 6
 
-The default `a` flow is **unchanged**: paste a URL, validate with `feed-rs`,
-write to `sources.toml`. When FreshRSS is enabled, the confirm screen gains
-one optional choice of **destination: Local (default) or FreshRSS**.
-Choosing FreshRSS sends the feed URL via `quickadd` instead of writing to
-`sources.toml`; it appears in the sidebar after the next sync. If FreshRSS
-can't be reached, show the error and let the person retry or switch to
-Local — never lose the typed URL.
+The default `a` flow is **unchanged**: paste a URL, validate with `feed-rs`
+(exactly the same `fetch_feed` call as before — the destination choice
+doesn't exist yet at that point), write to `sources.toml`. When FreshRSS is
+available (feature on *and* `freshrss.toml` resolves to `Enabled` --
+re-checked fresh the moment the URL validates, not cached from startup),
+the Confirm screen gains a **Destination: Local / FreshRSS** field, first
+in the `Tab` cycle -- picking it before `Name`/`Topic` is what lets
+choosing FreshRSS skip both of them entirely, since `quickadd` takes
+neither (see below). With the feature off, or FreshRSS unavailable this
+round, the Confirm screen's fields, `Tab` order, and every keybind are
+byte-for-byte what they were before this phase.
+
+**Choosing FreshRSS:**
+- **`Name` is irrelevant and hidden** (shown as `Name: (taken from the
+  feed)`, not editable) -- `quickadd` assigns no name, FreshRSS guesses
+  its own from the feed. **`Topic` is skipped entirely** for the same
+  reason `quickadd` assigns no category: the feed lands in
+  `FreshRSS/Uncategorized` once a sync pulls its first item, same as any
+  other uncategorized FreshRSS feed.
+- **If `url` already matches a local `sources.toml` source**, a
+  non-blocking warning appears the moment `FreshRSS` is selected: per the
+  URL-conflict rule, the FreshRSS copy would sync real server data that
+  then never actually appears anywhere (`insert_article_if_new_url`
+  silently skips it) -- still possible to confirm anyway (e.g.
+  deliberately moving a feed from local to FreshRSS-managed), just worth
+  knowing first.
+- **`Enter` calls `subscription/quickadd`** (`freshrss::sync::add_feed`:
+  log in, get a write token, `quickadd`) -- verified against a live
+  server that every outcome, success or rejection, comes back `HTTP 200`;
+  the response body's `numResults` is what actually says which happened,
+  never the status code. FreshRSS's own rejection text (already
+  subscribed; a private/loopback URL its SSRF check declines; an
+  unresolvable domain) is shown verbatim in the Confirm popup's error
+  line, run through `sanitize_server_message` first (strips control
+  characters, caps length) since it's the one piece of text in this whole
+  codebase a FreshRSS server chooses the exact wording of. On any
+  failure, the screen stays open with `url` intact -- retry, or `Tab` back
+  to `Destination` and switch to `Local`. **`sources.toml` is never
+  written when the destination is FreshRSS** -- `fetchers::config::add_source`
+  is only ever called from the `Local` branch.
+- **On success**, a sync runs immediately (`Syncing FreshRSS…` shown and
+  the frame redrawn before the blocking call, then the same footer
+  summary `r`/the startup sync already produce) so the feed has a real
+  chance to show up in the sidebar in this same session. Verified against
+  a live server that a freshly-added feed's articles are typically
+  fetchable immediately, no separate wait needed -- but the footer note
+  says so honestly either way (`"...— a newly-added feed appears in the
+  sidebar once it has an article."`), since that's a property of the one
+  server tested, not a guarantee every FreshRSS instance behaves
+  identically, and the zero-article-feed sidebar limitation applies
+  regardless of how fast the fetch was.
+- **Not gated by `push_read_state`.** Adding a feed is a direct, explicit
+  action the person just took (pressing `a`, typing a URL, choosing
+  FreshRSS) — not an automatic side effect of local read-state changes the
+  way the push step is. `push_read_state = false` only stops *that*
+  automatic behavior; it has no bearing on `a`.
 
 ### Configuration: `freshrss.toml`
 
@@ -1191,7 +1240,9 @@ to `.gitignore` as a safety net.
   `edit-tag` response body confirms `"OK"`). Gated by `freshrss.toml`'s
   new `push_read_state` (default `true`). See "Phase 5 implementation
   notes" below.
-- **Phase 6 — add feed.** The destination choice in the `a` flow.
+- **Phase 6 — add feed. Done.** The destination choice in the `a` flow
+  (`Client::quickadd`, `sync::add_feed`, the Confirm screen's
+  `Destination` field). See "Adding feeds" above for the full design.
 - **Phase 7 — polish.** README configuration section, `CHANGELOG.md` entry,
   update this document from "planned" to describing what was actually
   built, and full doc-comment pass per the Documentation Standards.

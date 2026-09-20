@@ -161,9 +161,19 @@ const EDITING_NOTE_HINTS: &str = "Enter save note · Esc cancel";
 const ADD_SOURCE_URL_HINTS: &str = "Enter fetch & validate · Esc cancel";
 
 /// The footer hint line shown on the add-source popup's second step -- the
-/// name/topic confirm screen (see `AddSourceStep::Confirm`).
+/// name/topic confirm screen (see `AddSourceStep::Confirm`). Feature
+/// off, or FreshRSS unavailable this round, this is the *only* Confirm
+/// hint line there is -- identical to `master`.
 const ADD_SOURCE_CONFIRM_HINTS: &str =
     "Tab switch field · ↑/↓ pick existing topic · Enter save · Esc cancel";
+
+/// The Confirm-screen hint line shown instead of `ADD_SOURCE_CONFIRM_HINTS`
+/// when FreshRSS is available this round (Phase 6) -- mentions that
+/// `↑`/`↓` can also toggle the destination, on top of everything
+/// `ADD_SOURCE_CONFIRM_HINTS` already says.
+#[cfg(feature = "freshrss")]
+const ADD_SOURCE_CONFIRM_HINTS_WITH_DESTINATION: &str =
+    "Tab switch field · ↑/↓ pick topic/destination · Enter save · Esc cancel";
 
 /// The footer hint line shown while the `Mode::Error` popup is open --
 /// there's only one way out of it, unlike the other popups' `Enter`/`Esc`
@@ -360,19 +370,83 @@ enum AddSourceStep {
         field: ConfirmField,
         topic_options: Vec<String>,
         error: Option<String>,
+        /// Everything about the FreshRSS destination choice (Phase 6),
+        /// bundled into one struct instead of three separate fields --
+        /// every construction/pattern site that touches this screen only
+        /// has to name one extra field, `freshrss`, instead of three.
+        /// `#[cfg(feature = "freshrss")]`: with the feature off, this
+        /// field doesn't exist at all, and every place that would read it
+        /// is itself behind the same `#[cfg(...)]`, so the Confirm
+        /// screen's shape (and every key it responds to) is identical to
+        /// `master`'s original two-field version.
+        #[cfg(feature = "freshrss")]
+        freshrss: AddSourceFreshRssState,
     },
 }
 
 /// Which field of the `AddSourceStep::Confirm` screen currently has focus
 /// -- `Tab` toggles this, and it decides both which field typed characters
 /// go into and (for `Topic`) whether `Up`/`Down` cycle through
-/// `topic_options`. `Clone, Copy, PartialEq` for the same reason as `View`
-/// above: a two-variant tag with no data of its own, compared with plain
-/// `==` (see `render_add_source_popup`'s `focus_style`).
+/// `topic_options` (or, for `Destination`, toggle `Local`/`FreshRss` --
+/// see `AddSourceFreshRssState`). `Clone, Copy, PartialEq` for the same
+/// reason as `View` above: a tag with no data of its own, compared with
+/// plain `==` (see `render_add_source_popup`'s `focus_style`).
 #[derive(Clone, Copy, PartialEq)]
 enum ConfirmField {
     Name,
     Topic,
+    /// Only ever reached when the feature is on -- see
+    /// `next_confirm_field`'s doc comment for the exact cycle order and
+    /// why `Destination` itself decides whether `Topic` is even visited.
+    #[cfg(feature = "freshrss")]
+    Destination,
+}
+
+/// The FreshRSS destination choice on the add-source Confirm screen --
+/// `Local` (the default; ARCHITECTURE.md's unchanged `a` flow) or
+/// `FreshRss` (Phase 6: `subscription/quickadd` instead of a
+/// `sources.toml` write). `Clone, Copy, PartialEq` for the same reason as
+/// `ConfirmField`.
+#[cfg(feature = "freshrss")]
+#[derive(Clone, Copy, PartialEq, Default)]
+enum AddSourceDestination {
+    #[default]
+    Local,
+    FreshRss,
+}
+
+/// Everything the Confirm screen needs to know about the FreshRSS
+/// destination option, computed once when the screen opens (see
+/// `handle_add_source_key`'s `AddSourceStep::Url` arm) rather than
+/// re-checked on every keypress.
+#[cfg(feature = "freshrss")]
+struct AddSourceFreshRssState {
+    /// Which destination is currently selected -- always starts at its
+    /// `Default`, `Local`, regardless of whether `FreshRss` is even
+    /// reachable (see `freshrss_available` below); toggled by `Up`/`Down`
+    /// while `ConfirmField::Destination` has focus.
+    destination: AddSourceDestination,
+    /// Whether `freshrss.toml` actually resolved to `Enabled { .. }` when
+    /// this screen opened (checked fresh, the same "reload config per
+    /// action" pattern `r`'s FreshRSS sync already uses -- see
+    /// `run_freshrss_sync_via_r_keybind`). `false` means the feature is
+    /// compiled in but not currently usable (disabled, or a broken
+    /// `freshrss.toml`) -- `ConfirmField::Destination` is simply never
+    /// visited by `Tab` in that case, so the screen behaves exactly like
+    /// the feature was off, at runtime, without needing a second copy of
+    /// every key-handling arm to express that.
+    freshrss_available: bool,
+    /// Set when `url` is already a local `sources.toml` entry, checked
+    /// the moment `destination` is toggled to `FreshRss` (amendment 5) --
+    /// a non-blocking heads-up, not an `error`: per
+    /// `Storage::insert_article_if_new_url`'s URL-conflict rule, a
+    /// FreshRSS item whose URL already belongs to a local article is
+    /// silently skipped, so subscribing the same feed to FreshRSS *too*
+    /// would sync real data from the server that then never actually
+    /// shows up anywhere -- worth knowing before confirming, not worth
+    /// blocking on, since it's still a legitimate thing to want (e.g.
+    /// switching a feed from local to FreshRSS-managed deliberately).
+    already_local_warning: Option<String>,
 }
 
 /// Runs the TUI shell until the user presses `q`.
@@ -561,15 +635,14 @@ fn draw_until_quit(
 
     // A transient footer message -- see `render`'s doc comment on the
     // parameter this feeds. Always declared (a plain `Option<String>`,
-    // not a FreshRSS type), but only ever set to `Some(...)` from inside
-    // `#[cfg(feature = "freshrss")]` code below, so it provably stays
-    // `None` for the lifetime of this function when the feature is off --
-    // `mut` only in the feature-on build, since that's the only build
-    // where anything ever actually reassigns it.
-    #[cfg(feature = "freshrss")]
+    // not a FreshRSS type) and always `mut`: `handle_add_source_key`
+    // takes `&mut footer_status` unconditionally (see its own doc
+    // comment on why), which alone requires the binding to be `mut` in
+    // both builds, whether or not that particular call path ever
+    // actually writes through it. Every place that *does* reassign it is
+    // still behind `#[cfg(feature = "freshrss")]`, so it provably stays
+    // `None` for the lifetime of this function when the feature is off.
     let mut footer_status: Option<String> = None;
-    #[cfg(not(feature = "freshrss"))]
-    let footer_status: Option<String> = None;
 
     // Seed `footer_status` with `freshrss.toml`'s own warnings (an
     // insecure `url`, a loosely-permissioned password file), collected
@@ -752,7 +825,14 @@ fn draw_until_quit(
             let Mode::AddSource(step) = mode else {
                 unreachable!("just checked mode is Mode::AddSource above")
             };
-            mode = handle_add_source_key(key.code, step, topics)?;
+            // `false` until `handle_add_source_key`'s FreshRSS branch
+            // (feature-gated) sets it `true` on a genuine `quickadd`
+            // success -- the signal this block uses below to decide
+            // whether a post-add sync should run. Plain `bool`, always
+            // declared, same "unconditional plumbing" reasoning as
+            // `footer_status` itself.
+            let mut added_via_freshrss = false;
+            mode = handle_add_source_key(key.code, step, topics, &mut footer_status, &mut added_via_freshrss)?;
 
             // `mode` is back to `Mode::Normal` once the flow ends, whether
             // that's by successfully confirming or by cancelling with
@@ -781,6 +861,65 @@ fn draw_until_quit(
                 };
                 article_index = article_index.min(articles.len().saturating_sub(1));
             }
+
+            // A feed was just subscribed via FreshRSS (not written to
+            // `sources.toml` -- `handle_add_source_key`'s FreshRSS branch
+            // never calls `fetchers::config::add_source`). Running a sync
+            // immediately, right here, is what gives the newly-added feed
+            // a real chance to show up in the sidebar in this same
+            // session, per ARCHITECTURE.md's "Adding feeds" -- without
+            // this, the person would have to wait for the next `r` on an
+            // already-existing `FreshRSS/*` topic (which might not exist
+            // yet if this was the very first FreshRSS feed) or the next
+            // startup.
+            #[cfg(feature = "freshrss")]
+            if added_via_freshrss {
+                let selected_topic_name = topics.get(topic_index).cloned();
+
+                footer_status = Some("Syncing FreshRSS…".to_string());
+                draw_frame(
+                    terminal,
+                    theme,
+                    topics.as_slice(),
+                    sources_by_topic,
+                    &expanded_topics,
+                    selected_topic_name.as_deref(),
+                    selected_source.as_deref(),
+                    &articles,
+                    if articles.is_empty() { None } else { Some(article_index) },
+                    &mode,
+                    view,
+                    search.as_deref(),
+                    footer_status.as_deref(),
+                )?;
+
+                let result = run_freshrss_sync_via_r_keybind(storage);
+                let sync_message = apply_freshrss_sync_result(
+                    result,
+                    storage,
+                    topics,
+                    sources_by_topic,
+                    &mut topic_index,
+                    selected_topic_name.as_deref(),
+                    selected_source.as_deref(),
+                    view,
+                    &mut articles,
+                    &mut article_index,
+                )?;
+                // Verified against a live server that a freshly-added
+                // feed's articles are typically already fetchable
+                // immediately (no separate wait needed) -- but that's an
+                // observation about one server, not a guarantee every
+                // FreshRSS instance behaves identically, and either way
+                // the feed still won't appear as a sidebar *row* until it
+                // has at least one synced article (the documented
+                // zero-article-feed limitation). This note says so
+                // explicitly rather than letting a "0 new" sync result
+                // read as if something went wrong.
+                footer_status =
+                    Some(format!("{sync_message} — a newly-added feed appears in the sidebar once it has an article."));
+            }
+
             continue;
         }
 
@@ -1886,7 +2025,28 @@ fn move_sidebar_selection(
 /// for why nothing here needs to separately "reload" the in-memory
 /// fetcher list) -- every other keypress just edits `step`'s fields in
 /// memory.
-fn handle_add_source_key(key: KeyCode, step: AddSourceStep, topics: &mut Vec<String>) -> anyhow::Result<Mode> {
+///
+/// `#[cfg_attr(not(feature = "freshrss"), allow(unused_variables))]`:
+/// `footer_status`/`added_via_freshrss` are both only ever read or
+/// written from inside `#[cfg(feature = "freshrss")]` blocks in this
+/// function's body -- correct and intentional (see each parameter's own
+/// doc comment), but it means a feature-off build genuinely never
+/// touches either one, which `unused_variables` would otherwise flag.
+/// The parameters stay in the signature either way so the call site
+/// doesn't need two different versions of this function's signature.
+#[cfg_attr(not(feature = "freshrss"), allow(unused_variables))]
+fn handle_add_source_key(
+    key: KeyCode,
+    step: AddSourceStep,
+    topics: &mut Vec<String>,
+    // Always-present, plain (non-FreshRSS-typed) out-parameters -- same
+    // "unconditional plumbing, conditional behavior" reasoning as
+    // `footer_status` itself in `draw_until_quit`: with the feature off,
+    // nothing ever writes to either of these, so they cost nothing and
+    // change nothing observable.
+    footer_status: &mut Option<String>,
+    added_via_freshrss: &mut bool,
+) -> anyhow::Result<Mode> {
     match step {
         AddSourceStep::Url { mut text, error } => match key {
             KeyCode::Esc => Ok(Mode::Normal),
@@ -1909,7 +2069,9 @@ fn handle_add_source_key(key: KeyCode, step: AddSourceStep, topics: &mut Vec<Str
             // `RssFetcher::fetch` uses for every regular refresh (see
             // `fetch_feed`'s own doc comment), just not yet wrapped in an
             // `RssFetcher` since there's no confirmed name/topic for one
-            // yet.
+            // yet. Unchanged by Phase 6: this validation runs identically
+            // regardless of which destination gets picked next -- the
+            // destination choice doesn't exist yet at this point.
             //
             // `draw_until_quit` runs synchronously, but `fetch_feed` is
             // `async` (real I/O) -- `tokio::task::block_in_place` +
@@ -1932,14 +2094,33 @@ fn handle_add_source_key(key: KeyCode, step: AddSourceStep, topics: &mut Vec<Str
                 });
 
                 match fetch_result {
-                    Ok(feed) => Ok(Mode::AddSource(AddSourceStep::Confirm {
-                        name: guess_source_name(&feed, trimmed),
-                        url: trimmed.to_string(),
-                        topic: String::new(),
-                        field: ConfirmField::Name,
-                        topic_options: topics.clone(),
-                        error: None,
-                    })),
+                    Ok(feed) => {
+                        // Checked once, right here, rather than re-checked
+                        // on every keypress the Confirm screen handles --
+                        // see `AddSourceFreshRssState`'s own doc comment
+                        // for what each field means and
+                        // `build_add_source_freshrss_state`'s for why this
+                        // is a fresh config reload rather than anything
+                        // cached from startup.
+                        #[cfg(feature = "freshrss")]
+                        let freshrss = build_add_source_freshrss_state(footer_status);
+                        #[cfg(feature = "freshrss")]
+                        let field =
+                            if freshrss.freshrss_available { ConfirmField::Destination } else { ConfirmField::Name };
+                        #[cfg(not(feature = "freshrss"))]
+                        let field = ConfirmField::Name;
+
+                        Ok(Mode::AddSource(AddSourceStep::Confirm {
+                            name: guess_source_name(&feed, trimmed),
+                            url: trimmed.to_string(),
+                            topic: String::new(),
+                            field,
+                            topic_options: topics.clone(),
+                            error: None,
+                            #[cfg(feature = "freshrss")]
+                            freshrss,
+                        }))
+                    }
                     // Per ARCHITECTURE.md: "show a clear error ('couldn't
                     // parse this as a feed -- check the URL') and let the
                     // user retry or cancel." `text` (not `trimmed`) is
@@ -1956,14 +2137,30 @@ fn handle_add_source_key(key: KeyCode, step: AddSourceStep, topics: &mut Vec<Str
             _ => Ok(Mode::AddSource(AddSourceStep::Url { text, error })),
         },
 
-        AddSourceStep::Confirm { url, mut name, mut topic, mut field, topic_options, error } => match key {
+        AddSourceStep::Confirm {
+            url,
+            mut name,
+            mut topic,
+            mut field,
+            topic_options,
+            error,
+            #[cfg(feature = "freshrss")]
+            mut freshrss,
+        } => match key {
             KeyCode::Esc => Ok(Mode::Normal),
 
             KeyCode::Tab => {
-                field = match field {
-                    ConfirmField::Name => ConfirmField::Topic,
-                    ConfirmField::Topic => ConfirmField::Name,
-                };
+                #[cfg(feature = "freshrss")]
+                {
+                    field = next_confirm_field(field, &freshrss);
+                }
+                #[cfg(not(feature = "freshrss"))]
+                {
+                    field = match field {
+                        ConfirmField::Name => ConfirmField::Topic,
+                        ConfirmField::Topic => ConfirmField::Name,
+                    };
+                }
                 Ok(Mode::AddSource(AddSourceStep::Confirm {
                     url,
                     name,
@@ -1971,7 +2168,32 @@ fn handle_add_source_key(key: KeyCode, step: AddSourceStep, topics: &mut Vec<Str
                     field,
                     topic_options,
                     error: None,
+                    #[cfg(feature = "freshrss")]
+                    freshrss,
                 }))
+            }
+
+            // While `Destination` has focus, `Up`/`Down` toggle
+            // `Local`/`FreshRss` instead of cycling `topic_options` --
+            // the same "this key means whatever the focused field says it
+            // means" idea the `Topic` arms just below already establish,
+            // just with a two-value toggle instead of a longer list to
+            // step through. Re-checks whether `url` is already a local
+            // `sources.toml` source the moment `FreshRss` becomes
+            // selected (amendment 5) -- not on every keypress, only right
+            // when it'd actually start mattering.
+            #[cfg(feature = "freshrss")]
+            KeyCode::Up | KeyCode::Down if matches!(field, ConfirmField::Destination) => {
+                freshrss.destination = match freshrss.destination {
+                    AddSourceDestination::Local => AddSourceDestination::FreshRss,
+                    AddSourceDestination::FreshRss => AddSourceDestination::Local,
+                };
+                freshrss.already_local_warning = if freshrss.destination == AddSourceDestination::FreshRss {
+                    warn_if_url_is_already_local(&url)
+                } else {
+                    None
+                };
+                Ok(Mode::AddSource(AddSourceStep::Confirm { url, name, topic, field, topic_options, error: None, freshrss }))
             }
 
             // Only meaningful while `Topic` has focus -- cycling "pick an
@@ -1989,6 +2211,8 @@ fn handle_add_source_key(key: KeyCode, step: AddSourceStep, topics: &mut Vec<Str
                     field,
                     topic_options,
                     error: None,
+                    #[cfg(feature = "freshrss")]
+                    freshrss,
                 }))
             }
             KeyCode::Down if matches!(field, ConfirmField::Topic) && !topic_options.is_empty() => {
@@ -2000,10 +2224,20 @@ fn handle_add_source_key(key: KeyCode, step: AddSourceStep, topics: &mut Vec<Str
                     field,
                     topic_options,
                     error: None,
+                    #[cfg(feature = "freshrss")]
+                    freshrss,
                 }))
             }
 
-            KeyCode::Backspace => {
+            // `Name`/`Topic` typing is meaningless while `Destination` has
+            // focus (there's no text there to edit), and while
+            // `FreshRss` is the selected destination, `Name` is never the
+            // focused field at all (see `next_confirm_field`) -- so this
+            // guard only actually excludes the `Destination`-focused
+            // case; `Backspace`/`Char` below are already unreachable for
+            // a FreshRSS `Name` in practice, not just guarded twice for
+            // safety.
+            KeyCode::Backspace if !is_destination_field(field) => {
                 match field {
                     ConfirmField::Name => {
                         name.pop();
@@ -2011,6 +2245,8 @@ fn handle_add_source_key(key: KeyCode, step: AddSourceStep, topics: &mut Vec<Str
                     ConfirmField::Topic => {
                         topic.pop();
                     }
+                    #[cfg(feature = "freshrss")]
+                    ConfirmField::Destination => unreachable!("excluded by this arm's guard"),
                 }
                 Ok(Mode::AddSource(AddSourceStep::Confirm {
                     url,
@@ -2019,6 +2255,8 @@ fn handle_add_source_key(key: KeyCode, step: AddSourceStep, topics: &mut Vec<Str
                     field,
                     topic_options,
                     error: None,
+                    #[cfg(feature = "freshrss")]
+                    freshrss,
                 }))
             }
 
@@ -2027,11 +2265,14 @@ fn handle_add_source_key(key: KeyCode, step: AddSourceStep, topics: &mut Vec<Str
             // switch into first; starting to type just overwrites
             // whatever existing topic `Up`/`Down` had most recently
             // selected, per ARCHITECTURE.md's "pick from existing topics
-            // ... or type a new one."
-            KeyCode::Char(c) => {
+            // ... or type a new one." Guarded the same way `Backspace`
+            // just above is, for the same reason.
+            KeyCode::Char(c) if !is_destination_field(field) => {
                 match field {
                     ConfirmField::Name => name.push(c),
                     ConfirmField::Topic => topic.push(c),
+                    #[cfg(feature = "freshrss")]
+                    ConfirmField::Destination => unreachable!("excluded by this arm's guard"),
                 }
                 Ok(Mode::AddSource(AddSourceStep::Confirm {
                     url,
@@ -2040,17 +2281,75 @@ fn handle_add_source_key(key: KeyCode, step: AddSourceStep, topics: &mut Vec<Str
                     field,
                     topic_options,
                     error: None,
+                    #[cfg(feature = "freshrss")]
+                    freshrss,
                 }))
             }
 
-            // Confirm: validate both fields are non-empty (ARCHITECTURE.md:
-            // "No source can be left without a topic" -- `name` gets the
-            // same treatment, since an empty source name would be equally
-            // useless), then write the `[[source]]` block. `topics` only
-            // gets the new topic pushed onto it *after* `add_source`
-            // actually succeeds -- the in-memory sidebar list must never
-            // show a topic that didn't really make it into `sources.toml`.
+            // Confirm. The `FreshRss` destination branches off entirely
+            // before any of the Local-only validation below: quickadd
+            // takes no name or topic at all (it assigns no category --
+            // ARCHITECTURE.md's "Adding feeds" section explains the
+            // `FreshRSS/Uncategorized` consequence), so there is nothing
+            // to validate, only a feed URL to submit.
             KeyCode::Enter => {
+                #[cfg(feature = "freshrss")]
+                if freshrss.destination == AddSourceDestination::FreshRss {
+                    return Ok(match add_feed_via_freshrss(&url) {
+                        Ok(Ok(_added)) => {
+                            // The actual "does it have articles yet, does
+                            // it show up in the sidebar" story is handled
+                            // by `draw_until_quit`'s post-add sync (see
+                            // its own comment) once this returns -- this
+                            // function's only job is the subscribe step
+                            // itself.
+                            *added_via_freshrss = true;
+                            Mode::Normal
+                        }
+                        // FreshRSS's own rejection text (already
+                        // subscribed, a private/loopback URL its SSRF
+                        // check declined, an unresolvable domain --
+                        // verified against a live server, see
+                        // `Client::quickadd`'s doc comment) is server-
+                        // supplied free text, sanitized before it's ever
+                        // shown -- see `mapping::sanitize_server_message`.
+                        Ok(Err(rejection)) => Mode::AddSource(AddSourceStep::Confirm {
+                            url,
+                            name,
+                            topic,
+                            field,
+                            topic_options,
+                            error: Some(freshrss::mapping::sanitize_server_message(&rejection)),
+                            freshrss,
+                        }),
+                        // A transport-level failure (network unreachable,
+                        // FreshRSS disabled since the Confirm screen
+                        // opened, a bad login) -- `{err:#}` is entirely
+                        // this codebase's own static strings and status
+                        // codes, never raw server body text, so it
+                        // doesn't need sanitizing the way `rejection`
+                        // above does.
+                        Err(err) => Mode::AddSource(AddSourceStep::Confirm {
+                            url,
+                            name,
+                            topic,
+                            field,
+                            topic_options,
+                            error: Some(format!("FreshRSS error: {err:#}")),
+                            freshrss,
+                        }),
+                    });
+                }
+
+                // Local destination (or the feature is off): validate both
+                // fields are non-empty (ARCHITECTURE.md: "No source can be
+                // left without a topic" -- `name` gets the same treatment,
+                // since an empty source name would be equally useless),
+                // then write the `[[source]]` block. `topics` only gets
+                // the new topic pushed onto it *after* `add_source`
+                // actually succeeds -- the in-memory sidebar list must
+                // never show a topic that didn't really make it into
+                // `sources.toml`.
                 let trimmed_name = name.trim();
                 let trimmed_topic = topic.trim();
 
@@ -2062,6 +2361,8 @@ fn handle_add_source_key(key: KeyCode, step: AddSourceStep, topics: &mut Vec<Str
                         field,
                         topic_options,
                         error: Some("name can't be empty".to_string()),
+                        #[cfg(feature = "freshrss")]
+                        freshrss,
                     }));
                 }
                 if trimmed_topic.is_empty() {
@@ -2072,6 +2373,8 @@ fn handle_add_source_key(key: KeyCode, step: AddSourceStep, topics: &mut Vec<Str
                         field,
                         topic_options,
                         error: Some("every source needs a topic".to_string()),
+                        #[cfg(feature = "freshrss")]
+                        freshrss,
                     }));
                 }
 
@@ -2095,6 +2398,8 @@ fn handle_add_source_key(key: KeyCode, step: AddSourceStep, topics: &mut Vec<Str
                         field,
                         topic_options,
                         error: Some(format!("failed to save source: {err:#}")),
+                        #[cfg(feature = "freshrss")]
+                        freshrss,
                     })),
                 }
             }
@@ -2106,9 +2411,156 @@ fn handle_add_source_key(key: KeyCode, step: AddSourceStep, topics: &mut Vec<Str
                 field,
                 topic_options,
                 error,
+                #[cfg(feature = "freshrss")]
+                freshrss,
             })),
         },
     }
+}
+
+/// Whether `field` is `ConfirmField::Destination` -- a plain, always-present
+/// function (unlike `next_confirm_field` below) specifically so
+/// `Backspace`/`Char` typing guards can call it uniformly in both builds
+/// rather than needing two full copies of those match arms. The
+/// feature-off version always returns `false`, correctly: `ConfirmField`
+/// has no `Destination` variant to ever match in that build, so `field`
+/// genuinely can never be one.
+#[cfg(feature = "freshrss")]
+fn is_destination_field(field: ConfirmField) -> bool {
+    matches!(field, ConfirmField::Destination)
+}
+#[cfg(not(feature = "freshrss"))]
+fn is_destination_field(_field: ConfirmField) -> bool {
+    false
+}
+
+/// Computes the next field `Tab` should focus on the Confirm screen, per
+/// `ConfirmField::Destination`'s own doc comment: **Destination → Name →
+/// Topic → Destination** while `Local` is selected, but choosing
+/// `FreshRss` collapses the cycle down to just `Destination` -- there's
+/// nothing else to focus once `Name` is auto-filled from the feed and
+/// `Topic` doesn't apply at all (quickadd assigns no category). With
+/// FreshRSS unavailable this round (`!freshrss.freshrss_available`), the
+/// cycle is `Name → Topic → Name`, identical to the feature-off version
+/// -- `Destination` is simply never reachable, so this produces the same
+/// observable behavior as `master`'s original two-field cycle without
+/// needing a second copy of this function to prove it.
+#[cfg(feature = "freshrss")]
+fn next_confirm_field(field: ConfirmField, freshrss: &AddSourceFreshRssState) -> ConfirmField {
+    if !freshrss.freshrss_available {
+        return match field {
+            ConfirmField::Name => ConfirmField::Topic,
+            ConfirmField::Topic | ConfirmField::Destination => ConfirmField::Name,
+        };
+    }
+
+    if freshrss.destination == AddSourceDestination::FreshRss {
+        return ConfirmField::Destination;
+    }
+
+    match field {
+        ConfirmField::Destination => ConfirmField::Name,
+        ConfirmField::Name => ConfirmField::Topic,
+        ConfirmField::Topic => ConfirmField::Destination,
+    }
+}
+
+/// Builds the Confirm screen's initial `AddSourceFreshRssState`, the
+/// moment the URL step's `fetch_feed` succeeds -- reloads `freshrss.toml`
+/// fresh rather than reusing anything cached from `main.rs`'s startup
+/// load, the same "config reloaded per action" pattern
+/// `run_freshrss_sync_via_r_keybind` already established for `r`. Any
+/// warning `FreshRssConfig::load` collected (an insecure `url`, a
+/// loosely-permissioned password file) goes straight to `footer_status`
+/// -- never `eprintln!`'d, since the TUI is already up and stderr is
+/// invisible underneath the alternate screen by this point.
+#[cfg(feature = "freshrss")]
+fn build_add_source_freshrss_state(footer_status: &mut Option<String>) -> AddSourceFreshRssState {
+    match freshrss::config::FreshRssConfig::load() {
+        Ok((freshrss::config::FreshRssConfig::Enabled { .. }, warnings)) => {
+            if let Some(first) = warnings.first() {
+                *footer_status = Some(first.clone());
+            }
+            AddSourceFreshRssState {
+                destination: AddSourceDestination::default(),
+                freshrss_available: true,
+                already_local_warning: None,
+            }
+        }
+        Ok((freshrss::config::FreshRssConfig::Disabled, _)) => AddSourceFreshRssState {
+            destination: AddSourceDestination::default(),
+            freshrss_available: false,
+            already_local_warning: None,
+        },
+        // A broken freshrss.toml (bad TOML, a missing required field)
+        // doesn't fail opening the add-source screen -- it just means
+        // FreshRSS isn't a usable destination *this* time, exactly like
+        // it being cleanly `Disabled` would; the person can still add a
+        // local source normally. The footer note is what tells them why
+        // the FreshRSS option didn't show up, instead of it just silently
+        // being absent.
+        Err(err) => {
+            *footer_status = Some(format!("FreshRSS unavailable: {err:#}"));
+            AddSourceFreshRssState {
+                destination: AddSourceDestination::default(),
+                freshrss_available: false,
+                already_local_warning: None,
+            }
+        }
+    }
+}
+
+/// Checks whether `url` is already a local `sources.toml` entry --
+/// amendment 5's warning. `Storage::insert_article_if_new_url`'s
+/// URL-conflict rule means a FreshRSS item sharing a URL with an
+/// existing local article is silently skipped, never linked or stored --
+/// so subscribing the same feed to FreshRSS too would sync real data
+/// from the server that then never actually appears anywhere locally.
+/// Worth flagging before confirming, not worth blocking on: switching a
+/// feed from local to FreshRSS-managed on purpose is still legitimate.
+///
+/// A `sources.toml` that fails to load at all isn't this check's problem
+/// to surface -- returns `None` (no warning) rather than propagating that
+/// error, since `load_sources`'s own error would be confusing to show in
+/// the middle of an unrelated "is this URL a duplicate" check.
+#[cfg(feature = "freshrss")]
+fn warn_if_url_is_already_local(url: &str) -> Option<String> {
+    let sources = fetchers::config::load_sources().ok()?;
+    if sources.iter().any(|source| source.url == url) {
+        return Some(
+            "heads up: this URL is already a local source -- FreshRSS's copy would be skipped \
+             (see ARCHITECTURE.md's URL-conflict rule)"
+                .to_string(),
+        );
+    }
+    None
+}
+
+/// Runs the FreshRSS side of confirming the add-source flow: log in, get
+/// a write token, `quickadd` -- `freshrss::sync::add_feed`, driven
+/// synchronously the same `block_in_place` + `block_on` way every other
+/// blocking FreshRSS call from inside the draw loop already is (see
+/// `refresh_topic`'s doc comment for the full explanation). Reloads
+/// `freshrss.toml` fresh rather than trusting the Confirm screen's
+/// already-somewhat-stale `freshrss_available` flag -- config could have
+/// changed in the time the popup sat open, however unlikely.
+#[cfg(feature = "freshrss")]
+fn add_feed_via_freshrss(feed_url: &str) -> anyhow::Result<Result<freshrss::client::QuickaddResult, String>> {
+    let (config, _warnings) = freshrss::config::FreshRssConfig::load()?;
+
+    // Same reasoning as `run_freshrss_sync_via_r_keybind`'s own discarded
+    // `_warnings`: already shown once, either at startup or when this
+    // very Confirm screen opened -- re-showing them here would just
+    // crowd out the add-feed result itself.
+    let freshrss::config::FreshRssConfig::Enabled { url, username, password, .. } = config else {
+        anyhow::bail!("FreshRSS is disabled in freshrss.toml -- can't add a feed");
+    };
+
+    let client = freshrss::client::Client::new(url, username, password);
+
+    tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::current().block_on(freshrss::sync::add_feed(&client, feed_url))
+    })
 }
 
 /// Picks the next (`direction > 0`) or previous (`direction < 0`) topic in
@@ -2852,6 +3304,15 @@ fn render_footer(frame: &mut Frame, theme: &Theme, area: Rect, mode: &Mode, view
     let hints = match mode {
         Mode::EditingNote { .. } => EDITING_NOTE_HINTS,
         Mode::AddSource(AddSourceStep::Url { .. }) => ADD_SOURCE_URL_HINTS,
+        // Only reachable at all when the feature is on -- matched before
+        // the general `Confirm` arm below so it takes priority when its
+        // guard holds; every other case (feature off, or FreshRSS simply
+        // unavailable this round) falls through to the exact same
+        // `ADD_SOURCE_CONFIRM_HINTS` line `master` always showed.
+        #[cfg(feature = "freshrss")]
+        Mode::AddSource(AddSourceStep::Confirm { freshrss, .. }) if freshrss.freshrss_available => {
+            ADD_SOURCE_CONFIRM_HINTS_WITH_DESTINATION
+        }
         Mode::AddSource(AddSourceStep::Confirm { .. }) => ADD_SOURCE_CONFIRM_HINTS,
         Mode::Error { .. } => ERROR_HINTS,
         Mode::Searching { .. } => SEARCH_HINTS,
@@ -2987,22 +3448,16 @@ fn render_add_source_popup(frame: &mut Frame, theme: &Theme, area: Rect, step: &
             frame.set_cursor_position((cursor_x, cursor_y));
         }
 
-        AddSourceStep::Confirm { url, name, topic, field, topic_options, error } => {
-            // Four content lines (URL, Name, Topic, the "existing topics"
-            // hint) always show; a fifth appears only when there's a
-            // validation/write error to surface. `+ 2` for the border,
-            // same as the `Url` branch above.
-            let height = if error.is_some() { 7 } else { 6 };
-            let popup_area = centered_rect(area, 70, height);
-
-            frame.render_widget(Clear, popup_area);
-
-            let block = Block::new()
-                .title(" Add Source — Confirm ")
-                .borders(Borders::ALL)
-                .style(Style::new().bg(theme.background).fg(theme.text_primary))
-                .border_style(Style::new().fg(theme.accent_selected));
-
+        AddSourceStep::Confirm {
+            url,
+            name,
+            topic,
+            field,
+            topic_options,
+            error,
+            #[cfg(feature = "freshrss")]
+            freshrss,
+        } => {
             // The focused field (per `field`) is highlighted in
             // `accent_selected` so it's visually obvious which one `Tab`
             // last landed on and which one typed characters/`Backspace`
@@ -3015,21 +3470,88 @@ fn render_add_source_popup(frame: &mut Frame, theme: &Theme, area: Rect, step: &
                 }
             };
 
-            let mut lines = vec![
-                Line::from(Span::styled(format!("URL:   {url}"), Style::new().fg(theme.text_muted))),
-                Line::from(Span::styled(format!("Name:  {name}"), focus_style(ConfirmField::Name))),
-                Line::from(Span::styled(format!("Topic: {topic}"), focus_style(ConfirmField::Topic))),
-                Line::from(Span::styled(
+            // Built up one line at a time (rather than a fixed-size
+            // `vec![...]` the way this used to be, before Phase 6) since
+            // which lines actually appear now depends on runtime state --
+            // whether FreshRSS is even available, and which destination
+            // is picked. `name_row`/`topic_row` track which line index
+            // each field actually landed on, purely so the cursor
+            // positioning below doesn't have to hardcode row numbers that
+            // would silently go stale the moment a line gets added or
+            // skipped above them.
+            let mut lines = vec![Line::from(Span::styled(format!("URL:   {url}"), Style::new().fg(theme.text_muted)))];
+
+            // `hide_name_and_topic` is `true` only when the feature is on,
+            // FreshRSS is available, *and* it's the selected destination
+            // -- every other combination (feature off, FreshRSS
+            // unavailable this round, or `Local` selected) renders
+            // exactly like `master`'s original Name/Topic/existing-topics
+            // block, just possibly with a `Destination:` line above it.
+            #[cfg(feature = "freshrss")]
+            {
+                if freshrss.freshrss_available {
+                    let destination_text = match freshrss.destination {
+                        AddSourceDestination::Local => "Destination: [Local]  FreshRSS",
+                        AddSourceDestination::FreshRss => "Destination:  Local  [FreshRSS]",
+                    };
+                    lines.push(Line::from(Span::styled(destination_text, focus_style(ConfirmField::Destination))));
+                }
+            }
+            #[cfg(feature = "freshrss")]
+            let hide_name_and_topic = freshrss.freshrss_available && freshrss.destination == AddSourceDestination::FreshRss;
+            #[cfg(not(feature = "freshrss"))]
+            let hide_name_and_topic = false;
+
+            let mut name_row: Option<u16> = None;
+            let mut topic_row: Option<u16> = None;
+            if hide_name_and_topic {
+                // `quickadd` takes no name -- FreshRSS guesses one itself
+                // from the feed, the same way `guess_source_name` guesses
+                // one for the Local path, so there's nothing here to type
+                // or confirm. Shown, not hidden entirely, so the screen
+                // doesn't look like a field went missing.
+                lines.push(Line::from(Span::styled("Name:  (taken from the feed)", Style::new().fg(theme.text_muted))));
+            } else {
+                lines.push(Line::from(Span::styled(format!("Name:  {name}"), focus_style(ConfirmField::Name))));
+                name_row = Some((lines.len() - 1) as u16);
+                lines.push(Line::from(Span::styled(format!("Topic: {topic}"), focus_style(ConfirmField::Topic))));
+                topic_row = Some((lines.len() - 1) as u16);
+                lines.push(Line::from(Span::styled(
                     format!("       existing: {}", topic_options.join(", ")),
                     Style::new().fg(theme.text_muted),
-                )),
-            ];
+                )));
+            }
+
+            // Amendment 5's heads-up: `url` already exists as a local
+            // source, so a FreshRSS copy would sync data that then never
+            // shows up anywhere (see `warn_if_url_is_already_local`'s doc
+            // comment). Deliberately not the same red `accent_breaking`
+            // style `error` uses just below -- this isn't a reason
+            // confirming would fail, just something worth knowing first.
+            #[cfg(feature = "freshrss")]
+            if let Some(warning) = &freshrss.already_local_warning {
+                lines.push(Line::from(Span::styled(warning.as_str(), Style::new().fg(theme.accent_saved))));
+            }
+
             if let Some(message) = error {
                 lines.push(Line::from(Span::styled(
                     message.as_str(),
                     Style::new().fg(theme.accent_breaking),
                 )));
             }
+
+            // `+ 2` for the border, same as every other bordered popup in
+            // this module.
+            let height = lines.len() as u16 + 2;
+            let popup_area = centered_rect(area, 70, height);
+
+            frame.render_widget(Clear, popup_area);
+
+            let block = Block::new()
+                .title(" Add Source — Confirm ")
+                .borders(Borders::ALL)
+                .style(Style::new().bg(theme.background).fg(theme.text_primary))
+                .border_style(Style::new().fg(theme.accent_selected));
 
             let paragraph = Paragraph::new(lines)
                 .style(Style::new().fg(theme.text_primary))
@@ -3038,16 +3560,26 @@ fn render_add_source_popup(frame: &mut Frame, theme: &Theme, area: Rect, step: &
 
             // "Name:  " and "Topic: " are both exactly 7 characters wide
             // (see the `format!`s above), so the same `label_width`
-            // positions the cursor correctly after either label -- the
-            // cursor's *row* is what actually depends on `field`.
+            // positions the cursor correctly after either label. Only
+            // `Name`/`Topic` ever get a real text cursor -- `Destination`
+            // is a discrete toggle with no text to position a cursor in,
+            // and a hidden `Name` has no row to point at either, so both
+            // simply skip the `set_cursor_position` call below entirely,
+            // which is what leaves the cursor hidden for this frame
+            // (`ratatui` only shows one when a frame explicitly places
+            // it).
             let label_width: u16 = 7;
-            let (field_text, row) = match field {
-                ConfirmField::Name => (name.as_str(), 2),
-                ConfirmField::Topic => (topic.as_str(), 3),
+            let cursor = match field {
+                ConfirmField::Name => name_row.map(|row| (name.as_str(), row)),
+                ConfirmField::Topic => topic_row.map(|row| (topic.as_str(), row)),
+                #[cfg(feature = "freshrss")]
+                ConfirmField::Destination => None,
             };
-            let cursor_x = popup_area.x + 1 + label_width + field_text.chars().count() as u16;
-            let cursor_y = popup_area.y + row;
-            frame.set_cursor_position((cursor_x, cursor_y));
+            if let Some((field_text, row)) = cursor {
+                let cursor_x = popup_area.x + 1 + label_width + field_text.chars().count() as u16;
+                let cursor_y = popup_area.y + row;
+                frame.set_cursor_position((cursor_x, cursor_y));
+            }
         }
     }
 }

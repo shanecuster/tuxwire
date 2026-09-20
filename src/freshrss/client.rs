@@ -595,9 +595,13 @@ impl Client {
         Ok(items)
     }
 
-    /// Fetches a write token -- required on `edit-tag` (and
-    /// `subscription/quickadd`, a later phase) as basic CSRF protection
-    /// for any request that changes server state. Plain-text body, the
+    /// Fetches a write token -- required on `edit-tag` and
+    /// `subscription/quickadd` as basic CSRF protection for any request
+    /// that changes server state (verified against a live server that
+    /// `quickadd` doesn't actually *enforce* this the way `edit-tag`
+    /// does -- a garbage token still succeeded -- but a real token is
+    /// sent regardless, since that's the documented contract and a
+    /// different FreshRSS version may enforce it). Plain-text body, the
     /// whole response *is* the token (no `Key=Value` parsing the way
     /// `login`'s response needs).
     pub async fn token(&self, auth: &AuthToken) -> anyhow::Result<WriteToken> {
@@ -648,6 +652,48 @@ impl Client {
         parse_mark_read_response(&body)
     }
 
+    /// Subscribes to `feed_url` (`docs/ARCHITECTURE.md`'s "Adding feeds,"
+    /// Phase 6). Unlike every other method here, a *declined* feed isn't
+    /// a `client`-level failure at all -- the HTTP request itself
+    /// succeeds (verified against a live server: every case, success or
+    /// rejection, comes back `HTTP 200`), and FreshRSS's own JSON body is
+    /// what actually says which one happened. That's why this returns a
+    /// nested `Result`: the outer `anyhow::Result` is for genuine
+    /// transport failures (network unreachable, a non-200 status, a body
+    /// that isn't even valid JSON) via `?`, same as every other method;
+    /// the inner `Result<QuickaddResult, String>` is FreshRSS's own
+    /// verdict on the URL itself, which a caller has to handle either way
+    /// -- there's no version of "the request worked" that also means
+    /// "and the feed was actually added," so collapsing this into one
+    /// flat `Result` would make it too easy for a caller to `?` straight
+    /// past a plain rejection (an unreachable domain, an
+    /// already-subscribed feed, a private/loopback URL FreshRSS's own
+    /// SSRF check declined) as if it were a bug instead of an expected
+    /// outcome.
+    pub async fn quickadd(
+        &self,
+        auth: &AuthToken,
+        write_token: &WriteToken,
+        feed_url: &str,
+    ) -> anyhow::Result<Result<QuickaddResult, String>> {
+        let response = HTTP_CLIENT
+            .post(self.api_url("/reader/api/0/subscription/quickadd"))
+            .header("Authorization", auth.header_value())
+            .form(&[("quickadd", feed_url), ("T", write_token.as_form_value())])
+            .send()
+            .await
+            .with_context(|| "failed to reach FreshRSS subscription/quickadd")?;
+
+        if !response.status().is_success() {
+            bail!("FreshRSS subscription/quickadd failed with HTTP {}", response.status());
+        }
+
+        let body =
+            response.text().await.with_context(|| "failed to read FreshRSS subscription/quickadd response body")?;
+
+        parse_quickadd_response(&body)
+    }
+
     /// Shared plumbing for every simple `GET`-and-return-the-body call
     /// (`subscriptions`, each page inside `unread_item_ids`, and `token`)
     /// -- `item_contents` and `mark_read` don't use this since they're
@@ -681,6 +727,88 @@ fn parse_mark_read_response(body: &str) -> anyhow::Result<()> {
         bail!("FreshRSS edit-tag did not confirm success (response body was {body:?})");
     }
     Ok(())
+}
+
+/// What `Client::quickadd` returns on a genuine success -- just enough to
+/// confirm what happened and name the feed; nothing here is stored
+/// anywhere (unlike `subscription/list`, `quickadd` doesn't return
+/// category/topic info, since it never assigns one -- see
+/// ARCHITECTURE.md's "Adding feeds" for the `FreshRSS/Uncategorized`
+/// consequence of that).
+#[derive(Debug)]
+pub struct QuickaddResult {
+    /// The new feed's FreshRSS id, e.g. `"feed/8"`.
+    pub stream_id: String,
+    /// The feed's own title, as FreshRSS guessed it from the feed itself
+    /// -- `quickadd` never takes a name as input, this is purely
+    /// informational (e.g. for a confirmation message), not something
+    /// `freshrss::sync` needs to store.
+    pub stream_name: String,
+}
+
+/// The raw shape of a `subscription/quickadd` response body -- verified
+/// against a live server for four real cases, summarized in
+/// `parse_quickadd_response`'s own doc comment below. Every field but
+/// `num_results` is optional because which of them are actually present
+/// depends entirely on whether `num_results` was `1` or `0` -- serde
+/// can't express "these three fields are mutually exclusive with those
+/// two" any more precisely than "everything but the one field always
+/// present is `Option`," so `parse_quickadd_response` is what actually
+/// enforces the real shape.
+#[derive(Deserialize)]
+struct QuickaddResponse {
+    /// `1` (or, in principle, more) on success, `0` on any rejection --
+    /// the one field always present, and the one `parse_quickadd_response`
+    /// actually branches on.
+    #[serde(rename = "numResults")]
+    num_results: u32,
+    /// The new feed's FreshRSS id, e.g. `"feed/8"` -- present on success,
+    /// absent on rejection.
+    #[serde(rename = "streamId")]
+    stream_id: Option<String>,
+    /// The feed's own title, as FreshRSS guessed it -- present on
+    /// success, absent on rejection.
+    #[serde(rename = "streamName")]
+    stream_name: Option<String>,
+    /// FreshRSS's own explanation for a rejection (e.g. `"Already
+    /// subscribed! <url>"`) -- present on rejection, absent on success.
+    error: Option<String>,
+}
+
+/// Parses a `subscription/quickadd` response body into FreshRSS's own
+/// verdict on the feed URL -- verified against a live server, every case
+/// below is a real response, not a guess:
+///
+/// - Success: `{"numResults":1,"query":"...","streamId":"feed/8","streamName":"..."}`
+/// - Already subscribed: `{"numResults":0,"error":"Already subscribed! <url>"}`
+/// - Rejected (private/loopback -- FreshRSS's own SSRF protection):
+///   `{"numResults":0,"error":"URL is not allowed to be resolved: <url> [<url>]"}`
+/// - Unresolvable domain: `{"numResults":0,"error":"Failed to resolve domain: <url> [<url>]"}`
+///
+/// `num_results >= 1` is treated as success (not `== 1` specifically) --
+/// nothing in the verified responses ever showed a value above `1`, but
+/// "at least one" is the more defensible reading of a field literally
+/// named `numResults` than "exactly one," and costs nothing extra to
+/// check for.
+fn parse_quickadd_response(body: &str) -> anyhow::Result<Result<QuickaddResult, String>> {
+    let parsed: QuickaddResponse =
+        serde_json::from_str(body).with_context(|| "failed to parse FreshRSS subscription/quickadd response")?;
+
+    if parsed.num_results >= 1 {
+        // A genuine success without `streamId`/`streamName` present would
+        // mean FreshRSS's own response shape changed since this was
+        // verified -- a real problem worth a clear error, not something
+        // to paper over with `.unwrap_or_default()`.
+        let stream_id = parsed
+            .stream_id
+            .ok_or_else(|| anyhow!("FreshRSS quickadd reported success but the response had no streamId"))?;
+        let stream_name = parsed
+            .stream_name
+            .ok_or_else(|| anyhow!("FreshRSS quickadd reported success but the response had no streamName"))?;
+        return Ok(Ok(QuickaddResult { stream_id, stream_name }));
+    }
+
+    Ok(Err(parsed.error.unwrap_or_else(|| "FreshRSS declined this feed (no reason given)".to_string())))
 }
 
 /// Parses a `ClientLogin` success body (plain text, three `Key=Value`
@@ -858,6 +986,48 @@ mod tests {
     fn rejects_anything_that_is_not_a_literal_ok() {
         assert!(parse_mark_read_response("Unauthorized!").is_err());
         assert!(parse_mark_read_response("").is_err());
+    }
+
+    /// The real success body verified against a live server.
+    #[test]
+    fn parses_a_real_quickadd_success_response() {
+        let body = r#"{"numResults":1,"query":"https://shanetalkstech.com/index.xml","streamId":"feed/4","streamName":"shanetalkstech"}"#;
+
+        let result = parse_quickadd_response(body).unwrap();
+        let added = result.unwrap();
+        assert_eq!(added.stream_id, "feed/4");
+        assert_eq!(added.stream_name, "shanetalkstech");
+    }
+
+    /// The three real rejection bodies verified against a live server --
+    /// all `numResults: 0` with an `error` string, and all three read
+    /// back out through the inner `Err` rather than a transport-level
+    /// failure.
+    #[test]
+    fn parses_real_quickadd_rejection_responses() {
+        let already_subscribed = r#"{"numResults":0,"error":"Already subscribed! https://shanetalkstech.com/index.xml"}"#;
+        let err = parse_quickadd_response(already_subscribed).unwrap().unwrap_err();
+        assert!(err.contains("Already subscribed"));
+
+        let ssrf_rejected =
+            r#"{"numResults":0,"error":"URL is not allowed to be resolved: http://127.0.0.1:9099/nope.xml [http://127.0.0.1:9099/nope.xml]"}"#;
+        let err = parse_quickadd_response(ssrf_rejected).unwrap().unwrap_err();
+        assert!(err.contains("not allowed to be resolved"));
+
+        let unresolvable = r#"{"numResults":0,"error":"Failed to resolve domain: https://nonexistent.invalid/feed.xml [https://nonexistent.invalid/feed.xml]"}"#;
+        let err = parse_quickadd_response(unresolvable).unwrap().unwrap_err();
+        assert!(err.contains("Failed to resolve domain"));
+    }
+
+    /// A `numResults: 0` response with no `error` field at all (not
+    /// observed against a live server, but nothing in the JSON shape
+    /// guarantees it can't happen) still produces a usable `Err`, not a
+    /// panic or a confusing empty string.
+    #[test]
+    fn quickadd_rejection_with_no_error_field_still_produces_a_message() {
+        let body = r#"{"numResults":0}"#;
+        let err = parse_quickadd_response(body).unwrap().unwrap_err();
+        assert!(!err.is_empty());
     }
 
     /// The real failure body FreshRSS sends back for a bad password

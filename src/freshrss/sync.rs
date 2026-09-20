@@ -295,6 +295,30 @@ pub async fn run(
     Ok(summary)
 }
 
+/// Adds one feed to the FreshRSS account (`docs/ARCHITECTURE.md`'s
+/// "Adding feeds," Phase 6) -- log in, get a write token, `quickadd`.
+/// Deliberately doesn't touch `Storage` at all: `quickadd` assigns the
+/// new feed no category, so there's nothing yet to insert, dedupe, or
+/// file under a topic -- it only shows up in `articles` (and therefore
+/// the sidebar) once a real sync pulls its first item, exactly like any
+/// other newly-subscribed feed. `push_read_state` has no bearing here
+/// either -- unlike the read-state push in `run`, adding a feed is a
+/// direct, explicit action the person just took (pressing `a`, typing a
+/// URL, choosing FreshRSS), not an automatic side effect of marking
+/// something read locally, so there's no "opt out of sending this"
+/// setting that would make sense to check.
+///
+/// Returns the same nested `Result` shape as `Client::quickadd` for the
+/// same reason -- see that method's doc comment: a declined feed (already
+/// subscribed, a URL FreshRSS's own SSRF check rejects, an unresolvable
+/// domain) is an expected outcome the caller has to show, not a `client`
+/// failure to propagate past.
+pub async fn add_feed(client: &Client, feed_url: &str) -> anyhow::Result<Result<super::client::QuickaddResult, String>> {
+    let auth = client.login().await?;
+    let write_token = client.token(&auth).await?;
+    client.quickadd(&auth, &write_token, feed_url).await
+}
+
 /// How long a background sync's own `Storage` connection will wait for
 /// SQLite's write lock before giving up, if it happens to collide with a
 /// write from the UI's own connection -- see
@@ -441,30 +465,7 @@ mod tests {
         let username = std::env::var("FRESHRSS_TEST_USERNAME").expect("set FRESHRSS_TEST_USERNAME to run this test");
         let password = std::env::var("FRESHRSS_TEST_PASSWORD").expect("set FRESHRSS_TEST_PASSWORD to run this test");
 
-        // This test marks real items read on whatever server `url`
-        // points at -- refuse to run at all against anything that isn't
-        // obviously a local, disposable instance. `url.split("://")`'s
-        // second half starts with the host; stripping an optional
-        // `user:pass@` and taking everything before the next `/`, `:`,
-        // or `?` is a deliberately narrow parse (not a full URL parser,
-        // which isn't a dependency of this crate) -- good enough to
-        // catch "this isn't localhost," not meant to validate `url` is
-        // well-formed in general.
-        let host = url
-            .split("://")
-            .nth(1)
-            .unwrap_or(&url)
-            .rsplit('@')
-            .next()
-            .unwrap_or(&url)
-            .split(['/', ':', '?'])
-            .next()
-            .unwrap_or("");
-        assert!(
-            host == "localhost" || host == "127.0.0.1",
-            "refusing to run a mutating test against a non-local FRESHRSS_TEST_URL host ({host:?}) -- \
-             this test marks real items read on whatever server it's pointed at"
-        );
+        assert_test_url_is_local(&url);
 
         // `Storage::open()` resolves its path from `XDG_DATA_HOME`/`HOME`
         // -- pointing `XDG_DATA_HOME` at a fresh temp directory is the
@@ -588,5 +589,87 @@ mod tests {
             std::env::remove_var("XDG_DATA_HOME");
         }
         std::fs::remove_dir_all(&data_dir).ok();
+    }
+
+    /// Refuses to let a mutating manual test proceed against anything
+    /// that isn't obviously a local, disposable FreshRSS instance --
+    /// shared by every manual test in this module, since each one
+    /// performs a real, permanent action (marking items read,
+    /// subscribing feeds) on whatever server `url` points at.
+    /// `url.split("://")`'s second half starts with the host; stripping
+    /// an optional `user:pass@` and taking everything before the next
+    /// `/`, `:`, or `?` is a deliberately narrow parse (not a full URL
+    /// parser, which isn't a dependency of this crate) -- good enough to
+    /// catch "this isn't localhost," not meant to validate `url` is
+    /// well-formed in general.
+    fn assert_test_url_is_local(url: &str) {
+        let host = url
+            .split("://")
+            .nth(1)
+            .unwrap_or(url)
+            .rsplit('@')
+            .next()
+            .unwrap_or(url)
+            .split(['/', ':', '?'])
+            .next()
+            .unwrap_or("");
+        assert!(
+            host == "localhost" || host == "127.0.0.1",
+            "refusing to run a mutating test against a non-local FRESHRSS_TEST_URL host ({host:?}) -- \
+             this test performs a real, permanent action on whatever server it's pointed at"
+        );
+    }
+
+    /// A real, opt-in end-to-end check of `add_feed` against a live
+    /// FreshRSS server -- same `#[ignore]`/env-var/localhost-only
+    /// pattern as `manual_sync_against_a_live_server` above; run with:
+    ///
+    /// ```text
+    /// FRESHRSS_TEST_URL=http://localhost:8080 \
+    /// FRESHRSS_TEST_USERNAME=your-test-username \
+    /// FRESHRSS_TEST_PASSWORD=your-test-password \
+    ///   cargo test --features freshrss -- --ignored manual_add_feed_against_a_live_server --nocapture
+    /// ```
+    ///
+    /// Two real scenarios, matching what Phase 6's review asked to see
+    /// verified:
+    /// 1. A real feed the account owner controls (per review: "use feeds
+    ///    I own for testing... never a real instance"). Already being
+    ///    subscribed from earlier manual verification against this same
+    ///    test server is an accepted, expected outcome here, not a test
+    ///    failure -- quickadd's own `"Already subscribed!"` response
+    ///    *is* the second real scenario the live verification found, so
+    ///    this test recognizes it rather than requiring a pristine
+    ///    server to pass.
+    /// 2. A private/loopback URL, always rejected by FreshRSS's own SSRF
+    ///    protection regardless of what else is subscribed.
+    #[test]
+    #[ignore = "needs network access and real FRESHRSS_TEST_* credentials -- see this test's own doc comment"]
+    fn manual_add_feed_against_a_live_server() {
+        let url = std::env::var("FRESHRSS_TEST_URL").expect("set FRESHRSS_TEST_URL to run this test");
+        let username = std::env::var("FRESHRSS_TEST_USERNAME").expect("set FRESHRSS_TEST_USERNAME to run this test");
+        let password = std::env::var("FRESHRSS_TEST_PASSWORD").expect("set FRESHRSS_TEST_PASSWORD to run this test");
+
+        assert_test_url_is_local(&url);
+
+        let client = Client::new(url, username, Password::from_plain_text_for_tests(password));
+        let rt = tokio::runtime::Runtime::new().unwrap();
+
+        let result = rt.block_on(add_feed(&client, "https://shanetalkstech.com/index.xml")).unwrap();
+        match result {
+            Ok(added) => println!("added: {added:?}"),
+            Err(rejection) => {
+                assert!(
+                    rejection.contains("Already subscribed"),
+                    "expected either success or 'already subscribed', got: {rejection}"
+                );
+                println!("already subscribed (expected on a re-run against the same test server): {rejection}");
+            }
+        }
+
+        let result = rt.block_on(add_feed(&client, "http://127.0.0.1:9099/nope.xml")).unwrap();
+        let rejection = result.expect_err("a private/loopback URL must always be rejected");
+        assert!(rejection.contains("not allowed to be resolved"), "unexpected rejection text: {rejection}");
+        println!("private URL correctly rejected: {rejection}");
     }
 }
