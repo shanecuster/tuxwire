@@ -94,10 +94,20 @@ cargo clippy --all-targets --features freshrss
 
 **Never develop against the real database or config.** Run the app with a
 throwaway home directory so `~/.local/share/tuxwire/` and
-`~/.config/tuxwire/` point somewhere disposable:
+`~/.config/tuxwire/` point somewhere disposable -- **build normally, then
+run the already-built binary with `HOME` overridden**, not
+`HOME=$(mktemp -d) cargo run`. `cargo`/`rustup` themselves resolve the
+toolchain, the registry cache, and `~/.cargo` through `HOME` -- putting a
+fake `HOME` in front of `cargo run` breaks *that* lookup, not just
+tuxwire's own config/data paths. `tuxwire`'s compiled binary has no such
+dependency on `HOME` (only tuxwire's own config/data-path code reads it),
+so overriding it only for the already-built binary is what actually
+isolates just tuxwire's paths:
 
 ```bash
-HOME=$(mktemp -d) cargo run --features freshrss
+cargo build --features freshrss
+t=$(mktemp -d)
+env HOME="$t" ./target/debug/tuxwire
 ```
 
 Test against a throwaway FreshRSS server in Docker (`freshrss/freshrss`),
