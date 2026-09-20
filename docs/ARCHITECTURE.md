@@ -364,19 +364,39 @@ tuxwire/
 
 **This is a hard requirement, not a nice-to-have.** The person building this
 has no prior Rust experience and is learning the language *through* this
-codebase — by reading it, both on GitHub and locally. Code that isn't
-heavily commented isn't just unfriendly here, it defeats the actual purpose
-of the project.
+codebase — by reading it, both on GitHub and locally — and wants **every
+section of code documented with what it does.** This is stricter than
+"non-trivial blocks only": something can be simple to write and still be
+new to a beginner, and it's the beginner's experience this standard is
+written for, not the author's.
 
-- **Every function, struct, and non-trivial block gets a doc comment
-  (`///`)** explaining not just *what* it does but *why* it's written this
-  way — especially anything involving ownership, borrowing, lifetimes,
-  traits, or async, since those are the concepts genuinely new to a
-  newcomer. A one-line "gets the article title" comment on an obvious
-  getter is not the goal; explaining *why* a `&str` vs `String` was chosen,
-  or why a `Result` is being propagated with `?` instead of unwrapped, is.
+- **Every module, struct, enum, field, function, and method** gets a `///`
+  (or `//!` for a module) doc comment saying what it is for and what it
+  returns or changes — not just the ones whose purpose feels non-obvious to
+  someone who already knows Rust.
+- **Inside function bodies, every logical section gets a `//` comment**
+  explaining what that section does, in plain language, step by step — a
+  short comment above each group of lines, not just one comment at the top
+  of the function. If a line uses a Rust concept that's new to a beginner,
+  say what it does right there, not just in the function's own doc comment.
+- **Also explain *why*,** not just *what* — especially anything involving
+  ownership and borrowing (`&str` vs `String`, `.clone()`, `&mut`),
+  lifetimes, traits, `Result`/`?` versus `unwrap`, `Option`, `match`,
+  iterator chains (what they expand to conceptually), and async/`await`,
+  since those are the concepts genuinely new to a newcomer. A one-line
+  "gets the article title" comment on an obvious getter is not the goal;
+  explaining *why* a `&str` vs `String` was chosen, or why a `Result` is
+  being propagated with `?` instead of unwrapped, is.
+- Write for someone who has never seen Rust. Don't assume any concept is
+  obvious. A terse idiom gets a comment saying what it expands to
+  conceptually, not just a note that it's terse.
 - Prefer comments that teach the underlying Rust concept over comments that
   just restate the code in English.
+- **Comments must be accurate.** If code changes, update its comments in
+  the same commit — a misleading comment is worse than none.
+- Before writing, reread one or two of the best-commented existing files
+  (for example under `src/storage/`) and match their tone and depth, rather
+  than reinventing the level of detail from scratch each time.
 - Doc comments should be written so `cargo doc --open` produces something
   genuinely useful to read — treat this as building a personal Rust
   reference alongside the app itself, not just satisfying a linter.
@@ -387,6 +407,9 @@ of the project.
 - Favor clarity over cleverness. Idiomatic Rust is the goal, but a very
   terse idiom that's opaque to a newcomer is worth a short comment
   explaining what it expands to conceptually.
+- At the end of each build phase (see, e.g., the FreshRSS Sync section's
+  "Build phases"), show one or two functions that best demonstrate the
+  comment style, so the person can confirm it actually teaches.
 
 ---
 
