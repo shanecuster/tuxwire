@@ -176,11 +176,17 @@ impl std::fmt::Debug for WriteToken {
 /// parses, it doesn't decide what a `Subscription` becomes.
 #[derive(Debug, Deserialize)]
 pub struct Subscription {
-    /// FreshRSS's own feed identifier, e.g. `"feed/2"` -- stable across
-    /// syncs, used later as `freshrss_items.feed_id`.
+    /// FreshRSS's own feed identifier, e.g. `"feed/2"` -- the one field
+    /// here `freshrss::sync` actually reads, to match an `Item` back to
+    /// its subscription via `origin.stream_id`.
     pub id: String,
-    /// The feed's human-readable name (e.g. "Hacker News: Newest"),
-    /// mapped onto `Article.source` in Phase 4.
+    /// The feed's human-readable name (e.g. "Hacker News: Newest").
+    /// Corrected from an earlier version of this comment: `Article.source`
+    /// actually comes from `Item::origin`'s own `title` (the same value,
+    /// reported redundantly on every item), not a lookup through this
+    /// field -- kept for API completeness and any future caller that
+    /// wants a feed's name without an `Item` in hand.
+    #[allow(dead_code)] // mirrors subscription/list's JSON; not read anywhere yet, see doc comment
     pub title: String,
     /// Which FreshRSS categories this feed belongs to. A `Vec` because
     /// the API allows a feed to sit in more than one category, even
@@ -190,6 +196,7 @@ pub struct Subscription {
     pub categories: Vec<Category>,
     /// The feed's own URL (what tuxwire's own `sources.toml` would call
     /// `url`) -- e.g. `"https://hnrss.org/newest"`.
+    #[allow(dead_code)] // mirrors subscription/list's JSON; not read anywhere yet
     pub url: String,
     /// The feed's *site* URL (its homepage, not the feed XML itself) --
     /// e.g. `"https://news.ycombinator.com/newest"`. `#[serde(rename =
@@ -198,6 +205,7 @@ pub struct Subscription {
     /// snake_case (`html_url`) -- `rename` tells serde "the wire name and
     /// the Rust name are allowed to differ, here's the mapping."
     #[serde(rename = "htmlUrl")]
+    #[allow(dead_code)] // mirrors subscription/list's JSON; not read anywhere yet
     pub html_url: String,
 }
 
@@ -205,7 +213,10 @@ pub struct Subscription {
 #[derive(Debug, Deserialize)]
 pub struct Category {
     /// FreshRSS's internal category ID, e.g.
-    /// `"user/-/label/Uncategorized"`.
+    /// `"user/-/label/Uncategorized"` -- only `label` (below) is actually
+    /// used; this is kept because it's part of the real JSON shape, not
+    /// because anything reads it yet.
+    #[allow(dead_code)] // mirrors subscription/list's JSON; not read anywhere yet
     pub id: String,
     /// The human-readable category name, e.g. `"Uncategorized"` -- this
     /// is what Phase 4 namespaces into `FreshRSS/Uncategorized`.
@@ -301,10 +312,15 @@ pub struct Item {
     pub origin: Origin,
     /// The item's body/description as HTML. `Option` because a feed
     /// entry can genuinely have no description at all, not just an empty
-    /// one.
+    /// one. `Article` has no body field to map this onto -- kept because
+    /// it's part of the real response shape, ready for whenever an
+    /// in-app reading view (see ARCHITECTURE.md's Roadmap) needs it.
+    #[allow(dead_code)] // mirrors stream/items/contents' JSON; not read anywhere yet
     pub summary: Option<Summary>,
     /// The article's byline, when the feed provides one. Also `Option`
-    /// for the same reason as `summary`.
+    /// for the same reason as `summary`, and unread for the same reason:
+    /// no `Article` field to map it onto yet.
+    #[allow(dead_code)] // mirrors stream/items/contents' JSON; not read anywhere yet
     pub author: Option<String>,
 }
 
@@ -325,8 +341,11 @@ pub struct Origin {
     /// becomes `freshrss_items.feed_id`.
     #[serde(rename = "streamId")]
     pub stream_id: String,
-    /// The feed's site URL, matching `Subscription::html_url`.
+    /// The feed's site URL, matching `Subscription::html_url` -- unread
+    /// for the same reason: kept for API completeness, nothing needs a
+    /// feed's homepage URL yet.
     #[serde(rename = "htmlUrl")]
+    #[allow(dead_code)] // mirrors stream/items/contents' JSON; not read anywhere yet
     pub html_url: String,
     /// The feed's display name, matching `Subscription::title`.
     pub title: String,
@@ -338,7 +357,9 @@ pub struct Origin {
 pub struct Summary {
     /// The article body/description as raw HTML, e.g.
     /// `"<p>Article URL: ...</p>"` -- not sanitized or stripped here,
-    /// that's Phase 4/the TUI's concern, not this client's.
+    /// that's a future reading view's concern, not this client's (see
+    /// `Item::summary`'s own doc comment on why this goes unread today).
+    #[allow(dead_code)] // mirrors stream/items/contents' JSON; not read anywhere yet
     pub content: String,
 }
 
@@ -737,12 +758,17 @@ fn parse_mark_read_response(body: &str) -> anyhow::Result<()> {
 /// consequence of that).
 #[derive(Debug)]
 pub struct QuickaddResult {
-    /// The new feed's FreshRSS id, e.g. `"feed/8"`.
+    /// The new feed's FreshRSS id, e.g. `"feed/8"`. `ui/mod.rs`'s
+    /// `handle_add_source_key` currently only checks *whether* `quickadd`
+    /// succeeded, not this value -- kept for whenever a confirmation
+    /// message wants to reference the new feed specifically.
+    #[allow(dead_code)] // carries a real quickadd success value; not read anywhere yet
     pub stream_id: String,
     /// The feed's own title, as FreshRSS guessed it from the feed itself
     /// -- `quickadd` never takes a name as input, this is purely
     /// informational (e.g. for a confirmation message), not something
     /// `freshrss::sync` needs to store.
+    #[allow(dead_code)] // carries a real quickadd success value; not read anywhere yet
     pub stream_name: String,
 }
 
