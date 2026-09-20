@@ -656,6 +656,97 @@ Item ID formats can differ between endpoints (short numeric vs. long-form).
 Normalize them in exactly one place in the client so the rest of the code
 only ever sees one form.
 
+**Verified against a live test server** (2026-09-20) — the two corrections
+below supersede the table above wherever they overlap; everything else in
+the table held up as described.
+
+**`stream/items/ids` pagination.** Confirmed request/response shape:
+
+```
+GET stream/items/ids?output=json&s=user/-/state/com.google/reading-list
+    &xt=user/-/state/com.google/read&n=<page size>[&c=<continuation>]
+
+{"itemRefs": [{"id": "1789934360946639"}, ...], "continuation": "1789934360946635"}
+```
+
+- `id` values here are plain decimal numeric strings — the *short* form,
+  not hex and not the `tag:google.com,2005:reader/item/...` long form.
+- `continuation` is present whenever there might be more data, **including
+  on the last page that still has items on it** — observed a page of 5
+  items (the actual final 5, out of 20 total) come back with a
+  `continuation` value that, when used for one more request, produced
+  `{"itemRefs": []}` with no `continuation` field at all. A client
+  **cannot** treat "this page came back full" or "this page had a
+  continuation" as a stop signal — the only reliable end-of-data signal is
+  an empty `itemRefs` array. Concretely: keep requesting with `c=` set to
+  the previous response's `continuation` until a response comes back with
+  an empty `itemRefs`, and separately cap the number of pages fetched as a
+  hard safety net regardless (a bug, or a server that never terminates the
+  stream, must not be able to loop forever) — see Phase 3 below.
+- Treat `continuation` as an opaque token to round-trip, not something to
+  parse or compute — this FreshRSS build happens to set it to the last
+  item's own `id`, but that's an implementation detail, not a contract.
+
+**`stream/items/contents` shape.** `POST` with one repeated `i=<id>` form
+field per item — the plain decimal `id` from `stream/items/ids` is accepted
+directly, no conversion needed on the request side. Tested up to 20 ids in
+a single POST with no issue, confirming this is the right place to batch
+requests rather than fetching one item per request.
+
+Response:
+
+```json
+{
+  "id": "user/-/state/com.google/reading-list",
+  "updated": 1789934414,
+  "items": [
+    {
+      "id": "tag:google.com,2005:reader/item/00065bef91c167cf",
+      "crawlTimeMsec": "1789934360946",
+      "timestampUsec": "1789934360946639",
+      "published": 1789933681,
+      "title": "Show HN: A browser MMO designed to be played by scripts, not people",
+      "canonical": [{"href": "https://space-core.at/"}],
+      "alternate": [{"href": "https://space-core.at/"}],
+      "categories": [
+        "user/-/state/com.google/reading-list",
+        "user/-/label/Uncategorized",
+        "user/-/state/org.freshrss/main"
+      ],
+      "origin": {"streamId": "feed/2", "htmlUrl": "https://news.ycombinator.com/newest", "title": "Hacker News: Newest"},
+      "summary": {"content": "<p>Article URL: ...</p>"},
+      "author": "SpaceCoreDev"
+    }
+  ]
+}
+```
+
+**Correction to "normalize them in exactly one place":** the id round-trip
+is more asymmetric than the original table implied. `stream/items/ids`
+returns the short decimal form; `stream/items/contents`' own `items[].id`
+comes back in the **long** `tag:google.com,2005:reader/item/<16-hex-chars>`
+form instead — confirmed the hex suffix is the same number, just base 16
+and zero-padded to 16 digits (`int("00065bef91c167cf", 16) ==
+1789934360946639`). Normalization has to convert this long form back down
+to plain decimal, since that's the form `stream/items/ids` produces and
+the form the read-state diff (see "Pull read state") compares against.
+`items[].timestampUsec` conveniently already carries the same value as a
+plain decimal string — usable as a normalization shortcut that skips the
+hex-parsing step, but `id` is the field documented to be present on every
+item, so normalization shouldn't rely on `timestampUsec` being there.
+
+Fields relevant to the eventual `Article` mapping (Phase 4, not Phase 3):
+`title`; `canonical[0].href` (falling back to `alternate[0].href`) for
+`Article.url`; `published` (Unix seconds) for `Article.timestamp`;
+`origin.streamId` for `freshrss_items.feed_id`; `origin.title` for the
+source name.
+
+**Login failure shape**, for error handling: a bad password gets back
+`HTTP 401`, a `Google-Bad-Token: true` header, and a plain-text body
+(`Unauthorized!`) — no JSON. A successful login's body is plain text too,
+three `Key=Value` lines (`SID=`, `LSID=`, `Auth=`) in no guaranteed order;
+parse by scanning for the line starting `Auth=`, not by line position.
+
 ### How it fits the existing architecture
 
 ```
