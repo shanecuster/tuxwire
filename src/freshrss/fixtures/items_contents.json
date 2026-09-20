@@ -1,0 +1,68 @@
+{
+    "id": "user/-/state/com.google/reading-list",
+    "updated": 1789934414,
+    "items": [
+        {
+            "id": "tag:google.com,2005:reader/item/00065bef91c167cf",
+            "crawlTimeMsec": "1789934360946",
+            "timestampUsec": "1789934360946639",
+            "published": 1789933681,
+            "title": "Show HN: A browser MMO designed to be played by scripts, not people",
+            "canonical": [
+                {
+                    "href": "https://space-core.at/"
+                }
+            ],
+            "alternate": [
+                {
+                    "href": "https://space-core.at/"
+                }
+            ],
+            "categories": [
+                "user/-/state/com.google/reading-list",
+                "user/-/label/Uncategorized",
+                "user/-/state/org.freshrss/main"
+            ],
+            "origin": {
+                "streamId": "feed/2",
+                "htmlUrl": "https://news.ycombinator.com/newest",
+                "title": "Hacker News: Newest"
+            },
+            "summary": {
+                "content": "<p>Article URL: <a href=\"https://space-core.at/\">https://space-core.at/</a></p>\n<p>Comments URL: <a href=\"https://news.ycombinator.com/item?id=49779362\">https://news.ycombinator.com/item?id=49779362</a></p>\n<p>Points: 1</p>\n<p># Comments: 0</p>"
+            },
+            "author": "SpaceCoreDev"
+        },
+        {
+            "id": "tag:google.com,2005:reader/item/00065bef91c167ce",
+            "crawlTimeMsec": "1789934360946",
+            "timestampUsec": "1789934360946638",
+            "published": 1789933512,
+            "title": "AI Journal 2: Vibe-Coding for Fun and Profit",
+            "canonical": [
+                {
+                    "href": "https://devshrine.net/blog/ai-journal-2/"
+                }
+            ],
+            "alternate": [
+                {
+                    "href": "https://devshrine.net/blog/ai-journal-2/"
+                }
+            ],
+            "categories": [
+                "user/-/state/com.google/reading-list",
+                "user/-/label/Uncategorized",
+                "user/-/state/org.freshrss/main"
+            ],
+            "origin": {
+                "streamId": "feed/2",
+                "htmlUrl": "https://news.ycombinator.com/newest",
+                "title": "Hacker News: Newest"
+            },
+            "summary": {
+                "content": "<p>Article URL: <a href=\"https://devshrine.net/blog/ai-journal-2/\">https://devshrine.net/blog/ai-journal-2/</a></p>\n<p>Comments URL: <a href=\"https://news.ycombinator.com/item?id=49779337\">https://news.ycombinator.com/item?id=49779337</a></p>\n<p>Points: 1</p>\n<p># Comments: 0</p>"
+            },
+            "author": "renehsz"
+        }
+    ]
+}

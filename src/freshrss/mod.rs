@@ -1,5 +1,16 @@
 //! Optional FreshRSS sync (`docs/ARCHITECTURE.md` § FreshRSS Sync).
 //!
+//! `#![warn(clippy::missing_docs_in_private_items)]` below makes
+//! `cargo clippy` flag any struct/enum/field/function in this module tree
+//! that's missing a `///` doc comment -- the compile-time half of
+//! docs/CLAUDE.md's Documentation standard ("every function, struct,
+//! field... gets a doc comment"). `warn`, not `deny`, so a lapse shows up
+//! loudly in `cargo clippy --all-targets --features freshrss` output
+//! without turning into a hard build failure. Clippy can't check the
+//! *inline* `//` comments the same standard requires inside function
+//! bodies -- those are reviewed by hand each phase.
+#![warn(clippy::missing_docs_in_private_items)]
+//!
 //! Compiled only when the `freshrss` Cargo feature is enabled (see the
 //! `#[cfg(feature = "freshrss")] mod freshrss;` line in `main.rs`) --
 //! without that feature, this whole directory is invisible to the
@@ -35,11 +46,15 @@
 //!
 //! ## What exists so far
 //!
-//! Just `config`: parsing and validating `freshrss.toml`. The `client`
-//! (HTTP/protocol), `mapping` (raw API shapes -> `Article`), and `sync`
-//! (reconciling with `Storage`) submodules described in ARCHITECTURE.md
-//! land in later build phases -- see that document's "Build phases"
-//! section. Nothing in this module is called from `main.rs` yet; there is
-//! no behavior to observe even with the feature enabled until a later
-//! phase wires it in.
+//! `config` (parsing and validating `freshrss.toml`) and now `client`
+//! (login, subscription list, unread item IDs, item contents -- Phase 3).
+//! `client` knows nothing about `Storage` or the UI, same boundary as
+//! `config`: it takes a URL/username/password and returns plain Rust
+//! values, nothing more. The `mapping` (raw API shapes -> `Article`) and
+//! `sync` (reconciling with `Storage`) submodules described in
+//! ARCHITECTURE.md land in later build phases -- see that document's
+//! "Build phases" section. Nothing in this module is called from
+//! `main.rs` yet; there is no behavior to observe even with the feature
+//! enabled until a later phase wires it in.
+pub mod client;
 pub mod config;

@@ -28,8 +28,22 @@ edition = "2024"
 # `cargo build --features freshrss` is how the optional sync code gets
 # compiled in for testing. Whether `freshrss` ever joins a `default` list
 # is a decision for when the branch merges, not before.
+#
+# `["reqwest/form"]` is *feature forwarding*: turning our own `freshrss`
+# feature on also turns on reqwest's own `form` feature (its
+# `application/x-www-form-urlencoded` request-body support -- what
+# `RequestBuilder::form` needs), which reqwest doesn't enable by default.
+# `freshrss::client` needs `.form(...)` for every FreshRSS API call (login,
+# marking read, fetching item contents are all plain form posts, not
+# JSON). This was going to be a plain new Cargo dependency
+# (`serde_urlencoded`, which `reqwest/form` pulls in) until this exact
+# forwarding trick was chosen instead: because it rides on our own
+# `freshrss` feature, `cargo build` with no flags still resolves and
+# compiles reqwest with `form` off, so "off means identical to master"
+# holds at the dependency-feature level too, not just at the
+# `#[cfg(feature = "freshrss")]` code level.
 [features]
-freshrss = []
+freshrss = ["reqwest/form"]
 
 [dependencies]
 # --- Error handling --------------------------------------------------

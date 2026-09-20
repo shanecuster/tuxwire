@@ -41,8 +41,14 @@ pub enum FreshRssConfig {
     /// Nothing downstream of this point needs to re-check "is this field
     /// actually there."
     Enabled {
+        /// The FreshRSS server's base URL, exactly as `freshrss.toml`'s
+        /// `url` key holds it (no `/api/greader.php` suffix) -- guaranteed
+        /// non-empty by `into_config`'s validation below.
         url: String,
+        /// The FreshRSS account name to log in as.
         username: String,
+        /// The already-resolved API password -- see `Password`'s own doc
+        /// comment for why this isn't a bare `String`.
         password: Password,
         /// Whether to run a sync automatically at startup, in addition to
         /// `r` on a `FreshRSS/*` topic — see ARCHITECTURE.md's "Refresh
@@ -101,9 +107,13 @@ impl std::fmt::Debug for Password {
 /// should reject with a generic "missing field" error.
 #[derive(Deserialize)]
 struct RawFreshRssFile {
+    /// The `[freshrss]` table itself -- the file's only top-level key.
     freshrss: RawFreshRss,
 }
 
+/// The raw contents of the `[freshrss]` table before validation --
+/// `RawFreshRss::into_config` below is what turns this into a real
+/// `FreshRssConfig`.
 #[derive(Deserialize)]
 struct RawFreshRss {
     /// `#[serde(default)]` (defaulting to `bool::default()`, i.e. `false`)
@@ -113,16 +123,29 @@ struct RawFreshRss {
     /// `enabled = false` for clarity but doesn't strictly need to.
     #[serde(default)]
     enabled: bool,
+    /// The FreshRSS server's base URL, not yet validated as non-empty --
+    /// `None` covers both "the key is missing" and lets `into_config` tell
+    /// the person exactly which required field they left out.
     url: Option<String>,
+    /// The FreshRSS account name, same "not yet validated" reasoning as
+    /// `url`.
     username: Option<String>,
     /// Defaults to `true` when omitted (see `default_sync_on_start`) —
     /// per ARCHITECTURE.md, "most people who enable FreshRSS at all want
     /// it current as soon as tuxwire opens."
     #[serde(default = "default_sync_on_start")]
     sync_on_start: bool,
+    /// Path to a file containing just the API password, before `~`
+    /// expansion or the file itself has been read -- see
+    /// `resolve_password`.
     password_file: Option<String>,
 }
 
+/// The default `sync_on_start` value when `freshrss.toml` omits the key
+/// entirely -- a plain function (not a constant) because that's what
+/// serde's `#[serde(default = "...")]` attribute requires: a path to a
+/// function returning the field's type, called only when the key is
+/// missing from the parsed TOML.
 fn default_sync_on_start() -> bool {
     true
 }

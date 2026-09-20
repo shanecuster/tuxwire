@@ -1,0 +1,32 @@
+{
+    "subscriptions": [
+        {
+            "id": "feed/1",
+            "title": "FreshRSS releases",
+            "categories": [
+                {
+                    "id": "user/-/label/Uncategorized",
+                    "label": "Uncategorized"
+                }
+            ],
+            "url": "https://github.com/FreshRSS/FreshRSS/releases.atom",
+            "htmlUrl": "https://github.com/FreshRSS/FreshRSS/",
+            "iconUrl": "http://localhost:8080/f.php?h=ae5c3a1b",
+            "frss:priority": "main"
+        },
+        {
+            "id": "feed/2",
+            "title": "Hacker News: Newest",
+            "categories": [
+                {
+                    "id": "user/-/label/Uncategorized",
+                    "label": "Uncategorized"
+                }
+            ],
+            "url": "https://hnrss.org/newest",
+            "htmlUrl": "https://news.ycombinator.com/newest",
+            "iconUrl": "http://localhost:8080/f.php?h=7b71dd9a",
+            "frss:priority": "main"
+        }
+    ]
+}
