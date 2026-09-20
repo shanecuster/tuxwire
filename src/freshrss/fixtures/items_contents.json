@@ -29,7 +29,7 @@
                 "title": "Hacker News: Newest"
             },
             "summary": {
-                "content": "<p>Article URL: <a href=\"https://space-core.at/\">https://space-core.at/</a></p>\n<p>Comments URL: <a href=\"https://news.ycombinator.com/item?id=49779362\">https://news.ycombinator.com/item?id=49779362</a></p>\n<p>Points: 1</p>\n<p># Comments: 0</p>"
+                "content": "<p>Fixture summary content one.</p>"
             },
             "author": "SpaceCoreDev"
         },
@@ -60,7 +60,7 @@
                 "title": "Hacker News: Newest"
             },
             "summary": {
-                "content": "<p>Article URL: <a href=\"https://devshrine.net/blog/ai-journal-2/\">https://devshrine.net/blog/ai-journal-2/</a></p>\n<p>Comments URL: <a href=\"https://news.ycombinator.com/item?id=49779337\">https://news.ycombinator.com/item?id=49779337</a></p>\n<p>Points: 1</p>\n<p># Comments: 0</p>"
+                "content": "<p>Fixture summary content two.</p>"
             },
             "author": "renehsz"
         }

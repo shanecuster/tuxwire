@@ -768,7 +768,11 @@ mod tests {
         assert_eq!(first.origin.stream_id, "feed/2");
         assert_eq!(first.origin.title, "Hacker News: Newest");
         assert_eq!(first.canonical[0].href, "https://space-core.at/");
-        assert!(first.summary.as_ref().unwrap().content.contains("space-core.at"));
+        // The fixture's `summary.content` is a trimmed placeholder (the
+        // repo is public; see the fixtures' own commit for why), not the
+        // real scraped HTML this response originally carried -- this just
+        // confirms the field round-trips into `Item.summary` at all.
+        assert_eq!(first.summary.as_ref().unwrap().content, "<p>Fixture summary content one.</p>");
     }
 
     /// `normalize_item_id` directly: both real shapes it has to handle,
