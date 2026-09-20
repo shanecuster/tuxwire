@@ -631,8 +631,19 @@ not before.
 
 FreshRSS exposes a Google Reader-style HTTP API at
 `<base-url>/api/greader.php`. It's plain HTTP + form posts + JSON, all
-already covered by `reqwest` and `serde_json` — **no new dependencies
-should be needed.**
+already covered by `reqwest` and `serde_json` — **no new dependency was
+needed**, though Phase 3 found one existing dependency's *feature set*
+had to grow: `reqwest`'s `application/x-www-form-urlencoded` support
+(`RequestBuilder::form`, needed for every one of these form-post calls)
+sits behind its own `form` Cargo feature, off by default. Rather than
+turning it on unconditionally, `Cargo.toml`'s `freshrss` feature now
+forwards to it (`freshrss = ["reqwest/form"]`), so it only turns on
+together with this crate's own `freshrss` feature — confirmed via `cargo
+tree -e features -i reqwest` that plain `cargo build` (no flags) resolves
+`reqwest` with `form` off, same as before this feature existed. Pulls in
+one small new transitive crate (`serde_urlencoded`) only when
+`--features freshrss` is used; `Cargo.lock`'s diff for this is
+purely additive, no existing crate's version changed.
 
 On the server, the person has to (a) allow API access in FreshRSS's
 authentication settings and (b) set an **API password** under their profile.
