@@ -430,6 +430,152 @@ impl Storage {
         let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
         rows.collect::<rusqlite::Result<Vec<(String, i64)>>>().map_err(Into::into)
     }
+
+    // --- freshrss (feature-gated) ------------------------------------
+    //
+    // Every method below only exists in a `--features freshrss` build --
+    // `#[cfg(feature = "freshrss")]` on each one, individually, rather
+    // than wrapping this whole section in one `#[cfg]` block around the
+    // `impl`, because these methods are interleaved here with the plain
+    // `impl Storage` block above them; per-method `#[cfg]` is what lets
+    // that stay one `impl` instead of splitting into two. They all read
+    // or write the `freshrss_items` table migration 004 creates (see
+    // `migrations/004_freshrss_tables.sql`), which -- in a no-feature
+    // build -- doesn't exist, so these methods couldn't compile there
+    // even if they were left in: `#[cfg]` isn't just tidiness here, it's
+    // what makes "off means identical to `master`" true at the type level,
+    // not just at the schema level.
+
+    /// Links an already-inserted `articles` row to its FreshRSS origin.
+    ///
+    /// Takes `article_id` rather than an `&Article`, because inserting
+    /// the article itself is already `insert_article`'s job (unchanged by
+    /// this feature) -- a sync calls that first to get an `article_id`,
+    /// then this method to record the two extra facts a FreshRSS-origin
+    /// article carries that a local one doesn't: the server's own item ID
+    /// (for dedupe and read-sync) and which feed it came from.
+    ///
+    /// Idempotent on `remote_id`, the same way `insert_article` is
+    /// idempotent on `url`: `ON CONFLICT(remote_id) DO NOTHING` means
+    /// calling this again for an item tuxwire already has a link row for
+    /// is a harmless no-op rather than a `UNIQUE` constraint error -- a
+    /// sync (a later build phase) can call this unconditionally for every
+    /// item it fetches without checking first.
+    #[cfg(feature = "freshrss")]
+    pub fn insert_freshrss_item(&self, article_id: i64, remote_id: &str, feed_id: &str) -> anyhow::Result<()> {
+        self.conn.execute(
+            "INSERT INTO freshrss_items (article_id, remote_id, feed_id) VALUES (?1, ?2, ?3)
+             ON CONFLICT(remote_id) DO NOTHING",
+            params![article_id, remote_id, feed_id],
+        )?;
+        Ok(())
+    }
+
+    /// The `article_id` already linked to `remote_id`, if tuxwire has
+    /// seen this FreshRSS item before -- the sync's dedupe check ahead of
+    /// fetching an item's full contents, per ARCHITECTURE.md's Sync
+    /// behavior: "fetch contents only for IDs not already in
+    /// `freshrss_items`."
+    ///
+    /// Returns `Option<i64>`, not a bare `i64` with some sentinel for
+    /// "not found" -- same reasoning `skip_weight` gives for its own
+    /// `.optional()` use just above: "this item was never synced" is an
+    /// expected, non-error outcome a caller has to positively check for,
+    /// not something papered over with a magic `-1` or `0`.
+    #[cfg(feature = "freshrss")]
+    pub fn freshrss_article_id_by_remote_id(&self, remote_id: &str) -> anyhow::Result<Option<i64>> {
+        self.conn
+            .query_row(
+                "SELECT article_id FROM freshrss_items WHERE remote_id = ?1",
+                params![remote_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    /// Flags `article_id` as having a local read-state change not yet
+    /// pushed to the server -- set the moment a FreshRSS-origin article is
+    /// marked read locally (`Enter` or `s`), per ARCHITECTURE.md's "When
+    /// the person marks a FreshRSS-origin article read locally... set
+    /// `pending_read_push = 1`."
+    #[cfg(feature = "freshrss")]
+    pub fn set_pending_read_push(&self, article_id: i64) -> anyhow::Result<()> {
+        self.conn
+            .execute("UPDATE freshrss_items SET pending_read_push = 1 WHERE article_id = ?1", params![article_id])?;
+        Ok(())
+    }
+
+    /// Clears the pending-push flag on `article_id` -- called only once
+    /// the server has actually confirmed the `edit-tag` read call, per
+    /// ARCHITECTURE.md's "Push read state" step: "clear the flag only
+    /// after the server confirms." A separate method from
+    /// `set_pending_read_push` rather than one `set_pending_read_push(&self,
+    /// article_id: i64, pending: bool)` -- two small, clearly-named
+    /// methods read better at each call site (`clear_pending_read_push`
+    /// right after a successful network call) than a boolean parameter
+    /// whose meaning isn't visible without checking the call site.
+    #[cfg(feature = "freshrss")]
+    pub fn clear_pending_read_push(&self, article_id: i64) -> anyhow::Result<()> {
+        self.conn
+            .execute("UPDATE freshrss_items SET pending_read_push = 0 WHERE article_id = ?1", params![article_id])?;
+        Ok(())
+    }
+
+    /// Every FreshRSS-origin article with a local read-state change not
+    /// yet pushed to the server -- what a sync's "Push read state" step
+    /// iterates: for each `(article_id, remote_id)` pair, send `edit-tag`
+    /// read using `remote_id`, then call `clear_pending_read_push(article_id)`
+    /// only once the server confirms.
+    ///
+    /// Returns `remote_id` alongside `article_id` (rather than just the
+    /// `article_id`s, leaving the caller to look each one's `remote_id`
+    /// up separately) because every caller of this method needs exactly
+    /// that pair to do anything useful with it -- the server's
+    /// `edit-tag` call only understands its own item IDs, never tuxwire's
+    /// local `article_id`.
+    #[cfg(feature = "freshrss")]
+    pub fn pending_read_pushes(&self) -> anyhow::Result<Vec<(i64, String)>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT article_id, remote_id FROM freshrss_items WHERE pending_read_push = 1")?;
+
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        rows.collect::<rusqlite::Result<Vec<(i64, String)>>>().map_err(Into::into)
+    }
+
+    /// Every distinct `(topic, source)` pair currently present in
+    /// `articles` whose topic is namespaced `FreshRSS/...` -- the sidebar
+    /// merge query ARCHITECTURE.md's "Sidebar integration" describes:
+    /// `ui::run` folds these into the same `HashMap<String, Vec<String>>`
+    /// `group_sources_by_topic` already builds from `sources.toml`, so
+    /// FreshRSS feeds show up as nested source rows in the sidebar the
+    /// same way local sources do, without `sidebar_rows` itself needing
+    /// to know FreshRSS exists.
+    ///
+    /// Deliberately queries `articles` itself, not `freshrss_items` or a
+    /// cached subscription list -- this is what produces the
+    /// "zero-article-feed limitation" ARCHITECTURE.md documents: a feed
+    /// with no synced articles yet has no row here to be distinct over,
+    /// so it doesn't appear in the sidebar merge either, until its first
+    /// article lands.
+    ///
+    /// `%` in the `LIKE` pattern below is a literal wildcard character,
+    /// not a bound parameter -- safe here (unlike interpolating real user
+    /// input) because `'FreshRSS/%'` is a fixed string this method always
+    /// passes, never anything read from outside the program. Compare
+    /// `search_articles`'s doc comment, which binds its *own* wildcard
+    /// pattern via `params!` because it's built from a person's search
+    /// text.
+    #[cfg(feature = "freshrss")]
+    pub fn freshrss_topic_source_pairs(&self) -> anyhow::Result<Vec<(String, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT topic, source FROM articles WHERE topic LIKE 'FreshRSS/%' ORDER BY topic, source",
+        )?;
+
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        rows.collect::<rusqlite::Result<Vec<(String, String)>>>().map_err(Into::into)
+    }
 }
 
 /// Maps one row from a `SELECT id, title, url, source, topic, timestamp,
@@ -836,5 +982,296 @@ mod tests {
         }
 
         assert_eq!(storage.topics().unwrap(), vec!["gaming", "linux-news"]);
+    }
+
+    /// The whole point of gating migration 004 behind the `freshrss`
+    /// feature (see `storage::migrations::migrations`'s doc comment):
+    /// a build without it must produce a database schema byte-for-byte
+    /// identical to `master`'s. Gated to run only *without* the feature --
+    /// with it on, these two tables are supposed to exist, and
+    /// `freshrss::tests::feature_build_creates_freshrss_tables` below
+    /// checks that side of the same claim.
+    #[cfg(not(feature = "freshrss"))]
+    #[test]
+    fn no_feature_build_never_creates_freshrss_tables() {
+        let storage = test_storage();
+
+        let table_count: i64 = storage
+            .conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master
+                 WHERE type = 'table' AND name IN ('freshrss_items', 'freshrss_meta')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(table_count, 0, "a no-feature build must never create the FreshRSS tables");
+    }
+
+    /// Every test here needs the `freshrss` feature -- they call methods
+    /// (`insert_freshrss_item`, etc.) that don't exist without it, and
+    /// they assert on tables (`freshrss_items`/`freshrss_meta`) migration
+    /// 004 only creates in a `--features freshrss` build. Nested in its
+    /// own `mod` (rather than `#[cfg]` on each test individually) purely
+    /// so this whole block reads as one clearly-delimited unit, the same
+    /// reason `storage::mod.rs`'s "freshrss (feature-gated)" section
+    /// comment exists on the non-test side.
+    #[cfg(feature = "freshrss")]
+    mod freshrss {
+        use super::*;
+
+        /// The mirror image of `no_feature_build_never_creates_freshrss_tables`
+        /// above: with the feature on, a fresh database really does gain
+        /// both new tables.
+        #[test]
+        fn feature_build_creates_freshrss_tables() {
+            let storage = test_storage();
+
+            let table_count: i64 = storage
+                .conn
+                .query_row(
+                    "SELECT count(*) FROM sqlite_master
+                     WHERE type = 'table' AND name IN ('freshrss_items', 'freshrss_meta')",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+
+            assert_eq!(table_count, 2, "a --features freshrss build must create both FreshRSS tables");
+        }
+
+        /// The single most important regression test this phase adds:
+        /// upgrading a database that predates migration 004 -- built here
+        /// by running only migrations 001-003's *actual* SQL files
+        /// directly against a raw connection, deliberately bypassing
+        /// `Storage::open`/`from_connection` (which would run *this*
+        /// binary's full migration list, migration 004 included, and
+        /// defeat the entire point of starting from a pre-004 state) --
+        /// must leave every existing article's data completely untouched.
+        ///
+        /// `include_str!`ing the same three files `storage::migrations`
+        /// itself embeds (rather than retyping their `CREATE TABLE`/
+        /// `ALTER TABLE` statements by hand into this test) is what makes
+        /// this test immune to drifting out of sync with those files if
+        /// they ever changed -- there is exactly one copy of "what
+        /// migration 001 does," even though it's read into two different
+        /// places in the compiled binary.
+        #[test]
+        fn migrating_a_pre_004_database_preserves_existing_articles_and_notes() {
+            let conn = Connection::open_in_memory().unwrap();
+
+            // Build a genuine pre-004 schema: migrations 001-003, and
+            // nothing past them -- `user_version` set to 3 by hand,
+            // exactly what `storage::migrations::run` would have left
+            // behind on a database no build past migration 003 had ever
+            // touched.
+            conn.execute_batch(include_str!("../../migrations/001_init.sql")).unwrap();
+            conn.execute_batch(include_str!("../../migrations/002_unique_article_url.sql")).unwrap();
+            conn.execute_batch(include_str!("../../migrations/003_add_saved_and_noted_at.sql")).unwrap();
+            conn.execute_batch("PRAGMA user_version = 3").unwrap();
+
+            // Real data, inserted with plain SQL rather than through
+            // `Storage` (which doesn't exist yet at this point -- wrapping
+            // this `conn` in one is the very next step, and *that's* what
+            // this test is actually exercising).
+            conn.execute(
+                "INSERT INTO articles
+                     (title, url, source, topic, timestamp, read, skipped, saved, note, saved_at, noted_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, 1, 0, 1, ?6, ?7, ?8)",
+                params![
+                    "Btrfs send/receive got noticeably faster in 6.18",
+                    "https://example.com/btrfs",
+                    "LWN.net",
+                    "kernel",
+                    Utc::now(),
+                    "worth trying on the homelab NAS",
+                    Utc::now(),
+                    Utc::now(),
+                ],
+            )
+            .unwrap();
+
+            // Wrapping the same connection in a `Storage` is what actually
+            // runs `migrations::run` -- which, compiled with
+            // `--features freshrss`, now sees `current_version = 3` and
+            // applies migration 004 on top of the data inserted above.
+            let storage = Storage::from_connection(conn).unwrap();
+
+            // The pre-existing article -- title, saved state, and note all
+            // included -- must have survived migration 004 completely
+            // unchanged. Migration 004 adds no columns to `articles` at
+            // all (new tables only), so there's no plausible mechanism by
+            // which any of this could have moved, but this is precisely
+            // the guarantee ARCHITECTURE.md's "no destructive schema
+            // changes" rule exists to protect, and it deserves a real
+            // assertion, not just an argument from the SQL.
+            let articles = storage.all_articles().unwrap();
+            assert_eq!(articles.len(), 1, "the pre-existing article must not be lost or duplicated");
+            let article = &articles[0];
+            assert_eq!(article.title, "Btrfs send/receive got noticeably faster in 6.18");
+            assert!(article.saved, "saved state must survive the upgrade");
+            assert!(article.read);
+            assert_eq!(article.note.as_deref(), Some("worth trying on the homelab NAS"));
+            assert!(article.saved_at.is_some(), "saved_at must survive the upgrade");
+            assert!(article.noted_at.is_some(), "noted_at must survive the upgrade");
+
+            // And migration 004 itself did run -- the new tables exist,
+            // empty (nothing has synced into them in this test), which is
+            // the other half of "additive only": new tables appear
+            // *alongside* the untouched old data, not instead of it.
+            let freshrss_item_count: i64 =
+                storage.conn.query_row("SELECT count(*) FROM freshrss_items", [], |row| row.get(0)).unwrap();
+            assert_eq!(freshrss_item_count, 0);
+        }
+
+        /// `insert_freshrss_item` links an `article_id` to its FreshRSS
+        /// origin, and `freshrss_article_id_by_remote_id` is what a sync's
+        /// dedupe check reads back -- `None` for an item never linked,
+        /// `Some(article_id)` once it has been.
+        #[test]
+        fn insert_and_look_up_freshrss_item_by_remote_id() {
+            let storage = test_storage();
+            let article = Article::new(
+                "Kernel 6.18 released".to_string(),
+                "https://example.com/6.18".to_string(),
+                "Phoronix".to_string(),
+                "FreshRSS/kernel".to_string(),
+                Utc::now(),
+            );
+            let article_id = storage.insert_article(&article).unwrap();
+
+            assert_eq!(
+                storage.freshrss_article_id_by_remote_id("item-1").unwrap(),
+                None,
+                "an item that was never linked has no article_id yet"
+            );
+
+            storage.insert_freshrss_item(article_id, "item-1", "feed-42").unwrap();
+
+            assert_eq!(storage.freshrss_article_id_by_remote_id("item-1").unwrap(), Some(article_id));
+        }
+
+        /// Re-linking the same `remote_id` (a sync re-fetching an item it
+        /// already has) is a no-op, not a `UNIQUE` constraint error --
+        /// `ON CONFLICT(remote_id) DO NOTHING`, the same "insert or skip"
+        /// shape `insert_article` already establishes for `url`.
+        #[test]
+        fn inserting_the_same_remote_id_twice_does_not_error() {
+            let storage = test_storage();
+            let article = Article::new(
+                "title".to_string(),
+                "url".to_string(),
+                "source".to_string(),
+                "FreshRSS/topic".to_string(),
+                Utc::now(),
+            );
+            let article_id = storage.insert_article(&article).unwrap();
+
+            storage.insert_freshrss_item(article_id, "item-1", "feed-1").unwrap();
+            storage.insert_freshrss_item(article_id, "item-1", "feed-1").unwrap();
+
+            assert_eq!(storage.freshrss_article_id_by_remote_id("item-1").unwrap(), Some(article_id));
+        }
+
+        /// `set_pending_read_push`/`clear_pending_read_push` toggle the
+        /// one flag `pending_read_pushes` reads -- exercised together
+        /// since none of the three means anything on its own.
+        #[test]
+        fn set_and_clear_pending_read_push() {
+            let storage = test_storage();
+            let article = Article::new(
+                "title".to_string(),
+                "url".to_string(),
+                "source".to_string(),
+                "FreshRSS/topic".to_string(),
+                Utc::now(),
+            );
+            let article_id = storage.insert_article(&article).unwrap();
+            storage.insert_freshrss_item(article_id, "item-1", "feed-1").unwrap();
+
+            assert!(storage.pending_read_pushes().unwrap().is_empty(), "nothing is pending right after linking");
+
+            storage.set_pending_read_push(article_id).unwrap();
+            assert_eq!(storage.pending_read_pushes().unwrap(), vec![(article_id, "item-1".to_string())]);
+
+            storage.clear_pending_read_push(article_id).unwrap();
+            assert!(storage.pending_read_pushes().unwrap().is_empty(), "clearing must remove it from the list");
+        }
+
+        /// `pending_read_pushes` returns only articles actually flagged --
+        /// a second, never-flagged FreshRSS article in the same database
+        /// must not show up alongside the one that is.
+        #[test]
+        fn pending_read_pushes_excludes_articles_with_nothing_pending() {
+            let storage = test_storage();
+
+            let pending = Article::new(
+                "pending".to_string(),
+                "url-pending".to_string(),
+                "source".to_string(),
+                "FreshRSS/topic".to_string(),
+                Utc::now(),
+            );
+            let pending_id = storage.insert_article(&pending).unwrap();
+            storage.insert_freshrss_item(pending_id, "item-pending", "feed-1").unwrap();
+            storage.set_pending_read_push(pending_id).unwrap();
+
+            let settled = Article::new(
+                "settled".to_string(),
+                "url-settled".to_string(),
+                "source".to_string(),
+                "FreshRSS/topic".to_string(),
+                Utc::now(),
+            );
+            let settled_id = storage.insert_article(&settled).unwrap();
+            storage.insert_freshrss_item(settled_id, "item-settled", "feed-1").unwrap();
+
+            assert_eq!(storage.pending_read_pushes().unwrap(), vec![(pending_id, "item-pending".to_string())]);
+        }
+
+        /// The sidebar merge query: distinct `(topic, source)` pairs whose
+        /// topic is namespaced `FreshRSS/...`, alphabetical, and -- just
+        /// as importantly -- excluding local (non-`FreshRSS/`) topics
+        /// entirely, so merging this into `group_sources_by_topic`'s map
+        /// can never accidentally add a phantom source under a local
+        /// topic.
+        #[test]
+        fn freshrss_topic_source_pairs_excludes_local_topics() {
+            let storage = test_storage();
+
+            for (title, url, source, topic) in [
+                ("a", "url-a", "Phoronix", "FreshRSS/kernel"),
+                ("b", "url-b", "9to5Linux", "FreshRSS/kernel"),
+                ("c", "url-c", "r/linux", "FreshRSS/distros"),
+                ("d", "url-d", "Arch Linux News", "linux"),
+            ] {
+                let article =
+                    Article::new(title.to_string(), url.to_string(), source.to_string(), topic.to_string(), Utc::now());
+                storage.insert_article(&article).unwrap();
+            }
+
+            assert_eq!(
+                storage.freshrss_topic_source_pairs().unwrap(),
+                vec![
+                    ("FreshRSS/distros".to_string(), "r/linux".to_string()),
+                    ("FreshRSS/kernel".to_string(), "9to5Linux".to_string()),
+                    ("FreshRSS/kernel".to_string(), "Phoronix".to_string()),
+                ],
+                "must include every FreshRSS/* pair and exclude the local 'linux' topic entirely"
+            );
+        }
+
+        /// A feed that hasn't synced a single article yet has no row to
+        /// be distinct over -- the "zero-article-feed limitation"
+        /// ARCHITECTURE.md documents. This isn't a bug this method needs
+        /// to work around; it's the direct, expected consequence of
+        /// querying `articles` rather than a subscription list, and it's
+        /// worth a test precisely because it's easy to forget.
+        #[test]
+        fn freshrss_topic_source_pairs_is_empty_with_no_synced_articles() {
+            let storage = test_storage();
+            assert!(storage.freshrss_topic_source_pairs().unwrap().is_empty());
+        }
     }
 }

@@ -12,15 +12,18 @@ use rusqlite::Connection;
 /// messages, to make a failure easy to trace back to a specific file), and
 /// the raw SQL to execute.
 ///
-/// This struct only ever exists as `'static` data baked into the binary
-/// (see `MIGRATIONS` below) -- nothing ever constructs one at runtime --
-/// which is why every field here can be a borrowed `&'static str` instead
-/// of an owned `String`. A `&'static str` is a reference guaranteed valid
-/// for the *entire* life of the program (typically because, like here, it
-/// points at data embedded directly in the compiled binary rather than
-/// anything allocated on the heap at runtime), so there's no ownership
-/// question to resolve the way there would be for borrowed data with a
-/// shorter lifetime.
+/// `migrations()` below builds a fresh `Vec<Migration>` each time it's
+/// called, but every *value* inside each one is still `&'static str`, not
+/// `String`: `name` is a string literal, and `sql` comes from
+/// `include_str!`, which splices a file's contents in as a string literal
+/// at compile time (see `migrations()`'s own doc comment). A `&'static
+/// str` is a reference guaranteed valid for the *entire* life of the
+/// program -- typically because, like here, it points at data embedded
+/// directly in the compiled binary rather than anything allocated on the
+/// heap at runtime -- so there's no ownership question to resolve the way
+/// there would be for borrowed data with a shorter lifetime, even though
+/// the `Migration` struct instances themselves (and the `Vec` holding
+/// them) are ordinary runtime values, rebuilt on every call.
 struct Migration {
     version: u32,
     name: &'static str,
@@ -41,24 +44,65 @@ struct Migration {
 ///
 /// Adding a new migration later means: write `migrations/00N_whatever.sql`,
 /// then add one more `Migration { .. }` entry here with the next version
-/// number. Nothing about *this* function (`run`, below) needs to change.
-const MIGRATIONS: &[Migration] = &[
-    Migration {
-        version: 1,
-        name: "001_init",
-        sql: include_str!("../../migrations/001_init.sql"),
-    },
-    Migration {
-        version: 2,
-        name: "002_unique_article_url",
-        sql: include_str!("../../migrations/002_unique_article_url.sql"),
-    },
-    Migration {
-        version: 3,
-        name: "003_add_saved_and_noted_at",
-        sql: include_str!("../../migrations/003_add_saved_and_noted_at.sql"),
-    },
-];
+/// number. Nothing about *this* function's caller (`run`, below) needs to
+/// change.
+///
+/// ## Why a function instead of a `const` array
+///
+/// Every migration up through 003 is unconditional, but 004
+/// (`freshrss_items`/`freshrss_meta`, see `migrations/004_freshrss_tables.sql`)
+/// only exists when this crate is built with `--features freshrss` --
+/// per docs/ARCHITECTURE.md's FreshRSS Sync section, a `master`/no-feature
+/// build's schema must be identical to `master`'s, so that migration must
+/// never run (or even be compiled in) without the feature. Attaching
+/// `#[cfg(...)]` to one *element* of a `const` array literal isn't
+/// something stable Rust supports; `#[cfg(...)]` on a *statement* (the
+/// conditional `.push(...)` below) is fully stable and ordinary, so this
+/// builds the list at runtime instead. The cost is negligible -- this
+/// runs once per startup, building a `Vec` with three or four elements --
+/// and `run` below doesn't care whether its migrations came from a
+/// `const` or a freshly-built `Vec`; it just iterates them in order.
+fn migrations() -> Vec<Migration> {
+    // `mut` is only ever exercised by the `#[cfg(feature = "freshrss")]`
+    // `.push(...)` below -- a no-feature build never mutates this `Vec`
+    // after building it, which `rustc` would otherwise (correctly, in
+    // that build) flag as an unused `mut`. `#[allow(unused_mut)]` is
+    // scoped to just this one binding rather than the whole function,
+    // and does nothing at all in a `--features freshrss` build, where the
+    // `mut` is genuinely needed.
+    #[allow(unused_mut)]
+    let mut migrations = vec![
+        Migration {
+            version: 1,
+            name: "001_init",
+            sql: include_str!("../../migrations/001_init.sql"),
+        },
+        Migration {
+            version: 2,
+            name: "002_unique_article_url",
+            sql: include_str!("../../migrations/002_unique_article_url.sql"),
+        },
+        Migration {
+            version: 3,
+            name: "003_add_saved_and_noted_at",
+            sql: include_str!("../../migrations/003_add_saved_and_noted_at.sql"),
+        },
+    ];
+
+    // `include_str!` here only ever runs at all when this whole line is
+    // compiled in -- i.e. only with `--features freshrss` -- so a
+    // no-feature build doesn't just skip *pushing* this migration, it
+    // never embeds `004_freshrss_tables.sql`'s bytes into the binary in
+    // the first place.
+    #[cfg(feature = "freshrss")]
+    migrations.push(Migration {
+        version: 4,
+        name: "004_freshrss_tables",
+        sql: include_str!("../../migrations/004_freshrss_tables.sql"),
+    });
+
+    migrations
+}
 
 /// Brings `conn`'s schema up to date by running every migration whose
 /// version is greater than the database's current `PRAGMA user_version`,
@@ -91,7 +135,7 @@ pub fn run(conn: &Connection) -> anyhow::Result<()> {
     // run against it before).
     let current_version: u32 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
 
-    for migration in MIGRATIONS {
+    for migration in migrations() {
         if migration.version <= current_version {
             // Already applied on a previous run -- skip it. This is what
             // makes `run` safe to call unconditionally on every startup,
@@ -121,4 +165,50 @@ pub fn run(conn: &Connection) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A database whose `user_version` is already ahead of every migration
+    /// *this binary* knows about -- exactly the situation `master` (or any
+    /// build missing a feature-gated migration, e.g. a `freshrss`-only one)
+    /// finds itself in when it opens a database that a different,
+    /// newer-aware build already migrated further. `run` doesn't special-
+    /// case this at all: it only ever compares each of *its own*
+    /// `migrations()` entries against `current_version` and `continue`s past
+    /// anything at or below it, so a `current_version` higher than every
+    /// entry in the list just means every entry gets skipped -- nothing
+    /// tries to re-run a migration this binary doesn't have, nothing
+    /// errors, and (critically) nothing lowers `user_version` back down to
+    /// what this binary *does* know about. The database opens exactly as-is.
+    #[test]
+    fn a_database_ahead_of_known_migrations_is_left_untouched() {
+        let conn = Connection::open_in_memory().unwrap();
+        // Bring a fresh database up to this binary's own latest known
+        // version first, the same as any real startup.
+        run(&conn).unwrap();
+
+        // Simulate a build with one more migration than this one knows
+        // about (e.g. a feature-gated migration this binary was compiled
+        // without) having already run against this exact database file.
+        let latest_known = migrations().last().unwrap().version;
+        conn.execute_batch(&format!("PRAGMA user_version = {}", latest_known + 1)).unwrap();
+
+        // Running this binary's own (comparatively older) migration list
+        // against that now-ahead database must be a complete no-op --
+        // every migration's version is <= the db's user_version, so every
+        // one is skipped. If this instead tried to re-run migration 1's
+        // `CREATE TABLE articles`, it would fail with "table already
+        // exists" rather than silently succeeding the way it does here.
+        run(&conn).unwrap();
+
+        let version: u32 = conn.query_row("PRAGMA user_version", [], |row| row.get(0)).unwrap();
+        assert_eq!(
+            version,
+            latest_known + 1,
+            "run must never lower a user_version that's already ahead of what it knows about"
+        );
+    }
 }
