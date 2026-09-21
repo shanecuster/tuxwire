@@ -407,16 +407,18 @@ fn resolve_password(password_file: Option<&str>, warnings: &mut Vec<String>) -> 
 /// Checks whether `url` is worth warning about — plain `http://` talking
 /// to a host that isn't the local machine, meaning the FreshRSS API
 /// password would cross the network unencrypted on every login. Returns
-/// the warning message rather than printing it directly (unlike
-/// `main.rs`'s `eprintln!`-on-fetch-failure precedent) purely so this
-/// logic itself is unit-testable without capturing stderr — the one
-/// caller above still just `eprintln!`s whatever comes back.
+/// the warning message rather than printing it directly, purely so this
+/// logic itself is unit-testable without capturing stderr -- `into_config`
+/// (above) is the caller that actually collects it, into the same
+/// `Vec<String>` `FreshRssConfig::load` hands back for `main.rs`/`ui/mod.rs`
+/// to show in the footer once the TUI is up (see `into_config`'s own doc
+/// comment for why this stopped being an `eprintln!` at all).
 ///
 /// Deliberately narrow: only `http://` (never `https://`, which is always
 /// fine) with a host that isn't `localhost`/`127.0.0.1`/`::1` triggers a
 /// warning. A URL this crate can't even parse the scheme/host out of
-/// isn't flagged here — a genuinely malformed `url` will fail loudly
-/// enough once the client (a later build phase) actually tries to use it.
+/// isn't flagged here — a genuinely malformed `url` fails loudly enough
+/// once `freshrss::client::Client` actually tries to use it.
 fn insecure_url_warning(url: &str) -> Option<String> {
     let host = url.strip_prefix("http://")?.split(['/', ':']).next().unwrap_or("");
 

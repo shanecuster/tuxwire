@@ -36,24 +36,34 @@
 //! `.fetch()` once per `ConfiguredSource`. The Google Reader-compatible API
 //! FreshRSS exposes doesn't fit that shape: one login and one write token
 //! cover *every* subscribed feed, and unread items come back as a single
-//! batch across the whole reading list, not one request per feed. A future
-//! `sync` submodule here will own that whole batch directly (log in once,
-//! fetch once, fan out to every feed's items) and produce `Article` values
-//! itself via a `mapping` submodule, rather than pretending to be one more
-//! `Fetcher` impl. Per ARCHITECTURE.md's "Refresh triggers," it's driven at
-//! startup and from the `r` keybind while a `FreshRSS/*` topic is selected
-//! -- not through `fetchers::configured_sources()`.
+//! batch across the whole reading list, not one request per feed. `sync`
+//! owns that whole batch directly (log in once, fetch once, fan out to
+//! every feed's items) and produces `Article` values itself via `mapping`,
+//! rather than pretending to be one more `Fetcher` impl. Per
+//! ARCHITECTURE.md's "Refresh triggers," it's driven at startup and from
+//! the `r` keybind while a `FreshRSS/*` topic is selected -- not through
+//! `fetchers::configured_sources()`.
 //!
-//! ## What exists so far
+//! ## What's here (all seven build phases done)
 //!
-//! All four submodules ARCHITECTURE.md describes: `config` (parsing
-//! `freshrss.toml`), `client` (HTTP/protocol -- Phase 3), `mapping` (raw
-//! API shapes -> `Article`, plus the pure "which ids to fetch" decision
-//! -- Phase 4), and `sync` (the async orchestration that ties `client`,
-//! `mapping`, and `Storage` together for one sync -- Phase 4). `sync` is
-//! wired into `main.rs`/`ui/mod.rs` (startup sync, and `r` on a
-//! `FreshRSS/*` topic) as of Phase 4; see this module's own doc comment
-//! and `sync`'s for exactly how.
+//! - `config` -- parsing and validating `freshrss.toml` (Phase 1).
+//! - `client` -- the Google Reader-compatible HTTP protocol: login,
+//!   subscriptions, unread ids, item contents (Phase 3), read-state push
+//!   (`token`/`mark_read`, Phase 5), and adding a feed (`quickadd`,
+//!   Phase 6). Knows nothing about `Storage` or the UI.
+//! - `mapping` -- pure functions only: raw `client` shapes -> `Article`,
+//!   which ids a sync should fetch, and sanitizing server-supplied text
+//!   before it's ever shown in the TUI (Phase 4/6). No I/O, no `Storage`.
+//! - `sync` -- the async orchestration that ties `client`, `mapping`, and
+//!   `Storage` together: one full sync (pull + read-state reconcile +
+//!   push, Phase 4/5), the startup sync's own background thread (Phase
+//!   4), and adding a feed (Phase 6).
+//!
+//! Wired into `main.rs` (the startup sync, when `sync_on_start` is on)
+//! and `ui/mod.rs` (`r` on a `FreshRSS/*` topic, the sidebar merge, the
+//! three local read-marking hook points, and the `a` flow's FreshRSS
+//! destination) -- see each of those call sites' own doc comments for
+//! exactly how.
 pub mod client;
 pub mod config;
 pub mod mapping;

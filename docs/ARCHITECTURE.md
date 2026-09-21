@@ -342,19 +342,21 @@ tuxwire/
 │   ├── main.rs
 │   ├── fetchers/        # one module per source type
 │   ├── storage/         # SQLite access + migrations
-│   ├── freshrss/        # PLANNED (feature/freshrss): optional FreshRSS sync, behind the `freshrss` Cargo feature
+│   ├── freshrss/        # optional FreshRSS sync, behind the `freshrss` Cargo feature (feature/freshrss, built)
 │   ├── scoring.rs        # reserved for v2 skip-weighting (unused in v1)
 │   ├── theme.rs           # theme.toml loading
 │   └── ui/                # ratatui views/widgets
 ├── migrations/
-│   └── 001_init.sql
+│   ├── 001_init.sql
+│   └── 004_freshrss_tables.sql   # feature-gated: only applied with --features freshrss
 ├── docs/
 │   ├── ARCHITECTURE.md    # this file
-│   └── ADDING_A_SOURCE.md
+│   ├── ADDING_A_SOURCE.md
+│   └── MERGE_CHECKLIST.md   # feature/freshrss -> master, when that's decided
 ├── CHANGELOG.md            # git-commit / changelog style, matches blog aesthetic
 ├── sources.toml.example
 ├── theme.toml.example
-├── freshrss.toml.example   # PLANNED (feature/freshrss)
+├── freshrss.toml.example   # feature/freshrss, built
 └── Cargo.toml
 ```
 
@@ -591,12 +593,14 @@ out not to be worth solving this way. Not pursuing.
 
 ---
 
-## FreshRSS Sync (optional) — in progress on `feature/freshrss`
+## FreshRSS Sync (optional)
 
-**Status: planned, being built on the `feature/freshrss` branch. Not merged
-into `master` until it's been tested and is genuinely liked** — same process
-as the `w3m` integration. Until that merge, nothing in this section
-describes code that exists on `master`.
+**Status: built and tested on the `feature/freshrss` branch, all seven
+phases done.** Everything in this section describes code that exists on
+that branch today. Not yet merged into `master` — same process as the
+`w3m` integration: merged once it's been used for real and is genuinely
+liked, not on a fixed schedule. See `docs/MERGE_CHECKLIST.md` for exactly
+what that merge involves.
 
 ### Goals and non-goals
 
@@ -1213,17 +1217,20 @@ to `.gitignore` as a safety net.
 
 ### Build phases (stop and report after each)
 
-- **Phase 0 — read only.** Read this document and the code; report how
-  `Fetcher`, `Storage::topics()`, the sidebar, and the `a` flow actually
-  work, whether the `Fetcher` trait fits FreshRSS as-is, and what the next
-  migration number is. No code changes.
-- **Phase 1 — skeleton.** `freshrss` Cargo feature, empty `src/freshrss/`
-  module, `freshrss.toml` parsing, `freshrss.toml.example`. Off by default,
-  no behavior change.
-- **Phase 2 — storage.** The additive migration and the `Storage` methods
-  the sync needs, with tests.
-- **Phase 3 — client.** Login, subscription list, unread IDs, item
-  contents, against fixtures. No storage or UI yet.
+- **Phase 0 — read only. Done.** Read this document and the code;
+  reported how `Fetcher`, `Storage::topics()`, the sidebar, and the `a`
+  flow actually worked, that the `Fetcher` trait didn't fit FreshRSS as-is
+  (see "Deliberately not a `Fetcher` impl" above), and the next migration
+  number (`004`). No code changes.
+- **Phase 1 — skeleton. Done.** `freshrss` Cargo feature, empty
+  `src/freshrss/` module, `freshrss.toml` parsing (`freshrss::config`),
+  `freshrss.toml.example`. Off by default, no behavior change.
+- **Phase 2 — storage. Done.** Migration `004_freshrss_tables.sql`
+  (`freshrss_items`, `freshrss_meta`, additive only), and the `Storage`
+  methods the sync needs, with tests.
+- **Phase 3 — client. Done.** Login, subscription list, unread IDs, item
+  contents (`freshrss::client`), against fixtures captured from a live
+  test server. No storage or UI yet.
 - **Phase 4 — pull. Done.** Normalize items to `Article`
   (`freshrss::mapping`), insert with URL-conflict protection
   (`Storage::insert_article_if_new_url`), dedupe by `remote_id`, surface
@@ -1243,9 +1250,12 @@ to `.gitignore` as a safety net.
 - **Phase 6 — add feed. Done.** The destination choice in the `a` flow
   (`Client::quickadd`, `sync::add_feed`, the Confirm screen's
   `Destination` field). See "Adding feeds" above for the full design.
-- **Phase 7 — polish.** README configuration section, `CHANGELOG.md` entry,
-  update this document from "planned" to describing what was actually
-  built, and full doc-comment pass per the Documentation Standards.
+- **Phase 7 — polish. Done.** README FreshRSS section, `CHANGELOG.md`
+  entry, this document updated from "planned" to describing what was
+  actually built (every phase above, this section's own status line),
+  `docs/MERGE_CHECKLIST.md`, and the doc-comment pass per the
+  Documentation Standards was kept current phase by phase throughout
+  rather than as a single pass at the end.
 
 ### Deferred, not in the first version
 
@@ -1256,7 +1266,18 @@ to `.gitignore` as a safety net.
   decision.
 - Android: when the shared core is extracted, revisit the TLS backend
   (`rustls` is generally easier to cross-compile for Android than
-  OpenSSL). Do **not** change `reqwest`'s features on this branch.
+  OpenSSL).
+- **Corrected:** an earlier version of this list said "do not change
+  `reqwest`'s features on this branch." Phase 3 found that turned out to
+  be necessary after all — `RequestBuilder::form` (every FreshRSS POST
+  needs it) sits behind `reqwest`'s own `form` feature, off by default.
+  `Cargo.toml`'s `freshrss = ["reqwest/form"]` forwards it through this
+  crate's own `freshrss` feature rather than turning it on
+  unconditionally, so a plain `cargo build` still resolves `reqwest`
+  identically to before (verified via `cargo tree -e features -i
+  reqwest`, both with and without `--features freshrss`) — this was a
+  real, approved exception to "no dependency feature changes," not an
+  unnoticed drift from the original plan.
 
 ---
 
