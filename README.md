@@ -56,9 +56,18 @@ moments.
 
 ### A persistent, always-visible legend
 No need to memorize what a key does or what a color means. The sidebar
-permanently displays the active keybinds and a color swatch next to each
-article state (unread, read, saved, skipped) — pulled live from your
-actual theme, so it never drifts out of sync with what you're seeing.
+permanently displays the active keybinds and each article state's icon
+(unread, new, read, saved, skipped) in that state's color — pulled live
+from your actual theme and icon mode, so it never drifts out of sync with
+what you're seeing.
+
+### Nerd Font icons, with plain fallbacks
+Every article row, sidebar topic, and status message gets an icon:
+unread/new/read/saved/skipped markers, a per-category icon for each topic
+(Linux, Rust, security, news, sports, ...), and refresh/error/offline
+notices. Three modes — Nerd Font, plain Unicode, or ASCII — switchable
+live with `i`. On first run tuxwire shows a test glyph and asks whether
+you can see it, falling back to Unicode if not.
 
 <p align="center">
   <img src="docs/screenshots/sidebar.png" alt="Sidebar showing Topics / Keys / Colors sections" width="400">
@@ -92,10 +101,14 @@ source link, save/note dates, and your note — into a single Markdown
 file. Configurable output location, useful for feeding notes straight
 into a blog post or personal wiki.
 
-### Catppuccin Macchiato theming, fully editable
-Dark, low-saturation, easy on the eyes by default — and every color is a
-line in `~/.config/tuxwire/theme.toml`, not hardcoded. Don't like a
-shade? Change the hex value and restart.
+### Eight built-in themes, plus your own colors
+Everforest (default), Dracula, Gruvbox, Catppuccin Mocha, Nord, Solarized
+Dark, Tokyo Night, and Catppuccin Macchiato (tuxwire's original palette).
+Press `t` to open the picker: the whole screen previews each theme live as
+you move, `Enter` keeps it, and the choice is remembered across restarts.
+Every theme is tested for readable text and clearly distinct article-state
+colors. Any color can still be overridden in `~/.config/tuxwire/theme.toml`,
+on top of whichever theme you pick.
 
 ### Cross-platform
 Runs anywhere Rust runs — tested on desktop Linux and on Android via
@@ -261,13 +274,15 @@ tuxwire
 | `/` | Search titles and notes in the current view |
 | `a` | Add a new source |
 | `E` | Export all saved articles to Markdown |
+| `i` | Cycle the icon mode (Nerd Font → Unicode → ASCII) |
+| `t` | Open the theme picker (`j`/`k` preview, `Enter` keep, `Esc` cancel) |
 | `q` | Quit |
 
 ---
 
 ## Configuration
 
-tuxwire reads three config files from `~/.config/tuxwire/`, generating
+tuxwire reads its config files from `~/.config/tuxwire/`, generating
 sensible defaults on first run if they don't exist yet.
 
 ### `sources.toml` — your feeds
@@ -288,16 +303,27 @@ topic = "linux"
 ### `theme.toml` — colors
 
 ```toml
-[theme]
-background   = "#24273a"
-accent_unread   = "#f5a97f"
-accent_read     = "#8bd5ca"
-accent_saved    = "#eed49f"
-accent_skipped  = "#c6a0f6"
+base = "Everforest"          # written for you by the `t` picker
+
+[theme]                      # optional: override any color, on top of `base`
+accent_unread = "#f5a97f"
 ```
 
-Ships with [Catppuccin Macchiato](https://github.com/catppuccin/catppuccin)
-by default. Change any value and restart — nothing is hardcoded.
+- `base` picks a built-in theme: `Everforest` (default), `Dracula`,
+  `Gruvbox`, `Catppuccin Mocha`, `Nord`, `Solarized Dark`, `Tokyo Night`,
+  or `Catppuccin Macchiato`. The picker rewrites only this line, so your
+  comments and overrides stay.
+- Anything in `[theme]` replaces that one color in *every* built-in. The
+  slots are `background`, `panel_border`, `text_primary`, `text_muted`,
+  `text_dim`, `accent_unread`, `accent_read`, `accent_skipped`,
+  `accent_saved`, `accent_breaking`, and `accent_selected`, each `"#rrggbb"`.
+- **Upgrading:** a `theme.toml` from before the picker (a full `[theme]`
+  table, no `base`) still works and looks exactly the same. Because it sets
+  all 11 colors, though, picking a theme won't visibly change anything; the
+  picker says so. Those 11 colors are exactly the `Catppuccin Macchiato`
+  built-in, so you can delete them and pick that theme instead.
+- Without a `theme.toml`, tuxwire now starts in **Everforest** (it used to
+  be Catppuccin Macchiato).
 
 ### `export.toml` — where exports go
 
@@ -308,6 +334,33 @@ path = "~/tuxwire-notes/"
 
 Change `path` to wherever you'd like your exported Markdown notes to
 land — a synced folder, a notes vault, anywhere you have write access.
+
+### `icons.toml` — icons
+
+```toml
+mode = "nerd"            # "nerd", "unicode", or "ascii"
+
+[categories]
+homelab = "tech"         # an icon name from the table...
+kernel = "\uF17C"        # ...or a single character / Nerd Font glyph
+```
+
+- **`mode = "nerd"` needs a Nerd Font *Mono* font** in your terminal, such
+  as "JetBrainsMono Nerd Font Mono". The Mono variants draw every icon
+  exactly one cell wide; the regular variants draw some icons wider, which
+  pushes tuxwire's borders and columns out of line. tuxwire can't ship a
+  font, so it asks on first run whether a test icon shows up, and
+  switches to `unicode` if it doesn't.
+- Press `i` to cycle modes; the change applies immediately and is saved
+  here (only the `mode` line is rewritten, so your comments stay).
+- `[categories]` gives any topic a custom icon. Topics without an entry
+  use a built-in icon if the name is a common one (linux, rust, security,
+  news, sports, tech, gaming, blog, science, programming, music, rss),
+  and a folder icon otherwise.
+- Icon names: `unread read starred skipped new refresh error offline
+  expanded collapsed theme swatch linux rust security news sports tech
+  gaming blog science code music feed category`. See `icons.toml.example`
+  for the full commented file.
 
 ---
 

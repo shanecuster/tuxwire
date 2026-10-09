@@ -254,7 +254,34 @@ dedicated CVE/security feed, KrebsOnSecurity).
 ### `theme.toml`
 
 All colors are config-driven — never hardcoded in the UI code — so any
-shade can be tweaked without touching Rust:
+shade can be tweaked without touching Rust.
+
+**Built-in themes + overrides (built).** `src/theme.rs` holds
+`BUILTIN_THEMES`, one table entry per theme: Everforest (default), then
+Dracula, Gruvbox, Catppuccin Mocha, Nord, Solarized Dark, Tokyo Night, and
+Catppuccin Macchiato. Each fills the same 11 slots below; no new slots were
+needed. `theme.toml` gains a root `base = "<name>"` (written by the `t`
+picker via `toml_edit`), and every `[theme]` key became optional: a set key
+overrides that slot on top of whichever base is selected. A full old-style
+file therefore still resolves to exactly its own colors. An unknown `base`
+is a load error listing the valid names.
+
+Adding a theme = one new `BuiltinTheme` entry. Tests then require, for every
+theme, WCAG contrast against `background` of ≥ 4.5 for `text_primary` and
+≥ 3.0 for `text_muted` and every accent, plus ΔE (CIE76) ≥ 20 between each
+pair of unread/read/skipped/saved/selected. Nord's `accent_read` uses
+nord14, not nord7, because nord7 vs nord8 (`accent_selected`) is ΔE ≈ 10.
+
+The default is defined in two places that tests keep in sync:
+`BUILTIN_THEMES[0]` (used when `theme.toml` has no `base`) and the
+`base = "..."` line in `theme.toml.example` (what a fresh install loads).
+
+The `t` picker previews live: moving the selection sets
+`ThemeSettings::base` and re-resolves the theme, so the whole screen
+repaints in it. `Enter` saves `base`, and `Esc` restores the original.
+
+The original palette, now the `Catppuccin Macchiato` built-in (an
+old-style `theme.toml` with exactly these lines resolves to it):
 
 ```toml
 [theme]
@@ -272,11 +299,42 @@ accent_breaking = "#ed8796"  # red
 accent_selected = "#8aadf4"  # blue
 ```
 
-**Palette: Catppuccin Macchiato** (dark only — no light theme). Chosen for
-being colorful without being chaotic; every hue in the palette is
-desaturated to sit together cleanly. Mocha and Frappé remain available as
-easy drop-in swaps (same accent hues, different base/text shades) since the
-theme loader reads from this file rather than anything compiled in.
+**Palette history:** Catppuccin Macchiato was the original (and only)
+palette, chosen for being colorful without being chaotic. It is now one of
+the eight built-ins, and Everforest is the default. All built-ins are dark.
+
+### `icons.toml` (built)
+
+Same idea as colors, applied to symbols: every icon is config-driven and
+never hard-coded in UI code. `src/icons/mod.rs` holds the one icon table,
+`Icon` name → (Nerd Font glyph, Unicode fallback, ASCII fallback). The UI
+asks an `IconSettings` for an icon by name. `src/icons/config.rs` reads and
+writes `~/.config/tuxwire/icons.toml`. Modeled on zerohour's
+`core/src/icons.rs`.
+
+- **Modes:** `nerd` (default), `unicode`, `ascii`. `i` cycles them live and
+  saves via `toml_edit`, which rewrites only the `mode` line.
+- **Nerd Font Mono only.** Every glyph in the table, in all three modes, is
+  exactly one terminal cell wide (a unit test checks this with ratatui's
+  own width measurement). Regular Nerd Fonts render many icons wider than
+  the one cell the terminal advances, which breaks ratatui's border and
+  column alignment; the Mono variants don't.
+- **Category icons:** built-in defaults for common topic names (with
+  aliases, e.g. `infosec` → security), a user `[categories]` table whose
+  values are an icon name or a single literal character, and a folder icon
+  for anything unknown. A literal Nerd glyph is skipped in Unicode/ASCII
+  mode, so it never shows as a box.
+- **First run:** no `icons.toml` means the check hasn't been answered. The
+  TUI opens with a popup showing a Nerd glyph and asking "Do you see an
+  icon here?" `y` keeps Nerd, `n` switches to Unicode, and either answer
+  writes the file. `Esc` defers the question to the next launch.
+- **"New" items:** an article inserted during this session (startup fetch
+  or `r`) that is still unread. Detected in `src/fetch_report.rs` by the
+  `articles` row count growing across `insert_article`, so `storage` is
+  unchanged.
+- **Status notices:** `r` and startup report new/failed/offline in a
+  one-shot footer message that clears on the next key. "Offline" means
+  every attempted source failed with a `reqwest` connect/timeout error.
 
 ---
 
@@ -343,7 +401,9 @@ tuxwire/
 │   ├── fetchers/        # one module per source type
 │   ├── storage/         # SQLite access + migrations
 │   ├── scoring.rs        # reserved for v2 skip-weighting (unused in v1)
-│   ├── theme.rs           # theme.toml loading
+│   ├── theme.rs           # built-in themes + theme.toml loading/saving
+│   ├── icons/             # the icon table + icons.toml loading
+│   ├── fetch_report.rs    # per-fetch new/failed/offline tally
 │   └── ui/                # ratatui views/widgets
 ├── migrations/
 │   └── 001_init.sql
@@ -353,6 +413,7 @@ tuxwire/
 ├── CHANGELOG.md            # git-commit / changelog style, matches blog aesthetic
 ├── sources.toml.example
 ├── theme.toml.example
+├── icons.toml.example
 └── Cargo.toml
 ```
 
