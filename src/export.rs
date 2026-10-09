@@ -78,15 +78,18 @@ impl ExportConfig {
             Ok(contents) => contents,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
                 if let Some(parent) = path.parent() {
-                    std::fs::create_dir_all(parent)
-                        .with_context(|| format!("failed to create config directory {}", parent.display()))?;
+                    std::fs::create_dir_all(parent).with_context(|| {
+                        format!("failed to create config directory {}", parent.display())
+                    })?;
                 }
-                std::fs::write(&path, DEFAULT_EXPORT_TOML)
-                    .with_context(|| format!("failed to write default export file to {}", path.display()))?;
+                std::fs::write(&path, DEFAULT_EXPORT_TOML).with_context(|| {
+                    format!("failed to write default export file to {}", path.display())
+                })?;
                 DEFAULT_EXPORT_TOML.to_string()
             }
             Err(err) => {
-                return Err(err).with_context(|| format!("failed to read export file {}", path.display()));
+                return Err(err)
+                    .with_context(|| format!("failed to read export file {}", path.display()));
             }
         };
 
@@ -94,8 +97,9 @@ impl ExportConfig {
             .with_context(|| format!("failed to parse export file {}", path.display()))?;
 
         let export_dir = expand_tilde(&raw.export.path)?;
-        std::fs::create_dir_all(&export_dir)
-            .with_context(|| format!("failed to create export directory {}", export_dir.display()))?;
+        std::fs::create_dir_all(&export_dir).with_context(|| {
+            format!("failed to create export directory {}", export_dir.display())
+        })?;
 
         Ok(ExportConfig { path: export_dir })
     }
@@ -110,14 +114,16 @@ impl ExportConfig {
 /// against tuxwire's current working directory).
 fn expand_tilde(raw: &str) -> anyhow::Result<PathBuf> {
     if let Some(rest) = raw.strip_prefix("~/") {
-        let home = std::env::var("HOME")
-            .context("HOME environment variable is not set -- can't expand '~' in export.toml's path")?;
+        let home = std::env::var("HOME").context(
+            "HOME environment variable is not set -- can't expand '~' in export.toml's path",
+        )?;
         return Ok(PathBuf::from(home).join(rest));
     }
 
     if raw == "~" {
-        let home = std::env::var("HOME")
-            .context("HOME environment variable is not set -- can't expand '~' in export.toml's path")?;
+        let home = std::env::var("HOME").context(
+            "HOME environment variable is not set -- can't expand '~' in export.toml's path",
+        )?;
         return Ok(PathBuf::from(home));
     }
 
@@ -131,7 +137,9 @@ fn expand_tilde(raw: &str) -> anyhow::Result<PathBuf> {
 /// `tuxwire` config directory those two already agree on.
 fn export_config_path() -> anyhow::Result<PathBuf> {
     if let Ok(xdg_config_home) = std::env::var("XDG_CONFIG_HOME") {
-        return Ok(PathBuf::from(xdg_config_home).join("tuxwire").join("export.toml"));
+        return Ok(PathBuf::from(xdg_config_home)
+            .join("tuxwire")
+            .join("export.toml"));
     }
 
     let home = std::env::var("HOME")
@@ -178,15 +186,26 @@ pub fn format_article_markdown(article: &Article) -> String {
 
     let noted_day = article.noted_at.map(|d| d.format("%Y-%m-%d").to_string());
 
-    let mut header = format!("Source: [{}]({}) — saved {saved_day}", article.source, article.url);
+    let mut header = format!(
+        "Source: [{}]({}) — saved {saved_day}",
+        article.source, article.url
+    );
     if let Some(noted_day) = noted_day.filter(|day| *day != saved_day) {
         header.push_str(&format!(", noted {noted_day}"));
     }
 
     let mut out = format!("## {}\n{header}\n", article.title);
 
-    if let Some(note) = article.note.as_deref().filter(|note| !note.trim().is_empty()) {
-        let quoted: String = note.lines().map(|line| format!("> {line}")).collect::<Vec<_>>().join("\n");
+    if let Some(note) = article
+        .note
+        .as_deref()
+        .filter(|note| !note.trim().is_empty())
+    {
+        let quoted: String = note
+            .lines()
+            .map(|line| format!("> {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
         out.push('\n');
         out.push_str(&quoted);
         out.push('\n');
@@ -210,11 +229,19 @@ pub fn format_article_markdown(article: &Article) -> String {
 /// since the last export" and can never drift out of sync with an
 /// article being un-saved, re-noted, or removed in the meantime the way
 /// an append-only log could.
-pub fn export_saved_articles(config: &ExportConfig, articles: &[Article]) -> anyhow::Result<PathBuf> {
-    let combined = articles.iter().map(format_article_markdown).collect::<Vec<_>>().join("\n---\n");
+pub fn export_saved_articles(
+    config: &ExportConfig,
+    articles: &[Article],
+) -> anyhow::Result<PathBuf> {
+    let combined = articles
+        .iter()
+        .map(format_article_markdown)
+        .collect::<Vec<_>>()
+        .join("\n---\n");
 
     let path = config.path.join(EXPORT_FILENAME);
-    std::fs::write(&path, combined).with_context(|| format!("failed to write {}", path.display()))?;
+    std::fs::write(&path, combined)
+        .with_context(|| format!("failed to write {}", path.display()))?;
 
     Ok(path)
 }
@@ -324,7 +351,11 @@ mod tests {
         let mut second = saved_article();
         second.title = "Second article".to_string();
 
-        let expected = format!("{}\n---\n{}", format_article_markdown(&first), format_article_markdown(&second));
+        let expected = format!(
+            "{}\n---\n{}",
+            format_article_markdown(&first),
+            format_article_markdown(&second)
+        );
 
         let path = export_saved_articles(&config, &[first, second]).unwrap();
         assert_eq!(path, dir.join(EXPORT_FILENAME));
@@ -382,7 +413,8 @@ mod tests {
         static COUNTER: AtomicU32 = AtomicU32::new(0);
 
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!("tuxwire-export-test-{}-{n}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("tuxwire-export-test-{}-{n}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }

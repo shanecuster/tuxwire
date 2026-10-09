@@ -17,10 +17,12 @@
 //! binary). A `mod foo;` line does two things: it tells the compiler
 //! "look for `foo.rs` or `foo/mod.rs` and include it," and it creates the
 //! `foo::` path other code uses to reach items inside it. Order doesn't
-//! matter here — these five declarations just make each corresponding
+//! matter here — these declarations just make each corresponding
 //! file part of the compiled program.
 mod export;
+mod fetch_report;
 mod fetchers;
+mod icons;
 mod models;
 mod scoring;
 mod storage;
@@ -35,9 +37,10 @@ mod ui;
 // itself. It's a deliberate design choice — it means a method call can
 // never silently come from some trait you didn't know was in play; every
 // trait providing methods you use has to be named explicitly.
+use fetch_report::FetchReport;
 use fetchers::Fetcher;
 use storage::Storage;
-use theme::Theme;
+use theme::ThemeSettings;
 
 /// `#[tokio::main]` is a *macro* that rewrites this function at compile
 /// time. Rust's real `fn main()` can't be `async` — something has to own
@@ -65,8 +68,15 @@ async fn main() -> anyhow::Result<()> {
     let sources = fetchers::configured_sources()?;
     let mut articles = Vec::new();
 
+    // Tallies this startup fetch (sources tried/failed/unreachable, and
+    // later which articles were new) for the TUI's first footer message
+    // and its "new" article markers. See `fetch_report.rs`. `mut` because
+    // the loops below update it.
+    let mut report = FetchReport::default();
+
     for source in &sources {
         println!("Fetching {}...", source.name());
+        report.attempted += 1;
 
         // Unlike the config-load `?` above, a single source failing to
         // fetch (a dead network, a 404, or — for now — any `type =
@@ -78,7 +88,13 @@ async fn main() -> anyhow::Result<()> {
         // source rather than aborting the whole fetch.
         match source.fetch().await {
             Ok(fetched) => articles.extend(fetched),
-            Err(err) => eprintln!("  skipped {}: {err:#}", source.name()),
+            Err(err) => {
+                eprintln!("  skipped {}: {err:#}", source.name());
+                // Counted too, so the TUI can say "offline" or
+                // "N sources failed" instead of the failure only
+                // appearing in output the alternate screen hides.
+                report.record_failure(&err);
+            }
         }
     }
 
@@ -112,8 +128,10 @@ async fn main() -> anyhow::Result<()> {
     // `storage/mod.rs`), so running this binary again against the same
     // feed re-inserts nothing -- every article that was already on disk
     // just gets its existing row's ID handed back instead of a new row.
+    // `record_insert` does that same insert and also notes which IDs were
+    // genuinely new (see its doc comment for how).
     for article in &articles {
-        storage.insert_article(article)?;
+        report.record_insert(&storage, article)?;
     }
 
     println!(
@@ -121,18 +139,34 @@ async fn main() -> anyhow::Result<()> {
         storage.article_count()?
     );
 
-    // Fourth milestone: the TUI shell itself. `Theme::load` reads
-    // `~/.config/tuxwire/theme.toml` (falling back to the bundled
-    // Catppuccin Macchiato default if that file doesn't exist yet -- see
-    // `theme.rs`), and `ui::run` takes it from there: raw mode, the
+    // Fourth milestone: the TUI shell itself. `ThemeSettings::load` reads
+    // `~/.config/tuxwire/theme.toml` (the selected built-in theme plus any
+    // color overrides), falling back to the bundled default, Everforest,
+    // if that file doesn't exist yet -- see `theme.rs`. `ui::run` takes it
+    // from there: raw mode, the
     // alternate screen, and the two-pane layout + footer, all restored
     // back to a normal terminal the moment this returns. Everything
     // printed above (the fetch log, the storage summary) will already have
     // scrolled off by the time this happens, since entering the alternate
     // screen swaps to a blank buffer -- that's expected, not a bug losing
     // that output.
-    let theme = Theme::load()?;
-    ui::run(&storage, &theme, &sources)?;
+    let themes = ThemeSettings::load()?;
+
+    // Icon settings from `~/.config/tuxwire/icons.toml`, or the bundled
+    // defaults (Nerd mode) when that file doesn't exist yet. A missing
+    // file also means the first-run "Do you see an icon here?" check
+    // hasn't been answered, so `first_run` asks the TUI to open with it.
+    // `?` for the same reason as `ThemeSettings::load`: a malformed `icons.toml`
+    // should be reported, not silently ignored.
+    let icons = icons::config::load()?;
+    let session = ui::SessionStart {
+        themes,
+        icons: icons.settings,
+        show_icon_check: icons.first_run,
+        report,
+    };
+
+    ui::run(&storage, &sources, session)?;
 
     Ok(())
 }

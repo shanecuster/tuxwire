@@ -57,19 +57,69 @@
 //! while typing; `Enter` commits the query and returns to ordinary
 //! navigation over the (still-filtered) results, `Esc` drops it and
 //! restores whichever view's own unfiltered list was showing.
+//!
+//! Themes (`crate::theme`): `draw_until_quit` owns the `ThemeSettings`
+//! (selected built-in + `theme.toml` overrides) and the `Theme` they resolve
+//! to. Every frame borrows that `Theme`, so nothing here hard-codes a color.
+//! `t` opens `Mode::ThemePicker`, which previews by re-resolving the theme
+//! as the selection moves; `Enter` saves `base` to `theme.toml`, and `Esc`
+//! restores the original.
+//!
+//! Icons (`crate::icons`): every symbol this module draws comes from an
+//! `IconSettings` by name (`Icon::Unread`, `Icon::Collapsed`, a topic's
+//! category icon, ...), never a hard-coded glyph. Article rows get a state
+//! icon (`article_state_icon`), topic rows get a category icon, the
+//! "Colors" legend shows each state's icon, and refresh/error/offline/new
+//! results appear as a one-shot footer `notice` (`fetch_notice`). `i`
+//! cycles the icon mode live, and the first launch opens on
+//! `Mode::IconCheck` ("Do you see an icon here?").
 
 use crate::export::{self, ExportConfig};
+use crate::fetch_report::FetchReport;
 use crate::fetchers::{self, ConfiguredSource, Fetcher};
+use crate::icons::{self, Icon, IconMode, IconSettings};
 use crate::models::Article;
 use crate::storage::Storage;
-use crate::theme::Theme;
+use crate::theme::{self, BUILTIN_THEMES, Theme, ThemeSettings, picker_order};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
-use std::collections::{HashMap, HashSet};
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
+use std::collections::{HashMap, HashSet};
+
+/// Everything else `main.rs` hands `ui::run` from startup: the theme and
+/// icon settings, whether to open with the first-run icon check, and what
+/// the startup fetch found. Bundled into one struct so `ui::run` gains one
+/// parameter for all of it instead of four.
+pub struct SessionStart {
+    /// The selected built-in theme plus the user's color overrides, from
+    /// `theme.toml`. Moved into `draw_until_quit`, which owns it so the
+    /// `t` theme picker can switch the base theme in place.
+    pub themes: ThemeSettings,
+    /// The icon mode and category icons from `icons.toml` (or the
+    /// defaults). Moved into `draw_until_quit`, which owns it from then
+    /// on so the `i` key can change the mode in place.
+    pub icons: IconSettings,
+    /// `true` when `icons.toml` doesn't exist yet: open on
+    /// `Mode::IconCheck` ("Do you see an icon here?") instead of
+    /// `Mode::Normal`.
+    pub show_icon_check: bool,
+    /// The startup fetch's results: which articles are new this session
+    /// (they get `Icon::New` while unread), plus the failure counts for
+    /// the first footer message (see `fetch_notice`).
+    pub report: FetchReport,
+}
+
+/// The footer hint line shown while the `t` theme picker
+/// (`Mode::ThemePicker`) is open.
+const THEME_PICKER_HINTS: &str = "j/k or ↑/↓ preview · Enter keep · Esc cancel";
+
+/// The footer hint line shown while the first-run icon check
+/// (`Mode::IconCheck`) is open.
+const ICON_CHECK_HINTS: &str =
+    "y yes, use Nerd Font icons · n no, use plain symbols · Esc ask next time";
 
 /// Keybind hints for the footer, for the normal (not editing-a-note,
 /// not adding-a-source) state while `View::Topic` is showing -- see
@@ -178,7 +228,11 @@ const NOTE_PREVIEW_CHARS: usize = 45;
 /// combined file from every currently-saved article, not something
 /// scoped to a single row), even though it only actually does anything
 /// while `View::Saved` is showing.
-const KEY_HINTS: [(&str, &str); 11] = [
+///
+/// `i` (cycle the icon mode: Nerd → Unicode → ASCII) and `t` (the theme
+/// picker) are listed here too, since they change the whole app's look
+/// rather than one row.
+const KEY_HINTS: [(&str, &str); 13] = [
     ("s", "save"),
     ("x", "close"),
     ("n", "note"),
@@ -188,9 +242,17 @@ const KEY_HINTS: [(&str, &str); 11] = [
     ("r", "refresh"),
     ("a", "add source"),
     ("E", "export all saved"),
+    ("i", "icon mode"),
+    ("t", "theme"),
     ("→/l", "expand topic"),
     ("←/h", "collapse topic"),
 ];
+
+/// How many rows the sidebar's "Colors" legend has (see
+/// `render_colors_section`). A named constant because two places must
+/// agree on it: the legend's array length and the section's height in
+/// `render_sidebar`.
+const LEGEND_ROWS: usize = 5;
 
 /// The `tuxwire` wordmark, straight out of `figlet -f standard tuxwire` --
 /// see `render_banner` and the "Banner bar" bullet in `docs/ARCHITECTURE.md`'s
@@ -249,7 +311,30 @@ enum View {
 /// fields happening to be kept in sync by convention.
 enum Mode {
     Normal,
-    EditingNote { text: String },
+    EditingNote {
+        text: String,
+    },
+    /// The first-run icon check: a popup showing one Nerd Font glyph and
+    /// asking "Do you see an icon here?". `y` keeps Nerd mode, `n`
+    /// switches to Unicode, and either answer is saved to `icons.toml` so
+    /// the check never appears again. `Esc` closes it without saving, so it
+    /// comes back next launch. Only shown when `icons.toml` doesn't exist
+    /// yet (see `SessionStart::show_icon_check`).
+    IconCheck,
+    /// The `t` theme picker is open. `selected` is the highlighted *row*,
+    /// a position in `theme::picker_order()` (alphabetical), not a
+    /// `BUILTIN_THEMES` index. The theme on that row is the one being
+    /// previewed: the whole screen is already drawn in it, because moving
+    /// the selection re-resolves `current_theme` right away. `original` is
+    /// the `BUILTIN_THEMES` index to go back to on `Esc`.
+    /// `overrides` is how many `theme.toml` `[theme]` slots apply on top of
+    /// every built-in, captured when the picker opens so the popup can say
+    /// so (see `render_theme_picker_popup`).
+    ThemePicker {
+        selected: usize,
+        original: usize,
+        overrides: usize,
+    },
     /// The `a` "add a new source" flow is open -- see `AddSourceStep` for
     /// which of its two steps is currently showing. Wrapping the step in
     /// its own type (rather than adding more `Mode` variants directly, one
@@ -273,7 +358,10 @@ enum Mode {
     /// with different heading text" -- a `&'static str` rather than
     /// `String` since every title used is a fixed literal chosen at the
     /// call site, never built at runtime.
-    Error { title: &'static str, message: String },
+    Error {
+        title: &'static str,
+        message: String,
+    },
 
     /// The `/` search input is open -- `text` is the live query buffer,
     /// re-run against `Storage::search_articles` on every keystroke so the
@@ -289,7 +377,9 @@ enum Mode {
     /// `search: Option<String>`, set once `Enter` confirms this): that's
     /// what stays active while browsing the filtered results afterward,
     /// this is only the moment of actively typing the query.
-    Searching { text: String },
+    Searching {
+        text: String,
+    },
 }
 
 /// Which step of the `a` add-source flow is currently showing (`ARCHITECTURE.md`
@@ -343,10 +433,12 @@ enum ConfirmField {
 /// `draw_until_quit`, since switching topics has to re-query `storage` for
 /// the newly selected topic's articles.
 ///
-/// `storage: &Storage` and `theme: &Theme` are both borrowed rather than
-/// owned: this function only ever *reads* through them, and taking
-/// ownership would force whoever calls `ui::run` to give up their own
-/// `Storage`/`Theme` (or clone them) just to display something once.
+/// `storage: &Storage` is borrowed rather than owned: this function only
+/// ever *reads* through it, and taking ownership would force whoever calls
+/// `ui::run` to give up their own `Storage` just to display something.
+///
+/// `session` (see `SessionStart`) is moved in, not borrowed, because
+/// `draw_until_quit` changes the theme and icon settings it carries.
 ///
 /// `sources: &[ConfiguredSource]` is `main`'s own already-loaded,
 /// already-fetched-from list (the same one it built via
@@ -354,7 +446,11 @@ enum ConfirmField {
 /// in and grouped by topic once, right here, so the sidebar's expandable
 /// topic tree (see `SidebarRow`/`sidebar_rows`) can list each topic's
 /// sources with no new `sources.toml` read and no new database query.
-pub fn run(storage: &Storage, theme: &Theme, sources: &[ConfiguredSource]) -> anyhow::Result<()> {
+pub fn run(
+    storage: &Storage,
+    sources: &[ConfiguredSource],
+    session: SessionStart,
+) -> anyhow::Result<()> {
     // `mut` (and passed to `draw_until_quit` as `&mut` below) because the
     // `a` add-source flow can grow this list: a brand-new topic typed on
     // the confirm screen needs to show up in the sidebar immediately (per
@@ -372,7 +468,9 @@ pub fn run(storage: &Storage, theme: &Theme, sources: &[ConfiguredSource]) -> an
     // exactly the guarantee this function needs: if `draw_until_quit`
     // below hits an error partway through, the user's shell must not be
     // left in raw mode / the alternate screen.
-    ratatui::run(|terminal| draw_until_quit(terminal, theme, storage, &mut topics, &sources_by_topic))
+    ratatui::run(|terminal| {
+        draw_until_quit(terminal, storage, &mut topics, &sources_by_topic, session)
+    })
 }
 
 /// Groups every configured source's name under its one topic
@@ -385,7 +483,10 @@ pub fn run(storage: &Storage, theme: &Theme, sources: &[ConfiguredSource]) -> an
 fn group_sources_by_topic(sources: &[ConfiguredSource]) -> HashMap<String, Vec<String>> {
     let mut grouped: HashMap<String, Vec<String>> = HashMap::new();
     for source in sources {
-        grouped.entry(source.topic().to_string()).or_default().push(source.name().to_string());
+        grouped
+            .entry(source.topic().to_string())
+            .or_default()
+            .push(source.name().to_string());
     }
     grouped
 }
@@ -415,10 +516,10 @@ fn group_sources_by_topic(sources: &[ConfiguredSource]) -> HashMap<String, Vec<S
 /// `topics` gets reordered.
 fn draw_until_quit(
     terminal: &mut ratatui::DefaultTerminal,
-    theme: &Theme,
     storage: &Storage,
     topics: &mut Vec<String>,
     sources_by_topic: &HashMap<String, Vec<String>>,
+    session: SessionStart,
 ) -> anyhow::Result<()> {
     let mut topic_index: usize = 0;
     let mut article_index: usize = 0;
@@ -426,8 +527,42 @@ fn draw_until_quit(
         Some(topic) => storage.articles_by_topic(topic)?,
         None => Vec::new(),
     };
-    let mut mode = Mode::Normal;
+    // Open on the first-run icon check if `icons.toml` doesn't exist yet,
+    // otherwise straight into ordinary browsing.
+    let mut mode = if session.show_icon_check {
+        Mode::IconCheck
+    } else {
+        Mode::Normal
+    };
     let mut view = View::Topic;
+
+    // The icon settings, owned here and `mut` so the `i` key and the
+    // first-run check can change `icons.mode` in place. The very next
+    // frame then draws with the new mode, so a change applies immediately.
+    let mut icons = session.icons;
+
+    // The theme settings (selected built-in + overrides), and the colors
+    // they currently resolve to. Both `mut` so the `t` picker can change the
+    // base and re-resolve, which repaints the whole screen on the next frame
+    // (the picker's live preview). `current_theme` is cached here rather
+    // than calling `themes.resolve()` every frame, since it only changes
+    // when the picker moves.
+    let mut themes = session.themes;
+    let mut current_theme = themes.resolve();
+
+    // A one-shot footer message (refresh results, icon mode changes) that
+    // replaces the keybind hints until the next keypress clears it, so it
+    // never hides them for long. Starts with the startup fetch's own
+    // summary when there's something worth saying (see `fetch_notice`).
+    let mut notice: Option<String> = fetch_notice(&icons, &session.report, false);
+
+    // IDs of articles that arrived this session (startup fetch, plus every
+    // `r` refresh), drawn with `Icon::New` while still unread. Grows as
+    // refreshes add more; never shrinks, since "new this session" stays
+    // true until tuxwire quits. Moved out of `session.report` (no copy)
+    // because the startup report isn't needed again after `notice` above
+    // was built from it.
+    let mut new_article_ids = session.report.new_article_ids;
     let mut expanded_topics: HashSet<String> = HashSet::new();
     let mut selected_source: Option<String> = None;
 
@@ -443,6 +578,12 @@ fn draw_until_quit(
     let mut search: Option<String> = None;
 
     loop {
+        // A short-lived borrow of this frame's colors, named `theme` so the
+        // `render(frame, theme, ...)` call below reads as it always has.
+        // Re-taken at the top of each pass, so after the picker assigns a
+        // new `current_theme` the next frame borrows that one.
+        let theme = &current_theme;
+
         // The sidebar only ever reflects the current *topic* selection,
         // even while `view` is `View::Saved` -- there's no per-row
         // selection in the saved view that maps onto it, so leaving this
@@ -460,6 +601,8 @@ fn draw_until_quit(
             render(
                 frame,
                 theme,
+                &icons,
+                &new_article_ids,
                 topics.as_slice(),
                 sources_by_topic,
                 &expanded_topics,
@@ -470,6 +613,7 @@ fn draw_until_quit(
                 &mode,
                 view,
                 search.as_deref(),
+                notice.as_deref(),
             )
         })?;
 
@@ -484,6 +628,102 @@ fn draw_until_quit(
             continue;
         };
         if key.kind != KeyEventKind::Press {
+            continue;
+        }
+
+        // Any keypress clears the previous one-shot notice. It has been on
+        // screen for at least one frame, and whatever this key does may set
+        // a fresh one below.
+        notice = None;
+
+        // While the theme picker is open, every keypress belongs to it, the
+        // same isolation as the other popups. Moving the selection changes
+        // `themes.base` and re-resolves `current_theme` immediately, which is
+        // the live preview: the next frame paints the whole app in that
+        // theme. `if let ... = mode` copies the three `usize` fields out
+        // (they're `Copy`), so `mode` itself is free to be reassigned below.
+        if let Mode::ThemePicker {
+            selected,
+            original,
+            overrides,
+        } = mode
+        {
+            // The rows in display order (alphabetical), as `BUILTIN_THEMES`
+            // indices. `selected` is a position in this list.
+            let order = picker_order();
+            let count = order.len();
+            match key.code {
+                // Up/down wrap around the list. Adding `count - 1` and then
+                // taking `% count` is "minus one, wrapping" without ever
+                // going below zero, which a `usize` can't represent.
+                KeyCode::Up | KeyCode::Char('k') | KeyCode::Down | KeyCode::Char('j') => {
+                    let next = if matches!(key.code, KeyCode::Up | KeyCode::Char('k')) {
+                        (selected + count - 1) % count
+                    } else {
+                        (selected + 1) % count
+                    };
+                    // Row → theme: the theme shown on row `next`.
+                    themes.base = order[next];
+                    current_theme = themes.resolve();
+                    mode = Mode::ThemePicker {
+                        selected: next,
+                        original,
+                        overrides,
+                    };
+                }
+                // `Enter` keeps the previewed theme and saves it as `base`
+                // in `theme.toml`. Even if saving fails, the theme stays
+                // for this session, and the notice says so.
+                KeyCode::Enter => {
+                    notice = Some(match theme::save_base(themes.base_name()) {
+                        Ok(()) => format!(
+                            "{} Theme: {} (press t to change)",
+                            icons.glyph(Icon::Theme),
+                            themes.base_name()
+                        ),
+                        Err(err) => format!(
+                            "{} Theme is {} for now, but saving theme.toml failed: {err:#}",
+                            icons.glyph(Icon::Error),
+                            themes.base_name()
+                        ),
+                    });
+                    mode = Mode::Normal;
+                }
+                // `Esc` (or `q`, since quitting from inside a popup would be
+                // surprising) puts back the theme that was active when the
+                // picker opened, and saves nothing.
+                KeyCode::Esc | KeyCode::Char('q') => {
+                    themes.base = original;
+                    current_theme = themes.resolve();
+                    mode = Mode::Normal;
+                }
+                _ => {}
+            }
+            continue;
+        }
+
+        // While the first-run icon check is open, every keypress belongs to
+        // it, the same isolation as the popups below. Checked first because
+        // it's the first thing a new user sees.
+        if matches!(mode, Mode::IconCheck) {
+            // `Some(mode)` for an answer, `None` for "not answered yet".
+            let answer = match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => Some(IconMode::Nerd),
+                KeyCode::Char('n') | KeyCode::Char('N') => Some(IconMode::Unicode),
+                // `Esc` closes the popup without writing `icons.toml`, so
+                // the check is asked again next launch.
+                KeyCode::Esc => {
+                    mode = Mode::Normal;
+                    None
+                }
+                // Anything else is ignored; the popup stays open.
+                _ => None,
+            };
+            if let Some(answer) = answer {
+                icons.mode = answer;
+                mode = Mode::Normal;
+                notice = Some(save_icon_mode_notice(&icons));
+            }
             continue;
         }
 
@@ -574,7 +814,13 @@ fn draw_until_quit(
                 KeyCode::Esc => {
                     search = None;
                     mode = Mode::Normal;
-                    articles = articles_for_view(storage, view, topics, topic_index, selected_source.as_deref())?;
+                    articles = articles_for_view(
+                        storage,
+                        view,
+                        topics,
+                        topic_index,
+                        selected_source.as_deref(),
+                    )?;
                     article_index = 0;
                 }
 
@@ -589,7 +835,13 @@ fn draw_until_quit(
                     let trimmed = text.trim();
                     if trimmed.is_empty() {
                         search = None;
-                        articles = articles_for_view(storage, view, topics, topic_index, selected_source.as_deref())?;
+                        articles = articles_for_view(
+                            storage,
+                            view,
+                            topics,
+                            topic_index,
+                            selected_source.as_deref(),
+                        )?;
                     } else {
                         search = Some(trimmed.to_string());
                         articles = storage.search_articles(trimmed)?;
@@ -667,8 +919,11 @@ fn draw_until_quit(
                         &mut topic_index,
                         &mut selected_source,
                     );
-                    articles =
-                        load_articles_for_selection(storage, &topics[topic_index], selected_source.as_deref())?;
+                    articles = load_articles_for_selection(
+                        storage,
+                        &topics[topic_index],
+                        selected_source.as_deref(),
+                    )?;
                     article_index = 0;
                 }
                 KeyCode::Down if view == View::Topic && !topics.is_empty() => {
@@ -680,8 +935,11 @@ fn draw_until_quit(
                         &mut topic_index,
                         &mut selected_source,
                     );
-                    articles =
-                        load_articles_for_selection(storage, &topics[topic_index], selected_source.as_deref())?;
+                    articles = load_articles_for_selection(
+                        storage,
+                        &topics[topic_index],
+                        selected_source.as_deref(),
+                    )?;
                     article_index = 0;
                 }
 
@@ -704,7 +962,9 @@ fn draw_until_quit(
                     if view == View::Topic && selected_source.is_none() && !topics.is_empty() =>
                 {
                     if let Some(topic) = topics.get(topic_index)
-                        && sources_by_topic.get(topic).is_some_and(|sources| !sources.is_empty())
+                        && sources_by_topic
+                            .get(topic)
+                            .is_some_and(|sources| !sources.is_empty())
                     {
                         expanded_topics.insert(topic.clone());
                     }
@@ -723,7 +983,8 @@ fn draw_until_quit(
                         expanded_topics.remove(topic);
                     }
                     if selected_source.take().is_some() {
-                        articles = load_articles_for_selection(storage, &topics[topic_index], None)?;
+                        articles =
+                            load_articles_for_selection(storage, &topics[topic_index], None)?;
                         article_index = 0;
                     }
                 }
@@ -888,8 +1149,18 @@ fn draw_until_quit(
                 // swap the saved view out for a single topic's list without
                 // actually leaving `View::Saved`.
                 KeyCode::Char('r') if view == View::Topic && !topics.is_empty() => {
-                    articles = refresh_topic(storage, &topics[topic_index], selected_source.as_deref())?;
+                    // `refresh_topic` returns two things as a tuple, and
+                    // `let (a, b) = ...` unpacks it into two variables.
+                    let (refreshed, report) =
+                        refresh_topic(storage, &topics[topic_index], selected_source.as_deref())?;
+                    articles = refreshed;
                     article_index = article_index.min(articles.len().saturating_sub(1));
+                    // Remember this refresh's new articles for the
+                    // `Icon::New` marker. `extend` adds every item from
+                    // another collection; `.iter().copied()` reads the
+                    // `i64`s out of `report` without moving the set.
+                    new_article_ids.extend(report.new_article_ids.iter().copied());
+                    notice = fetch_notice(&icons, &report, true);
                 }
 
                 // `S` toggles `View::Saved` on/off: pressing it while
@@ -918,7 +1189,11 @@ fn draw_until_quit(
                 // filtering it," so `/` has to be pressed again from
                 // scratch in the new view if that's still wanted.
                 KeyCode::Char('S') => {
-                    view = if view == View::Saved { View::Topic } else { View::Saved };
+                    view = if view == View::Saved {
+                        View::Topic
+                    } else {
+                        View::Saved
+                    };
                     selected_source = None;
                     search = None;
                     articles = articles_for_view(storage, view, topics, topic_index, None)?;
@@ -942,7 +1217,11 @@ fn draw_until_quit(
                 // -- see `S`'s own comment just above, which applies
                 // identically to this arm.
                 KeyCode::Char('y') => {
-                    view = if view == View::History { View::Topic } else { View::History };
+                    view = if view == View::History {
+                        View::Topic
+                    } else {
+                        View::History
+                    };
                     selected_source = None;
                     search = None;
                     articles = articles_for_view(storage, view, topics, topic_index, None)?;
@@ -960,7 +1239,10 @@ fn draw_until_quit(
                 // ...` guard) since adding a source has nothing to do with
                 // which view happens to be showing.
                 KeyCode::Char('a') => {
-                    mode = Mode::AddSource(AddSourceStep::Url { text: String::new(), error: None });
+                    mode = Mode::AddSource(AddSourceStep::Url {
+                        text: String::new(),
+                        error: None,
+                    });
                 }
 
                 // `/` opens the search input (switches `mode` to
@@ -977,6 +1259,33 @@ fn draw_until_quit(
                 KeyCode::Char('/') => {
                     mode = Mode::Searching {
                         text: search.clone().unwrap_or_default(),
+                    };
+                }
+
+                // `i` cycles the icon mode (Nerd → Unicode → ASCII → Nerd).
+                // Changing `icons.mode` here is all it takes for the next
+                // frame (drawn at the top of this loop) to use the new
+                // glyphs, so the change shows immediately. It's also saved
+                // to `icons.toml` so it sticks across restarts.
+                KeyCode::Char('i') => {
+                    icons.mode = icons.mode.next();
+                    notice = Some(save_icon_mode_notice(&icons));
+                }
+
+                // `t` opens the theme picker with the current theme's row
+                // highlighted. `selected` is that theme's position in the
+                // alphabetical `picker_order()`, found with `.position()`
+                // (`unwrap_or(0)` is unreachable in practice, since every
+                // theme is in the order). `original` is the theme itself,
+                // so `Esc` with no movement changes nothing.
+                KeyCode::Char('t') => {
+                    mode = Mode::ThemePicker {
+                        selected: picker_order()
+                            .iter()
+                            .position(|&index| index == themes.base)
+                            .unwrap_or(0),
+                        original: themes.base,
+                        overrides: themes.override_count(),
                     };
                 }
 
@@ -1005,7 +1314,10 @@ fn draw_until_quit(
                     }) {
                         Ok((count, path)) => Mode::Error {
                             title: "Export",
-                            message: format!("Exported {count} saved article(s) to {}", path.display()),
+                            message: format!(
+                                "Exported {count} saved article(s) to {}",
+                                path.display()
+                            ),
                         },
                         Err(err) => Mode::Error {
                             title: "Error",
@@ -1163,10 +1475,12 @@ fn open_in_browser(url: &str) -> bool {
             .is_ok()
     };
 
-    if let Ok(browser) = std::env::var("BROWSER") {
-        if spawn(&browser) {
-            return true;
-        }
+    // A `let`-chain (`if let ... && ...`): only runs the body when
+    // `$BROWSER` is set *and* spawning it succeeded.
+    if let Ok(browser) = std::env::var("BROWSER")
+        && spawn(&browser)
+    {
+        return true;
     }
 
     spawn("xdg-open")
@@ -1193,8 +1507,22 @@ fn open_in_browser(url: &str) -> bool {
 /// while this one fetch is in flight. This only works because
 /// `#[tokio::main]`'s default multi-threaded runtime has more than one
 /// worker thread to hand off to.
-fn refresh_topic(storage: &Storage, topic: &str, source: Option<&str>) -> anyhow::Result<Vec<Article>> {
-    for configured_source in fetchers::configured_sources()?.into_iter().filter(|source| source.topic() == topic) {
+///
+/// Also returns a `FetchReport` for this refresh (sources tried and failed,
+/// and which articles were new), which the `r` arm turns into a footer
+/// message with `fetch_notice` and uses for the `Icon::New` markers.
+fn refresh_topic(
+    storage: &Storage,
+    topic: &str,
+    source: Option<&str>,
+) -> anyhow::Result<(Vec<Article>, FetchReport)> {
+    let mut report = FetchReport::default();
+
+    for configured_source in fetchers::configured_sources()?
+        .into_iter()
+        .filter(|source| source.topic() == topic)
+    {
+        report.attempted += 1;
         let fetch_result = tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(configured_source.fetch())
         });
@@ -1203,25 +1531,98 @@ fn refresh_topic(storage: &Storage, topic: &str, source: Option<&str>) -> anyhow
         // failing (a dead feed, or a `type = "reddit"` source that isn't
         // implemented yet) must not make `r` fail to refresh every *other*
         // source filed under this topic. `eprintln!` rather than `?`
-        // records the failure without aborting this loop -- there's no
-        // status line yet to surface it inside the TUI itself (see
-        // ARCHITECTURE.md's footer spec), so this is only visible if
-        // stderr is redirected somewhere, but it's still strictly better
-        // than losing the rest of this topic's refresh over it.
+        // records the failure without aborting this loop. The full error
+        // text is only visible if stderr is redirected somewhere, but
+        // `report.record_failure` also counts it, so the footer can say
+        // "N of M sources failed" (or "offline") inside the TUI.
         let fetched = match fetch_result {
             Ok(fetched) => fetched,
             Err(err) => {
                 eprintln!("skipped {}: {err:#}", configured_source.name());
+                report.record_failure(&err);
                 continue;
             }
         };
 
+        // Same insert as before, now also noting which articles were new.
         for article in &fetched {
-            storage.insert_article(article)?;
+            report.record_insert(storage, article)?;
         }
     }
 
-    load_articles_for_selection(storage, topic, source)
+    Ok((load_articles_for_selection(storage, topic, source)?, report))
+}
+
+/// The one-shot footer message summarizing a fetch round, with an icon in
+/// front, or `None` when there's nothing worth interrupting the keybind
+/// hints for.
+///
+/// `after_refresh` is `true` for an explicit `r` press, which always gets
+/// an answer (even "up to date"), and `false` for the startup fetch, which
+/// only speaks up when something is new or wrong.
+///
+/// Checked in order, first match wins:
+/// - offline (every source unreachable): `Icon::Offline`;
+/// - some sources failed: `Icon::Error`, plus the new count if any;
+/// - new articles: `Icon::New` with the count;
+/// - a refresh with no sources: `Icon::Refresh` "no local sources";
+/// - a refresh with nothing new: `Icon::Refresh` "up to date".
+fn fetch_notice(icons: &IconSettings, report: &FetchReport, after_refresh: bool) -> Option<String> {
+    let new = report.new_article_ids.len();
+    if report.is_offline() {
+        return Some(format!(
+            "{} Offline: couldn't reach any source. Showing articles already downloaded.",
+            icons.glyph(Icon::Offline)
+        ));
+    }
+    if report.failed > 0 {
+        let mut message = format!(
+            "{} {} of {} source(s) failed to fetch",
+            icons.glyph(Icon::Error),
+            report.failed,
+            report.attempted
+        );
+        if new > 0 {
+            message.push_str(&format!(" · {} {new} new", icons.glyph(Icon::New)));
+        }
+        return Some(message);
+    }
+    if new > 0 {
+        return Some(format!("{} {new} new article(s)", icons.glyph(Icon::New)));
+    }
+    if !after_refresh {
+        return None;
+    }
+    if report.attempted == 0 {
+        return Some(format!(
+            "{} No sources in this topic to refresh",
+            icons.glyph(Icon::Refresh)
+        ));
+    }
+    Some(format!(
+        "{} Up to date, nothing new",
+        icons.glyph(Icon::Refresh)
+    ))
+}
+
+/// Saves `icons.mode` to `icons.toml` and returns the footer message to
+/// show: a confirmation naming the new mode, or the save error. The mode
+/// is already in effect on screen either way. A failed save means it only
+/// lasts until tuxwire quits, which is worth telling the user but no reason
+/// to undo the change.
+fn save_icon_mode_notice(icons: &IconSettings) -> String {
+    match icons::config::save_mode(icons.mode) {
+        Ok(()) => format!(
+            "{} Icon mode: {} (press i to change)",
+            icons.glyph(Icon::Starred),
+            icons.mode.as_str()
+        ),
+        Err(err) => format!(
+            "{} Icon mode is {} for now, but saving icons.toml failed: {err:#}",
+            icons.glyph(Icon::Error),
+            icons.mode.as_str()
+        ),
+    }
 }
 
 /// Loads the article list a sidebar row's selection actually implies:
@@ -1235,7 +1636,11 @@ fn refresh_topic(storage: &Storage, topic: &str, source: Option<&str>) -> anyhow
 /// so every call site that needs to reload `articles` from the current
 /// sidebar selection goes through this one function instead of
 /// re-deriving the `if source.is_some() { ... } else { ... }` split itself.
-fn load_articles_for_selection(storage: &Storage, topic: &str, source: Option<&str>) -> anyhow::Result<Vec<Article>> {
+fn load_articles_for_selection(
+    storage: &Storage,
+    topic: &str,
+    source: Option<&str>,
+) -> anyhow::Result<Vec<Article>> {
     match source {
         Some(name) => storage.articles_by_topic_and_source(topic, name),
         None => storage.articles_by_topic(topic),
@@ -1311,7 +1716,11 @@ fn sidebar_rows<'a>(
         if expanded_topics.contains(topic)
             && let Some(sources) = sources_by_topic.get(topic)
         {
-            rows.extend(sources.iter().map(|name| SidebarRow::Source(index, name.as_str())));
+            rows.extend(
+                sources
+                    .iter()
+                    .map(|name| SidebarRow::Source(index, name.as_str())),
+            );
         }
     }
     rows
@@ -1396,7 +1805,11 @@ fn move_sidebar_selection(
 /// for why nothing here needs to separately "reload" the in-memory
 /// fetcher list) -- every other keypress just edits `step`'s fields in
 /// memory.
-fn handle_add_source_key(key: KeyCode, step: AddSourceStep, topics: &mut Vec<String>) -> anyhow::Result<Mode> {
+fn handle_add_source_key(
+    key: KeyCode,
+    step: AddSourceStep,
+    topics: &mut Vec<String>,
+) -> anyhow::Result<Mode> {
     match step {
         AddSourceStep::Url { mut text, error } => match key {
             KeyCode::Esc => Ok(Mode::Normal),
@@ -1458,7 +1871,9 @@ fn handle_add_source_key(key: KeyCode, step: AddSourceStep, topics: &mut Vec<Str
                     // than retype from scratch.
                     Err(err) => Ok(Mode::AddSource(AddSourceStep::Url {
                         text,
-                        error: Some(format!("couldn't parse this as a feed -- check the URL ({err:#})")),
+                        error: Some(format!(
+                            "couldn't parse this as a feed -- check the URL ({err:#})"
+                        )),
                     })),
                 }
             }
@@ -1466,7 +1881,14 @@ fn handle_add_source_key(key: KeyCode, step: AddSourceStep, topics: &mut Vec<Str
             _ => Ok(Mode::AddSource(AddSourceStep::Url { text, error })),
         },
 
-        AddSourceStep::Confirm { url, mut name, mut topic, mut field, topic_options, error } => match key {
+        AddSourceStep::Confirm {
+            url,
+            mut name,
+            mut topic,
+            mut field,
+            topic_options,
+            error,
+        } => match key {
             KeyCode::Esc => Ok(Mode::Normal),
 
             KeyCode::Tab => {
@@ -1673,6 +2095,12 @@ fn guess_source_name(feed: &feed_rs::model::Feed, url: &str) -> String {
 fn render(
     frame: &mut Frame,
     theme: &Theme,
+    // Which glyphs to draw (see `crate::icons`). Every icon below comes
+    // from this, and none are hard-coded.
+    icons: &IconSettings,
+    // Articles new this session, which get `Icon::New` while unread. See
+    // `draw_until_quit`'s `new_article_ids`.
+    new_article_ids: &HashSet<i64>,
     topics: &[String],
     sources_by_topic: &HashMap<String, Vec<String>>,
     expanded_topics: &HashSet<String>,
@@ -1683,6 +2111,9 @@ fn render(
     mode: &Mode,
     view: View,
     search: Option<&str>,
+    // `draw_until_quit`'s one-shot `notice` (refresh results, icon mode
+    // changes), shown in the footer in place of the keybind hints.
+    notice: Option<&str>,
 ) {
     // Painting a plain background-colored block across the whole frame
     // first means every gap between/around the panes below (e.g. if the
@@ -1724,6 +2155,7 @@ fn render(
     render_sidebar(
         frame,
         theme,
+        icons,
         sidebar_area,
         topics,
         sources_by_topic,
@@ -1751,6 +2183,8 @@ fn render(
     render_articles(
         frame,
         theme,
+        icons,
+        new_article_ids,
         articles_area,
         selected_topic,
         articles,
@@ -1758,14 +2192,14 @@ fn render(
         view,
         search_status,
     );
-    render_footer(frame, theme, footer_area, mode, view);
+    render_footer(frame, theme, footer_area, mode, view, notice);
 
     // The note popup, if open, paints on top of everything drawn above --
     // see `render_note_popup` for why it has to come last (after the panes
     // it's meant to sit over) and why it lives inside `body` rather than
-    // the full frame. The add-source and error popups follow the same
-    // reasoning; `mode` can only ever be *one* of these three at a time (see
-    // `Mode` itself), so at most one of the three `if let`s below actually
+    // the full frame. The add-source, error, and icon-check popups follow
+    // the same reasoning; `mode` can only ever be *one* of these at a time
+    // (see `Mode` itself), so at most one of the `if let`s below actually
     // draws anything.
     if let Mode::EditingNote { text } = mode {
         render_note_popup(frame, theme, body, text);
@@ -1774,7 +2208,20 @@ fn render(
         render_add_source_popup(frame, theme, body, step);
     }
     if let Mode::Error { title, message } = mode {
-        render_error_popup(frame, theme, body, title, message);
+        render_error_popup(frame, theme, icons, body, title, message);
+    }
+    if let Mode::IconCheck = mode {
+        render_icon_check_popup(frame, theme, body);
+    }
+    // The theme picker, also last so it sits on top. Everything behind it is
+    // already drawn in the previewed theme (`theme` *is* the preview).
+    if let Mode::ThemePicker {
+        selected,
+        overrides,
+        ..
+    } = mode
+    {
+        render_theme_picker_popup(frame, theme, icons, body, *selected, *overrides);
     }
 }
 
@@ -1818,13 +2265,14 @@ fn render_banner(frame: &mut Frame, theme: &Theme, area: Rect) {
 ///
 /// `Constraint::Length` for the bottom two sections (rather than
 /// `Constraint::Min`/`Percentage`) is what makes them a fixed height
-/// regardless of terminal size -- six key rows and four color rows, plus
-/// two border rows apiece, is always enough content to show in full, so
+/// regardless of terminal size -- one row per `KEY_HINTS` entry and
+/// `LEGEND_ROWS` legend rows, plus two border rows apiece, is always
+/// enough content to show in full, so
 /// there's no reason to let them grow. `Constraint::Min(0)` on the topics
 /// list is what then makes *it* absorb every leftover row instead.
 ///
 /// The sidebar tree's `sources_by_topic`/`expanded_topics`/
-/// `selected_source` push this to 8 arguments, past clippy's default
+/// `selected_source`, plus `icons`, push this to 9 arguments, past clippy's default
 /// 7-argument threshold -- same reasoning as the `#[allow]` on `render`
 /// itself (its one call site, `render`, already threads these straight
 /// through from `draw_until_quit`'s own loop state, so a params struct here
@@ -1833,6 +2281,7 @@ fn render_banner(frame: &mut Frame, theme: &Theme, area: Rect) {
 fn render_sidebar(
     frame: &mut Frame,
     theme: &Theme,
+    icons: &IconSettings,
     area: Rect,
     topics: &[String],
     sources_by_topic: &HashMap<String, Vec<String>>,
@@ -1845,13 +2294,14 @@ fn render_sidebar(
         .constraints([
             Constraint::Min(0),
             Constraint::Length(KEY_HINTS.len() as u16 + 2),
-            Constraint::Length(4 + 2),
+            Constraint::Length(LEGEND_ROWS as u16 + 2),
         ])
         .areas(area);
 
     render_topics_section(
         frame,
         theme,
+        icons,
         topics_area,
         topics,
         sources_by_topic,
@@ -1860,17 +2310,19 @@ fn render_sidebar(
         selected_source,
     );
     render_keys_section(frame, theme, keys_area);
-    render_colors_section(frame, theme, colors_area);
+    render_colors_section(frame, theme, icons, colors_area);
 }
 
 /// The sidebar's top section: the expandable topic tree
 /// (`docs/ARCHITECTURE.md`'s "an expandable tree, not a flat list") -- every
-/// topic in `topics`, each prefixed with `▸` (collapsed) or `▾` (expanded,
-/// per `expanded_topics`) when it actually has configured sources to show,
-/// or two blank spaces when it doesn't (nothing to expand into, so no
-/// indicator implying otherwise). Whichever topic is in `expanded_topics`
-/// gets its source names -- from `sources_by_topic`, indented four spaces
-/// -- inserted directly beneath it, and the currently selected row (a
+/// topic in `topics`, each prefixed with `Icon::Collapsed` or
+/// `Icon::Expanded` (per `expanded_topics`) when it actually has configured
+/// sources to show, or a blank cell when it doesn't (nothing to expand
+/// into, so no indicator implying otherwise), then the topic's category
+/// icon (`IconSettings::category_glyph`). Whichever topic is in
+/// `expanded_topics` gets its source names -- from `sources_by_topic`,
+/// indented four cells so they line up under the topic name -- inserted
+/// directly beneath it, and the currently selected row (a
 /// topic, per `selected_topic`, or one of its nested sources, per
 /// `selected_source`) is highlighted using `theme.accent_selected`. Split
 /// out of `render_sidebar` itself once that function grew two more sections
@@ -1882,13 +2334,14 @@ fn render_sidebar(
 /// through -- built from the same function specifically so what's drawn
 /// here and what the cursor actually lands on can never drift apart.
 ///
-/// Same 8-argument `#[allow]` as `render_sidebar` just above, for the same
-/// reason -- one call site, all eight already live in the caller's own
+/// Same 9-argument `#[allow]` as `render_sidebar` just above, for the same
+/// reason -- one call site, all nine already live in the caller's own
 /// state.
 #[allow(clippy::too_many_arguments)]
 fn render_topics_section(
     frame: &mut Frame,
     theme: &Theme,
+    icons: &IconSettings,
     area: Rect,
     topics: &[String],
     sources_by_topic: &HashMap<String, Vec<String>>,
@@ -1921,20 +2374,34 @@ fn render_topics_section(
                     selected_row_index = Some(row_index);
                 }
 
-                let has_sources = sources_by_topic.get(topic).is_some_and(|sources| !sources.is_empty());
+                let has_sources = sources_by_topic
+                    .get(topic)
+                    .is_some_and(|sources| !sources.is_empty());
+                // The expand/collapse marker, or a blank of the same
+                // one-cell width when there's nothing to expand, so every
+                // topic's icon and name start in the same column.
                 let indicator = if !has_sources {
-                    "  "
+                    " "
                 } else if expanded_topics.contains(topic) {
-                    "▾ "
+                    icons.glyph(Icon::Expanded)
                 } else {
-                    "▸ "
+                    icons.glyph(Icon::Collapsed)
                 };
-                ListItem::new(format!("{indicator}{topic}"))
+                // The topic's category icon: the user's `[categories]`
+                // entry, a built-in one, or the generic folder (see
+                // `IconSettings::category_glyph`).
+                let category = icons.category_glyph(topic);
+                ListItem::new(format!("{indicator} {category} {topic}"))
             }
             SidebarRow::Source(topic_index, name) => {
-                if Some(topics[topic_index].as_str()) == selected_topic && selected_source == Some(name) {
+                if Some(topics[topic_index].as_str()) == selected_topic
+                    && selected_source == Some(name)
+                {
                     selected_row_index = Some(row_index);
                 }
+                // Four spaces: the marker, a space, the category icon, and
+                // a space above (all one cell each), so a source name lines
+                // up under its topic's name.
                 ListItem::new(format!("    {name}"))
             }
         })
@@ -1976,7 +2443,12 @@ fn render_keys_section(frame: &mut Frame, theme: &Theme, area: Rect) {
         .iter()
         .map(|(key, action)| {
             Line::from(vec![
-                Span::styled(*key, Style::new().fg(theme.accent_selected).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    *key,
+                    Style::new()
+                        .fg(theme.accent_selected)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(format!(" {action}"), Style::new().fg(theme.text_primary)),
             ])
         })
@@ -1986,10 +2458,12 @@ fn render_keys_section(frame: &mut Frame, theme: &Theme, area: Rect) {
     frame.render_widget(paragraph, area);
 }
 
-/// The sidebar's bottom section: a small colored square next to each article
-/// state's label (unread/read/saved/skipped, `docs/ARCHITECTURE.md`'s
-/// "Article States & Behavior" table order), so the legend is always right
-/// there without having to remember which color means what.
+/// The sidebar's bottom section: each article state's icon, in that state's
+/// color, next to its label (unread/new/read/saved/skipped, following
+/// `docs/ARCHITECTURE.md`'s "Article States & Behavior" table order, with
+/// "new" next to "unread" since it's a kind of unread). The legend is
+/// always on screen, so there's no need to remember which icon or color
+/// means what.
 ///
 /// The colors themselves come straight from `theme.accent_*` -- the very
 /// same fields `article_item` above reads to color the article list -- never
@@ -1997,25 +2471,31 @@ fn render_keys_section(frame: &mut Frame, theme: &Theme, area: Rect) {
 /// someone swaps `theme.toml` for a different palette (Mocha, Frappé, a
 /// fully custom one), this legend updates automatically along with the
 /// article list it's explaining, instead of silently going stale.
-fn render_colors_section(frame: &mut Frame, theme: &Theme, area: Rect) {
+fn render_colors_section(frame: &mut Frame, theme: &Theme, icons: &IconSettings, area: Rect) {
     let block = Block::new()
         .title(" Colors ")
         .borders(Borders::ALL)
         .style(Style::new().bg(theme.background).fg(theme.text_primary))
         .border_style(Style::new().fg(theme.panel_border));
 
-    let states: [(&str, Color); 4] = [
-        ("unread", theme.accent_unread),
-        ("read", theme.accent_read),
-        ("saved", theme.accent_saved),
-        ("skipped", theme.accent_skipped),
+    // One row per article state: the same icon and color `article_item`
+    // draws for that state, so this legend explains both at once. The
+    // array's length is written as `LEGEND_ROWS`, the same constant
+    // `render_sidebar` sizes this section with, so the compiler rejects a
+    // row added here without the height growing to fit it.
+    let states: [(&str, Icon, Color); LEGEND_ROWS] = [
+        ("unread", Icon::Unread, theme.accent_unread),
+        ("new", Icon::New, theme.accent_unread),
+        ("read", Icon::Read, theme.accent_read),
+        ("saved", Icon::Starred, theme.accent_saved),
+        ("skipped", Icon::Skipped, theme.accent_skipped),
     ];
 
     let lines: Vec<Line> = states
         .iter()
-        .map(|(label, color)| {
+        .map(|(label, icon, color)| {
             Line::from(vec![
-                Span::styled("■ ", Style::new().fg(*color)),
+                Span::styled(format!("{} ", icons.glyph(*icon)), Style::new().fg(*color)),
                 Span::styled(*label, Style::new().fg(theme.text_primary)),
             ])
         })
@@ -2077,6 +2557,8 @@ enum SearchStatus<'a> {
 fn render_articles(
     frame: &mut Frame,
     theme: &Theme,
+    icons: &IconSettings,
+    new_article_ids: &HashSet<i64>,
     area: Rect,
     selected_topic: Option<&str>,
     articles: &[Article],
@@ -2087,7 +2569,11 @@ fn render_articles(
     let title = match search {
         SearchStatus::Typing(text) => format!(" Search: {text} "),
         SearchStatus::Committed(query) => {
-            format!(" Search: \u{201c}{query}\u{201d} ({} result{}) ", articles.len(), if articles.len() == 1 { "" } else { "s" })
+            format!(
+                " Search: \u{201c}{query}\u{201d} ({} result{}) ",
+                articles.len(),
+                if articles.len() == 1 { "" } else { "s" }
+            )
         }
         SearchStatus::None => match view {
             View::Saved => " Saved Articles ".to_string(),
@@ -2143,7 +2629,7 @@ fn render_articles(
 
     let items: Vec<ListItem> = articles
         .iter()
-        .map(|article| article_item(theme, article, view))
+        .map(|article| article_item(theme, icons, new_article_ids, article, view))
         .collect();
 
     // Each `ListItem` here is two lines (title + source/timestamp, see
@@ -2182,7 +2668,13 @@ fn render_articles(
 /// this" is what's actually useful while browsing saved articles.
 /// Everywhere else shows the source name plus the article's own publish
 /// `timestamp`, unchanged from before this view got its own meta line.
-fn article_item<'a>(theme: &Theme, article: &'a Article, view: View) -> ListItem<'a> {
+fn article_item<'a>(
+    theme: &Theme,
+    icons: &IconSettings,
+    new_article_ids: &HashSet<i64>,
+    article: &'a Article,
+    view: View,
+) -> ListItem<'a> {
     // Priority order matters here: an article can technically be both
     // `read` and `saved` (saving implies read, per ARCHITECTURE.md), so
     // `saved`/`skipped` are checked first -- they're the more specific,
@@ -2198,10 +2690,15 @@ fn article_item<'a>(theme: &Theme, article: &'a Article, view: View) -> ListItem
         theme.accent_unread
     };
 
-    let title_line = Line::from(Span::styled(
-        article.title.as_str(),
-        Style::new().fg(title_color),
-    ));
+    // The state icon in front of the title, in the same color. It's one
+    // cell plus a space, so the meta line's two-space indent below still
+    // lines up under the title text. `Line::from(vec![...])` builds one
+    // line out of several differently-styled pieces (`Span`s).
+    let state_icon = icons.glyph(article_state_icon(article, new_article_ids));
+    let title_line = Line::from(vec![
+        Span::styled(format!("{state_icon} "), Style::new().fg(title_color)),
+        Span::styled(article.title.as_str(), Style::new().fg(title_color)),
+    ]);
 
     // `article.saved` is checked alongside `view == View::Saved`, not just
     // `view` alone: search (see `SearchStatus`) runs unscoped across every
@@ -2233,7 +2730,9 @@ fn article_item<'a>(theme: &Theme, article: &'a Article, view: View) -> ListItem
     // *and* when a note actually exists, so an article saved without one
     // still renders as the plain two-line item above instead of a blank or
     // missing third line.
-    if view == View::Saved && let Some(note) = article.note.as_deref() {
+    if view == View::Saved
+        && let Some(note) = article.note.as_deref()
+    {
         let preview_line = Line::from(Span::styled(
             format!(
                 "  \u{201c}{}\u{201d}",
@@ -2245,6 +2744,25 @@ fn article_item<'a>(theme: &Theme, article: &'a Article, view: View) -> ListItem
     }
 
     ListItem::new(lines)
+}
+
+/// Which state icon an article gets in the list. Same priority order as
+/// `article_item`'s title color (skipped, then saved, then read), with one
+/// addition: an unread article that arrived this session (its ID is in
+/// `new_article_ids`) gets `Icon::New` instead of `Icon::Unread`. Once it's
+/// read, saved, or skipped, it shows that state like any other article.
+fn article_state_icon(article: &Article, new_article_ids: &HashSet<i64>) -> Icon {
+    if article.skipped {
+        Icon::Skipped
+    } else if article.saved {
+        Icon::Starred
+    } else if article.read {
+        Icon::Read
+    } else if new_article_ids.contains(&article.id) {
+        Icon::New
+    } else {
+        Icon::Unread
+    }
 }
 
 /// `View::Saved`'s own meta line: `"  {source} · saved {date}"`, plus a
@@ -2335,13 +2853,38 @@ fn truncate_preview(text: &str, max_chars: usize) -> String {
 /// picks between the normal-mode hint lines -- `View::Saved` and
 /// `View::History` share `SAVED_HINTS` (see its own doc comment for why:
 /// both disable the same keys for the same reason).
-fn render_footer(frame: &mut Frame, theme: &Theme, area: Rect, mode: &Mode, view: View) {
+///
+/// `notice` (a one-shot message from `draw_until_quit`) replaces the hint
+/// line when it's `Some`, except during the first-run icon check, whose
+/// `y`/`n` hint is the only way to learn how to answer it.
+fn render_footer(
+    frame: &mut Frame,
+    theme: &Theme,
+    area: Rect,
+    mode: &Mode,
+    view: View,
+    notice: Option<&str>,
+) {
+    // The notice wins over the hint line: the footer is one row, and a
+    // refresh result is more useful in the moment than a reminder of what
+    // `j`/`k` do. `&& !matches!(...)` keeps the icon check's hints visible.
+    if let Some(notice) = notice
+        && !matches!(mode, Mode::IconCheck)
+    {
+        let footer = Paragraph::new(notice.to_string())
+            .style(Style::new().bg(theme.background).fg(theme.text_muted));
+        frame.render_widget(footer, area);
+        return;
+    }
+
     let hints = match mode {
         Mode::EditingNote { .. } => EDITING_NOTE_HINTS,
         Mode::AddSource(AddSourceStep::Url { .. }) => ADD_SOURCE_URL_HINTS,
         Mode::AddSource(AddSourceStep::Confirm { .. }) => ADD_SOURCE_CONFIRM_HINTS,
         Mode::Error { .. } => ERROR_HINTS,
         Mode::Searching { .. } => SEARCH_HINTS,
+        Mode::IconCheck => ICON_CHECK_HINTS,
+        Mode::ThemePicker { .. } => THEME_PICKER_HINTS,
         Mode::Normal => match view {
             View::Topic => KEYBIND_HINTS,
             View::Saved | View::History => SAVED_HINTS,
@@ -2408,15 +2951,31 @@ fn render_note_popup(frame: &mut Frame, theme: &Theme, area: Rect, text: &str) {
 /// width. `title` is `Mode::Error`'s own field, passed straight through --
 /// `" Error "` for a genuine failure, `" Export "` for a successful `E`
 /// export, so the border itself tells the two apart at a glance.
-fn render_error_popup(frame: &mut Frame, theme: &Theme, area: Rect, title: &str, message: &str) {
+fn render_error_popup(
+    frame: &mut Frame,
+    theme: &Theme,
+    icons: &IconSettings,
+    area: Rect,
+    title: &str,
+    message: &str,
+) {
     let popup_area = centered_rect(area, 60, 5);
 
     // Same reasoning as `render_note_popup`'s own `Clear` -- without it the
     // article list underneath would show through around the popup's text.
     frame.render_widget(Clear, popup_area);
 
+    // A real error gets `Icon::Error` in its title. The `E` export result
+    // shares this popup (with the title "Export") and gets no icon,
+    // because it's good news. Matching on the title text works because
+    // `Mode::Error`'s titles are fixed literals chosen at each call site.
+    let heading = if title == "Error" {
+        format!(" {} {title} ", icons.glyph(Icon::Error))
+    } else {
+        format!(" {title} ")
+    };
     let block = Block::new()
-        .title(format!(" {title} "))
+        .title(heading)
         .borders(Borders::ALL)
         .style(Style::new().bg(theme.background).fg(theme.text_primary))
         .border_style(Style::new().fg(theme.accent_selected));
@@ -2474,7 +3033,14 @@ fn render_add_source_popup(frame: &mut Frame, theme: &Theme, area: Rect, step: &
             frame.set_cursor_position((cursor_x, cursor_y));
         }
 
-        AddSourceStep::Confirm { url, name, topic, field, topic_options, error } => {
+        AddSourceStep::Confirm {
+            url,
+            name,
+            topic,
+            field,
+            topic_options,
+            error,
+        } => {
             // Four content lines (URL, Name, Topic, the "existing topics"
             // hint) always show; a fifth appears only when there's a
             // validation/write error to surface. `+ 2` for the border,
@@ -2503,9 +3069,18 @@ fn render_add_source_popup(frame: &mut Frame, theme: &Theme, area: Rect, step: &
             };
 
             let mut lines = vec![
-                Line::from(Span::styled(format!("URL:   {url}"), Style::new().fg(theme.text_muted))),
-                Line::from(Span::styled(format!("Name:  {name}"), focus_style(ConfirmField::Name))),
-                Line::from(Span::styled(format!("Topic: {topic}"), focus_style(ConfirmField::Topic))),
+                Line::from(Span::styled(
+                    format!("URL:   {url}"),
+                    Style::new().fg(theme.text_muted),
+                )),
+                Line::from(Span::styled(
+                    format!("Name:  {name}"),
+                    focus_style(ConfirmField::Name),
+                )),
+                Line::from(Span::styled(
+                    format!("Topic: {topic}"),
+                    focus_style(ConfirmField::Topic),
+                )),
                 Line::from(Span::styled(
                     format!("       existing: {}", topic_options.join(", ")),
                     Style::new().fg(theme.text_muted),
@@ -2537,6 +3112,141 @@ fn render_add_source_popup(frame: &mut Frame, theme: &Theme, area: Rect, step: &
             frame.set_cursor_position((cursor_x, cursor_y));
         }
     }
+}
+
+/// The `t` theme picker popup (`Mode::ThemePicker`): one row per built-in
+/// theme, in alphabetical order (`theme::picker_order`), with the
+/// highlighted row (`selected`, a row position) marked, and a few color swatches drawn
+/// in *that theme's own* colors (background, text, unread, read, saved,
+/// skipped, selected). You can compare themes before moving to them, while
+/// the screen behind shows the highlighted one in full.
+///
+/// When `overrides > 0`, a note explains that `theme.toml` is replacing some
+/// of every theme's colors. Otherwise an old full `[theme]` table makes
+/// the picker look broken, since nothing would visibly change.
+fn render_theme_picker_popup(
+    frame: &mut Frame,
+    theme: &Theme,
+    icons: &IconSettings,
+    area: Rect,
+    selected: usize,
+    overrides: usize,
+) {
+    let mut lines = Vec::new();
+
+    // One line per built-in, in alphabetical order. `.enumerate()` pairs
+    // each theme with its row number, so the row being previewed can be
+    // marked and bolded.
+    for (row, &index) in picker_order().iter().enumerate() {
+        let builtin = &BUILTIN_THEMES[index];
+        let is_selected = row == selected;
+        let name_style = if is_selected {
+            Style::new()
+                .fg(theme.accent_selected)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::new().fg(theme.text_primary)
+        };
+        // The pointer on the highlighted row, or a blank of the same
+        // one-cell width, so the names line up.
+        let pointer = if is_selected {
+            icons.glyph(Icon::Collapsed)
+        } else {
+            " "
+        };
+
+        // `{:<22}` pads the name with spaces to 22 characters (left-aligned),
+        // so every row's swatches start in the same column. 22 fits the
+        // longest name, "Catppuccin Macchiato", plus a gap.
+        let mut spans = vec![
+            Span::styled(format!("{pointer} "), name_style),
+            Span::styled(format!("{:<22}", builtin.name), name_style),
+        ];
+        // The swatches. `c` is that theme's palette, not the current one.
+        let c = &builtin.colors;
+        for color in [
+            c.background,
+            c.text_primary,
+            c.accent_unread,
+            c.accent_read,
+            c.accent_saved,
+            c.accent_skipped,
+            c.accent_selected,
+        ] {
+            spans.push(Span::styled(
+                format!("{} ", icons.glyph(Icon::Swatch)),
+                Style::new().fg(color),
+            ));
+        }
+        lines.push(Line::from(spans));
+    }
+
+    // The overrides note, only when it applies.
+    if overrides > 0 {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            format!("theme.toml overrides {overrides} of 11 colors in every theme"),
+            Style::new().fg(theme.accent_saved),
+        )));
+    }
+
+    // `+ 2` for the border, same as every other popup in this module.
+    let popup_area = centered_rect(area, 60, lines.len() as u16 + 2);
+
+    // Same `Clear` reasoning as `render_note_popup`.
+    frame.render_widget(Clear, popup_area);
+
+    let block = Block::new()
+        .title(format!(" {} Theme ", icons.glyph(Icon::Theme)))
+        .borders(Borders::ALL)
+        .style(Style::new().bg(theme.background).fg(theme.text_primary))
+        .border_style(Style::new().fg(theme.accent_selected));
+
+    frame.render_widget(Paragraph::new(lines).block(block), popup_area);
+}
+
+/// The first-run icon check popup (`Mode::IconCheck`): one Nerd Font
+/// glyph and the question "Do you see an icon here?".
+///
+/// The glyph is always `Icon::Linux`'s *Nerd* version (Tux), whatever
+/// the current mode, because the question is specifically whether the
+/// terminal's font can draw Nerd Font glyphs. It's shown in
+/// `accent_unread` and bold so it's easy to spot. With a non-Nerd font it
+/// appears as an empty box, a `?`, or nothing at all, which is exactly
+/// what the user is being asked to notice.
+fn render_icon_check_popup(frame: &mut Frame, theme: &Theme, area: Rect) {
+    let lines = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            Icon::Linux.get(IconMode::Nerd),
+            Style::new()
+                .fg(theme.accent_unread)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from("Do you see an icon here?"),
+        Line::from(Span::styled(
+            "y = yes, keep icons · n = no, use plain symbols",
+            Style::new().fg(theme.text_muted),
+        )),
+    ];
+
+    // `+ 2` for the border, same as every other popup in this module.
+    let popup_area = centered_rect(area, 60, lines.len() as u16 + 2);
+
+    // Same `Clear` reasoning as `render_note_popup`.
+    frame.render_widget(Clear, popup_area);
+
+    let block = Block::new()
+        .title(" Icons ")
+        .borders(Borders::ALL)
+        .style(Style::new().bg(theme.background).fg(theme.text_primary))
+        .border_style(Style::new().fg(theme.accent_selected));
+
+    let paragraph = Paragraph::new(lines)
+        .alignment(Alignment::Center)
+        .block(block);
+    frame.render_widget(paragraph, popup_area);
 }
 
 /// A `width_percent`-wide, `height`-tall `Rect` centered inside `area` --
@@ -2572,9 +3282,10 @@ fn centered_rect(area: Rect, width_percent: u16, height: u16) -> Rect {
 
 // `#[cfg(test)]` -- see the same note on `storage/mod.rs`'s `tests` module
 // for why this doesn't add anything to a normal `cargo build`. Only
-// `truncate_preview` gets unit tests here: it's the one piece of this
-// module's new logic that's a plain, pure function (`&str` in, `String`
-// out, no `Storage`/terminal/event dependency) -- exactly the shape that's
+// `truncate_preview`, `article_state_icon`, and `fetch_notice` get unit
+// tests here: they're the pieces of this module's logic that are plain,
+// pure functions (plain values in, plain values out, no
+// `Storage`/terminal/event dependency) -- exactly the shape that's
 // cheap to test directly, unlike `draw_until_quit`'s event loop, which
 // this project instead verifies with a pty-driven run (see the project's
 // own notes on that, not a `#[test]`).
@@ -2618,5 +3329,96 @@ mod tests {
         let text = "café résumé";
         let truncated = truncate_preview(text, 4);
         assert_eq!(truncated, "café…");
+    }
+
+    /// A plain unread test article with the given database ID.
+    fn test_article(id: i64) -> Article {
+        let mut article = Article::new(
+            "title".to_string(),
+            format!("https://example.com/{id}"),
+            "source".to_string(),
+            "linux".to_string(),
+            chrono::Utc::now(),
+        );
+        article.id = id;
+        article
+    }
+
+    /// The state icon follows the same priority as the title color
+    /// (skipped, then saved, then read), and "new" only applies to an
+    /// article that is still unread.
+    #[test]
+    fn article_state_icon_priority() {
+        let new_ids = HashSet::from([1]);
+
+        let mut article = test_article(1);
+        assert_eq!(article_state_icon(&article, &new_ids), Icon::New);
+        assert_eq!(article_state_icon(&test_article(2), &new_ids), Icon::Unread);
+
+        article.read = true;
+        assert_eq!(article_state_icon(&article, &new_ids), Icon::Read);
+        article.saved = true;
+        assert_eq!(article_state_icon(&article, &new_ids), Icon::Starred);
+        article.skipped = true;
+        assert_eq!(article_state_icon(&article, &new_ids), Icon::Skipped);
+    }
+
+    /// `fetch_notice` picks the right icon and message for each outcome,
+    /// and stays quiet at startup when nothing happened.
+    #[test]
+    fn fetch_notice_messages() {
+        let icons = IconSettings::new(IconMode::Ascii, HashMap::new());
+
+        // Startup, nothing new, nothing failed: no message.
+        let quiet = FetchReport {
+            attempted: 2,
+            ..FetchReport::default()
+        };
+        assert_eq!(fetch_notice(&icons, &quiet, false), None);
+        // The same result after an `r` press does get an answer.
+        assert_eq!(
+            fetch_notice(&icons, &quiet, true).as_deref(),
+            Some("@ Up to date, nothing new")
+        );
+
+        let fresh = FetchReport {
+            attempted: 1,
+            new_article_ids: HashSet::from([7, 8]),
+            ..FetchReport::default()
+        };
+        assert_eq!(
+            fetch_notice(&icons, &fresh, false).as_deref(),
+            Some("+ 2 new article(s)")
+        );
+
+        let partial = FetchReport {
+            attempted: 3,
+            failed: 1,
+            new_article_ids: HashSet::from([7]),
+            ..FetchReport::default()
+        };
+        assert_eq!(
+            fetch_notice(&icons, &partial, true).as_deref(),
+            Some("! 1 of 3 source(s) failed to fetch · + 1 new")
+        );
+
+        let offline = FetchReport {
+            attempted: 2,
+            failed: 2,
+            unreachable: 2,
+            ..FetchReport::default()
+        };
+        assert!(
+            fetch_notice(&icons, &offline, false)
+                .unwrap()
+                .starts_with("~ Offline")
+        );
+
+        let empty_topic = FetchReport::default();
+        assert!(
+            fetch_notice(&icons, &empty_topic, true)
+                .unwrap()
+                .starts_with("@ No sources")
+        );
     }
 }
