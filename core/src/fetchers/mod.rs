@@ -1,0 +1,251 @@
+//! The `Fetcher` trait and one submodule per source type.
+//!
+//! Per `docs/ARCHITECTURE.md`: "Each source type (RSS/Atom, Reddit JSON,
+//! HN/Algolia, future custom sources) implements a common `Fetcher`
+//! trait. Every fetcher normalizes whatever it pulls down into the same
+//! `Article` struct." This file defines that shared contract; each
+//! submodule (starting with `rss`) provides one implementation of it.
+
+use crate::models::Article;
+use serde::Deserialize;
+
+/// The one thing every source type has to be able to do: go fetch its
+/// articles and hand back a normalized `Vec<Article>`.
+///
+/// ## What a trait actually is
+///
+/// A *trait* is Rust's version of an interface: it describes a chunk of
+/// behavior ("can be asked to `fetch`") without saying anything about
+/// what concrete type provides it. Any struct can `impl Fetcher for
+/// MyStruct { ... }` as long as it supplies a `fetch` method matching
+/// this signature. Calling code that only knows "I have *something* that
+/// implements `Fetcher`" can call `.fetch()` on it without caring whether
+/// it's actually an RSS fetcher, a Reddit fetcher, or anything else —
+/// that's the whole point: the rest of the app (storage, the refresh
+/// loop) is written once against `Fetcher`, not once per source type.
+///
+/// ## Why `async fn` in a trait needs a comment
+///
+/// Ordinarily, `.fetch()` would just run to completion and return.
+/// Fetching a feed means making a network request, though, which can take
+/// an unpredictable amount of time and shouldn't block anything else from
+/// happening while it's in flight (per ARCHITECTURE.md: "Fetches run
+/// concurrently via tokio, so one slow/dead source never blocks a refresh
+/// of everything else"). Marking the method `async fn` means calling
+/// `.fetch()` doesn't immediately run the body — it hands back a
+/// `Future`, a value representing "this work, not started/finished yet."
+/// Nothing actually happens until that `Future` is `.await`ed, and an
+/// async runtime like `tokio` can juggle many in-flight `Future`s at
+/// once (e.g. one per source) on a small pool of threads, switching
+/// between them whenever one is waiting on I/O instead of dedicating a
+/// whole OS thread to each. This is Rust's version of what `async`/`await`
+/// in JavaScript or Python's `asyncio` does, but the `Future` itself is
+/// inert data — nothing runs in the background just because you called an
+/// async function, only once something drives it forward with `.await`
+/// (or a runtime does that on your behalf).
+///
+/// Async trait methods are natively supported by the compiler as of
+/// recent Rust editions, so no extra crate is needed to write this. The
+/// one caveat worth knowing for later: a plain `async fn` in a trait
+/// isn't automatically usable behind `dyn Fetcher` (a "trait object", used
+/// when you want a `Vec` holding fetchers of different concrete types
+/// together). We don't need that yet with a single fetcher implementation
+/// — it'll be revisited (likely by boxing the returned `Future`) once a
+/// second source type needs to run alongside this one.
+//
+// `#[allow(async_fn_in_trait)]` silences a compiler lint that appears because
+// this trait is now `pub` in a library crate. The lint's worry: code that is
+// *generic* over `Fetcher` cannot assume the returned `Future` is `Send`
+// (safe to move to another thread), because the trait does not promise it.
+// That does not affect us: every caller works with the concrete
+// `ConfiguredSource` type, where the compiler can see the real future and
+// knows it is `Send`. If we ever need generic, thread-moving code, the fix is
+// to rewrite `fetch` as a plain `fn` returning `impl Future + Send`.
+#[allow(async_fn_in_trait)]
+pub trait Fetcher {
+    /// Fetch this source's current articles.
+    ///
+    /// Returns `anyhow::Result<Vec<Article>>` rather than an infallible
+    /// `Vec<Article>` because fetching genuinely can fail — the network
+    /// could be down, the feed URL could 404, the XML could be malformed.
+    /// `Result<T, E>` is Rust's mechanism for surfacing that in the type
+    /// system: a `Result` is either `Ok(value)` or `Err(error)`, and
+    /// there's no way to get at the `Vec<Article>` without a caller
+    /// acknowledging the possibility of failure (via `?`, `match`,
+    /// `.unwrap()`, etc.) — unlike an exception, a `Result` can't
+    /// silently propagate past code that isn't expecting it.
+    async fn fetch(&self) -> anyhow::Result<Vec<Article>>;
+}
+
+// One submodule per source type, per the module layout in
+// ARCHITECTURE.md ("fetchers/ -- one module per source type"). `rss`
+// covers both RSS and Atom feeds, since `feed-rs` (see Cargo.toml) parses
+// both into one shape -- from the app's perspective they're the same
+// source type. `reddit` is a placeholder (see its module doc comment).
+//
+// Reading `sources.toml` from disk is NOT done here any more: that is a
+// terminal-app concern (an Android app keeps its feeds in the database), so
+// the TOML loader lives in the `tui` crate and hands this module plain
+// `SourceConfig` values.
+pub mod reddit;
+pub mod rss;
+
+/// Which concrete fetcher a source's `type` names.
+///
+/// `"rss"` and `"reddit"` are both valid values a user can type in
+/// `sources.toml` today -- but only RSS actually fetches anything yet (see
+/// `fetchers::reddit`). Modeling this as an `enum` rather than leaving
+/// `source_type` a bare `String` means an entry like `type =
+/// "atom-ish-typo"` is caught right at config *parse* time, with serde's own
+/// "unknown variant" message naming the bad value -- instead of surviving as
+/// a `String` that every later piece of code would have to re-validate (or
+/// silently mishandle) on its own.
+///
+/// `#[serde(rename_all = "lowercase")]` is what makes `Rss`/`Reddit` (the
+/// idiomatic Rust `PascalCase` for enum variants) match the lowercase
+/// `"rss"`/`"reddit"` strings actually written in the TOML file, without
+/// needing a `#[serde(rename = "...")]` on each variant individually.
+///
+/// This type lives in the shared core crate (rather than next to the TOML
+/// loader) because every program that fetches feeds -- the terminal app
+/// reading `sources.toml`, the Android app reading its database -- needs to
+/// describe "what kind of source is this".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SourceType {
+    /// An RSS or Atom feed, fetched over HTTP.
+    Rss,
+    /// A Reddit subreddit (not implemented yet; see `fetchers::reddit`).
+    Reddit,
+}
+
+/// One fully-validated source description: every field guaranteed present
+/// and non-empty by the time anything outside the code that built it sees it.
+///
+/// This is the plain-data hand-off between *where sources are stored*
+/// (a TOML file on the desktop, a database table on Android) and *how they
+/// are fetched* (`configured_sources` below turns these into fetchers). It
+/// is deliberately a different type from the TOML loader's private
+/// "raw" struct: serde deserializes into a shape that can represent "this
+/// field was missing" (via `Option`), and the loader's validation turns that
+/// into either a clear error or this type, where every field is simply,
+/// unconditionally there -- so no caller downstream ever has to think about
+/// a source with a missing `topic` again.
+#[derive(Debug, Clone)]
+pub struct SourceConfig {
+    /// Display name, e.g. "Ars Technica". Shown in the UI and stored on each
+    /// article as its `source`.
+    pub name: String,
+    /// Which fetcher implementation handles this source.
+    pub source_type: SourceType,
+    /// The feed URL (or, for Reddit, the subreddit name).
+    pub url: String,
+    /// The single topic this source's articles are filed under.
+    pub topic: String,
+}
+
+/// One configured source, already resolved into whichever concrete
+/// fetcher type its `sources.toml` entry's `type = "..."` named (see
+/// `SourceType`).
+///
+/// This exists instead of just returning `Vec<rss::RssFetcher>` (as this
+/// function did before config-file loading existed) because
+/// `sources.toml` can now list *more than one* source type in the same
+/// file -- ARCHITECTURE.md's own example has both `type = "rss"` and
+/// `type = "reddit"` entries side by side. Something has to hold "an RSS
+/// fetcher, or a Reddit fetcher, or ..." as one list callers can iterate
+/// over uniformly. An `enum` is the right tool here rather than `dyn
+/// Fetcher` (a "trait object"): as `Fetcher`'s own doc comment notes, a
+/// plain `async fn` in a trait isn't usable behind `dyn Fetcher` without
+/// extra work (boxing the returned `Future`) that a small, closed set of
+/// source types -- known completely at compile time -- doesn't need. An
+/// `enum` with one variant per source type gets the same "one list, mixed
+/// concrete types" result for free.
+pub enum ConfiguredSource {
+    Rss(rss::RssFetcher),
+    Reddit(reddit::RedditFetcher),
+}
+
+impl ConfiguredSource {
+    /// This source's human-readable name, regardless of which variant it
+    /// is -- used for log/status messages (see `main.rs`, `ui/mod.rs`)
+    /// without every caller needing its own `match` to reach into
+    /// whichever fetcher type is actually inside.
+    pub fn name(&self) -> &str {
+        match self {
+            ConfiguredSource::Rss(fetcher) => &fetcher.name,
+            ConfiguredSource::Reddit(fetcher) => &fetcher.name,
+        }
+    }
+
+    /// This source's configured topic -- used by the TUI's `r` refresh
+    /// (`ui/mod.rs`'s `refresh_topic`) to filter down to just the sources
+    /// filed under the topic currently selected.
+    pub fn topic(&self) -> &str {
+        match self {
+            ConfiguredSource::Rss(fetcher) => &fetcher.topic,
+            ConfiguredSource::Reddit(fetcher) => &fetcher.topic,
+        }
+    }
+
+    /// This source's feed URL from `sources.toml`: what fetched articles
+    /// record as their `feed_url`, and what the startup backfill
+    /// (`Storage::backfill_feed_urls`) matches older articles against.
+    pub fn url(&self) -> &str {
+        match self {
+            ConfiguredSource::Rss(fetcher) => &fetcher.url,
+            ConfiguredSource::Reddit(fetcher) => &fetcher.url,
+        }
+    }
+}
+
+impl Fetcher for ConfiguredSource {
+    /// Delegates to whichever concrete fetcher this source actually is.
+    /// This is the whole payoff of the `enum` over having every caller
+    /// `match` on `ConfiguredSource` itself before it can call `.fetch()`
+    /// at all -- callers (`main.rs`'s fetch loop, `refresh_topic`) just
+    /// call `.fetch()` once, uniformly, same as if there were still only
+    /// one source type.
+    async fn fetch(&self) -> anyhow::Result<Vec<Article>> {
+        match self {
+            ConfiguredSource::Rss(fetcher) => fetcher.fetch().await,
+            ConfiguredSource::Reddit(fetcher) => fetcher.fetch().await,
+        }
+    }
+}
+
+/// Turns validated source descriptions into fetchers that are ready to
+/// `.fetch()`.
+///
+/// This is the file-free half of what the terminal app used to do in one
+/// step. The terminal app reads `sources.toml` into a `Vec<SourceConfig>`
+/// itself and then calls this; the Android app will build the same
+/// `Vec<SourceConfig>` from its database. Either way, everything from here
+/// on -- fetching, parsing, storing -- is identical.
+///
+/// `sources: Vec<SourceConfig>` takes the vector *by value* (ownership
+/// moves in) because each fetcher below needs to own its `name`, `url` and
+/// `topic` strings; consuming the vector lets us move the strings across
+/// instead of cloning every one of them.
+pub fn configured_sources(sources: Vec<SourceConfig>) -> Vec<ConfiguredSource> {
+    // `into_iter()` walks the vector by value, `map` converts each
+    // description into the matching fetcher variant, and `collect()` gathers
+    // the results back into a `Vec`. The `match` on `source_type` is
+    // exhaustive: adding a new `SourceType` without handling it here is a
+    // compile error, which is exactly the safety net we want.
+    sources
+        .into_iter()
+        .map(|source| match source.source_type {
+            SourceType::Rss => ConfiguredSource::Rss(rss::RssFetcher {
+                name: source.name,
+                url: source.url,
+                topic: source.topic,
+            }),
+            SourceType::Reddit => ConfiguredSource::Reddit(reddit::RedditFetcher {
+                name: source.name,
+                url: source.url,
+                topic: source.topic,
+            }),
+        })
+        .collect()
+}

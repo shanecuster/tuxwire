@@ -9,9 +9,9 @@
 //! only) is the one caller of `export_saved_articles`; this module knows
 //! nothing about the TUI itself.
 
-use crate::models::Article;
 use anyhow::Context;
 use std::path::PathBuf;
+use tuxwire_core::models::Article;
 
 /// The resolved export destination -- a real, existing directory on disk,
 /// `~` already expanded to `$HOME`. Kept as its own type (rather than

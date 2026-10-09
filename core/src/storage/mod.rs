@@ -22,7 +22,7 @@
 //! -- the same pattern `fetchers/mod.rs` uses for `fetchers::rss`.
 
 // `migrations` is a private submodule (no `pub`): its `run` function is an
-// implementation detail of *how* `Storage::open` gets the schema ready,
+// implementation detail of *how* `Storage::open_at` gets the schema ready,
 // not something any other part of the app should ever call directly.
 mod migrations;
 
@@ -30,7 +30,7 @@ use crate::models::Article;
 use anyhow::Context;
 use chrono::Utc;
 use rusqlite::{Connection, OptionalExtension, Row, params, params_from_iter};
-use std::path::PathBuf;
+use std::path::Path;
 
 /// A handle to tuxwire's SQLite database.
 ///
@@ -44,39 +44,49 @@ pub struct Storage {
 }
 
 impl Storage {
-    /// Opens (creating if necessary) the real on-disk database at
-    /// `~/.local/share/tuxwire/tuxwire.db`, per ARCHITECTURE.md's Storage
-    /// section, and brings its schema up to date via `migrations::run`.
+    /// Opens (creating if necessary) the database file at `path`, and
+    /// brings its schema up to date via `migrations::run`.
     ///
-    /// This is the constructor the rest of the app should call. Tests use
-    /// `from_connection` directly instead, against an in-memory database
-    /// -- see the `tests` module at the bottom of this file.
-    pub fn open() -> anyhow::Result<Self> {
-        let path = db_path()?;
-
+    /// ## Why the caller passes the path in
+    ///
+    /// This used to work out `~/.local/share/tuxwire/tuxwire.db` itself, from
+    /// the `HOME` and `XDG_DATA_HOME` environment variables. That only makes
+    /// sense on a Linux desktop: an Android app has no `HOME`, and gets its
+    /// private data directory handed to it by the operating system instead.
+    /// So this crate no longer guesses -- each program (the terminal app, the
+    /// Android app) decides where its data lives and tells `Storage` the
+    /// exact file. `path: &Path` *borrows* the path rather than taking
+    /// ownership: opening a file only needs to read it, and the caller
+    /// stays free to keep using its own copy afterwards.
+    ///
+    /// Tests use `from_connection` directly instead, against an in-memory
+    /// database -- see the `tests` module at the bottom of this file.
+    pub fn open_at(path: &Path) -> anyhow::Result<Self> {
         // `Path::parent()` gives the directory containing this path
-        // (`~/.local/share/tuxwire`, stripping off `tuxwire.db`) as an
-        // `Option<&Path>` -- `None` only if `path` had no directory
-        // component at all, which can't happen here since `db_path`
-        // always joins a filename onto a directory. `create_dir_all` is a
-        // no-op if the directory already exists (unlike `create_dir`,
-        // which would error in that case) -- exactly what's wanted here,
-        // since `open` runs on every single startup, not just the first.
+        // (stripping off the file name) as an `Option<&Path>` -- `None`
+        // only if `path` had no directory component at all, such as a bare
+        // `tuxwire.db`. `create_dir_all` is a no-op if the directory
+        // already exists (unlike `create_dir`, which would error in that
+        // case) -- exactly what's wanted here, since this runs on every
+        // single startup, not just the first.
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("failed to create data directory {}", parent.display()))?;
         }
 
-        let conn = Connection::open(&path)
+        // Open (or create) the SQLite file itself.
+        let conn = Connection::open(path)
             .with_context(|| format!("failed to open database at {}", path.display()))?;
 
+        // Run any migrations the file hasn't seen yet, then wrap it.
         Self::from_connection(conn)
     }
 
-    /// A fresh, fully migrated database that lives only in memory, for
-    /// tests in other modules (the UI's) that need a real `Storage` without
-    /// touching disk. `#[cfg(test)]` leaves it out of the real binary.
-    #[cfg(test)]
+    /// A fresh, fully migrated database that lives only in memory. Handy for
+    /// tests that need a real `Storage` without touching disk -- including
+    /// tests in *other* crates (the terminal UI's), which is why this is an
+    /// ordinary public function: `#[cfg(test)]` code is only compiled while
+    /// testing *this* crate, so a different crate's tests could not see it.
     pub fn open_in_memory() -> anyhow::Result<Self> {
         Self::from_connection(Connection::open_in_memory()?)
     }
@@ -84,7 +94,7 @@ impl Storage {
     /// Wraps an already-open `Connection` in a `Storage`, running
     /// migrations against it before handing it back.
     ///
-    /// Splitting this out from `open` means the "make sure the schema is
+    /// Splitting this out from `open_at` means the "make sure the schema is
     /// current" step isn't duplicated between the real, file-backed path
     /// and the in-memory connections the test suite below opens with
     /// `Connection::open_in_memory()` -- both end up here.
@@ -637,36 +647,6 @@ fn row_to_article(row: &Row) -> rusqlite::Result<Article> {
         noted_at: row.get(11)?,
         feed_url: row.get(12)?,
     })
-}
-
-/// The directory tuxwire's data (right now, just the database file) lives
-/// in: `~/.local/share/tuxwire`, per ARCHITECTURE.md's Storage section.
-///
-/// ## Why this doesn't reach for the `dirs` crate
-///
-/// Plenty of Rust CLI apps pull in the `dirs` crate to resolve
-/// platform-appropriate data/config directories portably, since Windows,
-/// macOS, and Linux all disagree on where these belong. tuxwire only ever
-/// targets Linux -- ARCHITECTURE.md's whole reason for existing describes
-/// it living in a Hyprland scratchpad -- so it's simpler, and one fewer
-/// dependency, to implement just the single path this project actually
-/// needs: the XDG Base Directory spec's `$XDG_DATA_HOME`, falling back to
-/// `$HOME/.local/share` when that variable isn't set, which is what the
-/// spec itself documents as the default.
-fn data_dir() -> anyhow::Result<PathBuf> {
-    if let Ok(xdg_data_home) = std::env::var("XDG_DATA_HOME") {
-        return Ok(PathBuf::from(xdg_data_home).join("tuxwire"));
-    }
-
-    let home = std::env::var("HOME")
-        .context("HOME environment variable is not set -- can't locate the data directory")?;
-
-    Ok(PathBuf::from(home).join(".local/share/tuxwire"))
-}
-
-/// The full path to the database file itself: `data_dir()/tuxwire.db`.
-fn db_path() -> anyhow::Result<PathBuf> {
-    Ok(data_dir()?.join("tuxwire.db"))
 }
 
 // `#[cfg(test)]` means this entire module is compiled only when running

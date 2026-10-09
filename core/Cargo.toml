@@ -1,0 +1,26 @@
+# Manifest for `tuxwire-core`: the part of tuxwire that has nothing to do with a
+# terminal -- fetching and parsing feeds, the SQLite database, the Article
+# model, the icon table. Both the terminal program (`tui/`) and the Android app
+# (a separate repository) depend on this crate, so it must NOT depend on
+# ratatui, crossterm, or any desktop-only path convention.
+[package]
+name = "tuxwire-core"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# Versions and features come from `[workspace.dependencies]` in the root
+# Cargo.toml (see the comments there for what each crate is for).
+anyhow.workspace = true
+chrono.workspace = true
+feed-rs.workspace = true
+reqwest.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+webpki-root-certs.workspace = true
+
+# Crates needed only by this crate's own tests (never compiled into an app).
+# `#[tokio::test]` in fetch_report.rs needs the tokio runtime.
+[dev-dependencies]
+tokio.workspace = true
