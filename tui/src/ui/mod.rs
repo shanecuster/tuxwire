@@ -3781,7 +3781,9 @@ fn render_theme_picker_popup(
             Span::styled(format!("{:<22}", builtin.name), name_style),
         ];
         // The swatches. `c` is that theme's palette, not the current one.
-        let c = &builtin.colors;
+        // The built-in table holds plain core RGB values, so convert it to
+        // the ratatui-coloured `Theme` first (`Theme::from`, see theme.rs).
+        let c = Theme::from(builtin.colors);
         for color in [
             c.background,
             c.text_primary,

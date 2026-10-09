@@ -10,7 +10,7 @@
 //!
 //! Belongs here: anything that would be identical on a desktop and a phone --
 //! the `Article` model, the SQLite database and its migrations, fetching and
-//! parsing feeds, the fetch report, and the icon table.
+//! parsing feeds, the fetch report, the icon table, and the built-in colour palettes.
 //!
 //! Does not belong here: anything that assumes a terminal (ratatui,
 //! crossterm, key handling) or a Linux desktop (reading `$HOME`, `~/.config`
@@ -31,3 +31,4 @@ pub mod icons;
 pub mod models;
 pub mod scoring;
 pub mod storage;
+pub mod theme;
