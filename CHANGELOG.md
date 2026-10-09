@@ -10,7 +10,8 @@ messages — what changed and why, not just what.
 - **Theme picker with eight built-in themes.** Press `t` to choose between
   Everforest (the new default), Dracula, Gruvbox, Catppuccin Mocha, Nord,
   Solarized Dark, Tokyo Night, and Catppuccin Macchiato (the original
-  palette). The whole screen previews each one live, `Enter` keeps it,
+  palette), listed alphabetically in the picker; the default doesn't
+  depend on that order. The whole screen previews each one live, `Enter` keeps it,
   `Esc` cancels. The choice is saved as `base = "..."` in `theme.toml` and
   restored on startup. Colors in `theme.toml`'s `[theme]` table now act as
   overrides on top of the chosen theme, so existing full `theme.toml` files

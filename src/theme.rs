@@ -98,15 +98,20 @@ const fn rgb(hex: u32) -> Color {
     )
 }
 
-/// The default theme's name. The code itself uses "index 0" as the
-/// default (when `theme.toml` has no `base`, or doesn't exist); this
-/// constant lets the tests check that index 0 really is Everforest.
-/// `#[cfg(test)]` leaves it out of the real binary, where nothing reads it.
-#[cfg(test)]
+/// The default theme, **by name**: what a `theme.toml` with no `base`
+/// line gets, and what `ThemeSettings::default()` starts with (see
+/// [`default_index`]).
+///
+/// Named on purpose rather than "whatever is first in [`BUILTIN_THEMES`]".
+/// The picker lists themes alphabetically ([`picker_order`]), and nothing
+/// about the table's order or the picker's order may change which theme
+/// is the default. The bundled `theme.toml.example` says
+/// `base = "Everforest"` too; a test keeps the two in agreement.
 pub const DEFAULT_THEME: &str = "Everforest";
 
-/// Every built-in theme, in the order the picker lists them. The first
-/// entry is the default.
+/// Every built-in theme. The order here doesn't matter: the picker sorts
+/// them by name ([`picker_order`]), and the default is chosen by name
+/// ([`DEFAULT_THEME`]), never by position.
 ///
 /// **To add a theme, copy one block, rename it, and change the colors.**
 /// Nothing else needs touching. The tests in this file then check that the
@@ -276,6 +281,34 @@ pub fn builtin_index(name: &str) -> Option<usize> {
         .position(|theme| theme.name.eq_ignore_ascii_case(name.trim()))
 }
 
+/// The index in [`BUILTIN_THEMES`] of the default theme, found by its name
+/// ([`DEFAULT_THEME`]) rather than assumed to be `0`.
+///
+/// `.expect(...)` unwraps the `Option`, and would panic with that message
+/// if `DEFAULT_THEME` named a theme that isn't in the table. That can only
+/// happen through a code edit, never through user config, and the test
+/// `default_is_everforest_by_name_not_by_position` fails first if it does.
+pub fn default_index() -> usize {
+    builtin_index(DEFAULT_THEME).expect("DEFAULT_THEME must name an entry in BUILTIN_THEMES")
+}
+
+/// The order the `t` picker lists the built-in themes in: indices into
+/// [`BUILTIN_THEMES`], sorted alphabetically by name, ignoring case.
+///
+/// Returning indices (not the themes themselves) lets the picker keep
+/// storing "which theme" as a `BUILTIN_THEMES` index, the same thing
+/// `ThemeSettings::base` holds, so the sort only affects display.
+///
+/// `(0..len).collect()` builds the list `[0, 1, 2, ...]`. Then
+/// `sort_by_key` reorders it by a key computed per element, here each
+/// theme's name in lowercase, so `"catppuccin"` and `"Catppuccin"` sort
+/// alike. Allocating a fresh 8-item `Vec` on every call is negligible.
+pub fn picker_order() -> Vec<usize> {
+    let mut order: Vec<usize> = (0..BUILTIN_THEMES.len()).collect();
+    order.sort_by_key(|&index| BUILTIN_THEMES[index].name.to_lowercase());
+    order
+}
+
 /// The user's theme choice, loaded from `theme.toml`: which built-in to
 /// start from, plus any per-slot overrides. [`ThemeSettings::resolve`]
 /// combines them into the [`Theme`] the UI draws with.
@@ -283,14 +316,29 @@ pub fn builtin_index(name: &str) -> Option<usize> {
 /// The UI keeps one of these for the whole session. The picker changes
 /// `base` and calls `resolve` again to preview, and the overrides come
 /// along automatically.
-#[derive(Debug, Clone, Default)]
+///
+/// `Default` is implemented by hand below rather than derived, because a
+/// derived one would set `base` to `0` (the first table entry) instead of
+/// the named [`DEFAULT_THEME`].
+#[derive(Debug, Clone)]
 pub struct ThemeSettings {
     /// Index into [`BUILTIN_THEMES`] of the selected built-in. `pub` so the
-    /// picker can move it. `Default` gives `0`, the default theme.
+    /// picker can move it.
     pub base: usize,
     /// The user's `[theme]` overrides. Private, and only filled by
     /// [`ThemeSettings::parse`], so it can't be set to anything unparsed.
     overrides: ThemeOverrides,
+}
+
+impl Default for ThemeSettings {
+    /// The default theme ([`default_index`]) with no overrides, the same
+    /// as an empty `theme.toml`.
+    fn default() -> ThemeSettings {
+        ThemeSettings {
+            base: default_index(),
+            overrides: ThemeOverrides::default(),
+        }
+    }
 }
 
 /// The optional `[theme]` slots from `theme.toml`, already converted to
@@ -413,12 +461,13 @@ impl ThemeSettings {
         let raw: RawTheme = toml::from_str(contents).context("invalid theme.toml")?;
 
         // Step 2: `base` → an index into `BUILTIN_THEMES`. Missing means the
-        // default (index 0). An unknown name is an error that lists the
+        // default theme, looked up by name (`default_index`), not whatever
+        // happens to be first in the table. An unknown name is an error that lists the
         // valid names, rather than a silent fallback the user wouldn't
         // notice. `.map(|t| t.name)` pulls each built-in's name out, and
         // `.collect::<Vec<_>>().join(", ")` glues them into one string.
         let base = match raw.base.as_deref() {
-            None => 0,
+            None => default_index(),
             Some(name) => builtin_index(name).ok_or_else(|| {
                 let names: Vec<&str> = BUILTIN_THEMES.iter().map(|t| t.name).collect();
                 anyhow!("base = {name:?}: expected one of {}", names.join(", "))
@@ -702,12 +751,79 @@ accent_selected = "#8aadf4"
         ((l1 - l2).powi(2) + (a1 - a2).powi(2) + (b1 - b2).powi(2)).sqrt()
     }
 
-    /// The default is the first entry, so `ThemeSettings::default()`
-    /// (base `0`) and "no `base` in theme.toml" both mean Everforest.
+    /// The default is Everforest, found by name, and the alphabetical
+    /// picker order has nothing to do with it. Every path that yields "the
+    /// default" is checked against the literal `"Everforest"` (not the
+    /// `DEFAULT_THEME` constant, so an accidental edit to the constant fails
+    /// too): `default_index`, `ThemeSettings::default()`, and a
+    /// `theme.toml` with no `base` line.
+    ///
+    /// The last two asserts are the "confused" case: the picker's first row
+    /// is Catppuccin Macchiato (alphabetically first), so if anything ever
+    /// treated "first in the picker" (or "first after sorting") as the
+    /// default, the default would come out as Macchiato and this test fails.
     #[test]
-    fn default_theme_is_first() {
-        assert_eq!(BUILTIN_THEMES[0].name, DEFAULT_THEME);
-        assert_eq!(ThemeSettings::default().base_name(), DEFAULT_THEME);
+    fn default_is_everforest_by_name_not_by_position() {
+        assert_eq!(DEFAULT_THEME, "Everforest");
+        assert_eq!(BUILTIN_THEMES[default_index()].name, "Everforest");
+        assert_eq!(ThemeSettings::default().base_name(), "Everforest");
+        assert_eq!(ThemeSettings::parse("").unwrap().base_name(), "Everforest");
+        assert_eq!(
+            ThemeSettings::parse("[theme]\naccent_read = \"#123456\"")
+                .unwrap()
+                .base_name(),
+            "Everforest"
+        );
+
+        let first_in_picker = BUILTIN_THEMES[picker_order()[0]].name;
+        assert_eq!(first_in_picker, "Catppuccin Macchiato");
+        assert_ne!(
+            BUILTIN_THEMES[picker_order()[0]].name,
+            ThemeSettings::default().base_name(),
+            "the picker's first row must not decide the default"
+        );
+    }
+
+    /// The picker lists every built-in exactly once, in case-insensitive
+    /// alphabetical order by name.
+    #[test]
+    fn picker_order_is_alphabetical() {
+        let order = picker_order();
+
+        // Every theme appears exactly once: same length as the table, and
+        // no index repeated (a `HashSet` drops duplicates).
+        assert_eq!(order.len(), BUILTIN_THEMES.len());
+        let unique: std::collections::HashSet<usize> = order.iter().copied().collect();
+        assert_eq!(unique.len(), order.len());
+
+        // Each name is <= the next one, compared in lowercase.
+        // `.windows(2)` walks overlapping pairs: (0,1), (1,2), ...
+        let names: Vec<String> = order
+            .iter()
+            .map(|&index| BUILTIN_THEMES[index].name.to_lowercase())
+            .collect();
+        for pair in names.windows(2) {
+            assert!(pair[0] <= pair[1], "{} sorts after {}", pair[0], pair[1]);
+        }
+
+        // Spelled out, so a reader sees the actual picker order.
+        let display: Vec<&str> = order
+            .iter()
+            .map(|&index| BUILTIN_THEMES[index].name)
+            .collect();
+        assert_eq!(
+            display,
+            [
+                "Catppuccin Macchiato",
+                "Catppuccin Mocha",
+                "Dracula",
+                "Everforest",
+                "Gruvbox",
+                "Nord",
+                "Solarized Dark",
+                "Tokyo Night",
+            ]
+        );
     }
 
     /// All eight built-in themes exist, with no duplicate names.
@@ -823,7 +939,7 @@ accent_selected = "#8aadf4"
         let settings = ThemeSettings::parse(DEFAULT_THEME_TOML).unwrap();
         assert_eq!(settings.base_name(), DEFAULT_THEME);
         assert_eq!(settings.override_count(), 0);
-        assert_eq!(settings.resolve(), BUILTIN_THEMES[0].colors);
+        assert_eq!(settings.resolve(), BUILTIN_THEMES[default_index()].colors);
     }
 
     /// `base` picks the built-in, case-insensitively.

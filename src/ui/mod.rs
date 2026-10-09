@@ -80,7 +80,7 @@ use crate::fetchers::{self, ConfiguredSource, Fetcher};
 use crate::icons::{self, Icon, IconMode, IconSettings};
 use crate::models::Article;
 use crate::storage::Storage;
-use crate::theme::{self, BUILTIN_THEMES, Theme, ThemeSettings};
+use crate::theme::{self, BUILTIN_THEMES, Theme, ThemeSettings, picker_order};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
@@ -321,10 +321,12 @@ enum Mode {
     /// comes back next launch. Only shown when `icons.toml` doesn't exist
     /// yet (see `SessionStart::show_icon_check`).
     IconCheck,
-    /// The `t` theme picker is open. `selected` is the `BUILTIN_THEMES`
-    /// index being previewed. The whole screen is already drawn in that
-    /// theme, because moving the selection re-resolves `current_theme`
-    /// right away. `original` is the index to go back to on `Esc`.
+    /// The `t` theme picker is open. `selected` is the highlighted *row*,
+    /// a position in `theme::picker_order()` (alphabetical), not a
+    /// `BUILTIN_THEMES` index. The theme on that row is the one being
+    /// previewed: the whole screen is already drawn in it, because moving
+    /// the selection re-resolves `current_theme` right away. `original` is
+    /// the `BUILTIN_THEMES` index to go back to on `Esc`.
     /// `overrides` is how many `theme.toml` `[theme]` slots apply on top of
     /// every built-in, captured when the picker opens so the popup can say
     /// so (see `render_theme_picker_popup`).
@@ -646,7 +648,10 @@ fn draw_until_quit(
             overrides,
         } = mode
         {
-            let count = BUILTIN_THEMES.len();
+            // The rows in display order (alphabetical), as `BUILTIN_THEMES`
+            // indices. `selected` is a position in this list.
+            let order = picker_order();
+            let count = order.len();
             match key.code {
                 // Up/down wrap around the list. Adding `count - 1` and then
                 // taking `% count` is "minus one, wrapping" without ever
@@ -657,7 +662,8 @@ fn draw_until_quit(
                     } else {
                         (selected + 1) % count
                     };
-                    themes.base = next;
+                    // Row → theme: the theme shown on row `next`.
+                    themes.base = order[next];
                     current_theme = themes.resolve();
                     mode = Mode::ThemePicker {
                         selected: next,
@@ -1266,12 +1272,18 @@ fn draw_until_quit(
                     notice = Some(save_icon_mode_notice(&icons));
                 }
 
-                // `t` opens the theme picker on the current theme. Both
-                // `selected` and `original` start there, so `Esc` with no
-                // movement changes nothing.
+                // `t` opens the theme picker with the current theme's row
+                // highlighted. `selected` is that theme's position in the
+                // alphabetical `picker_order()`, found with `.position()`
+                // (`unwrap_or(0)` is unreachable in practice, since every
+                // theme is in the order). `original` is the theme itself,
+                // so `Esc` with no movement changes nothing.
                 KeyCode::Char('t') => {
                     mode = Mode::ThemePicker {
-                        selected: themes.base,
+                        selected: picker_order()
+                            .iter()
+                            .position(|&index| index == themes.base)
+                            .unwrap_or(0),
                         original: themes.base,
                         overrides: themes.override_count(),
                     };
@@ -3103,7 +3115,8 @@ fn render_add_source_popup(frame: &mut Frame, theme: &Theme, area: Rect, step: &
 }
 
 /// The `t` theme picker popup (`Mode::ThemePicker`): one row per built-in
-/// theme, with the highlighted row marked, and a few color swatches drawn
+/// theme, in alphabetical order (`theme::picker_order`), with the
+/// highlighted row (`selected`, a row position) marked, and a few color swatches drawn
 /// in *that theme's own* colors (background, text, unread, read, saved,
 /// skipped, selected). You can compare themes before moving to them, while
 /// the screen behind shows the highlighted one in full.
@@ -3121,10 +3134,12 @@ fn render_theme_picker_popup(
 ) {
     let mut lines = Vec::new();
 
-    // One line per built-in. `.enumerate()` pairs each entry with its index,
-    // so the row being previewed can be marked and bolded.
-    for (index, builtin) in BUILTIN_THEMES.iter().enumerate() {
-        let is_selected = index == selected;
+    // One line per built-in, in alphabetical order. `.enumerate()` pairs
+    // each theme with its row number, so the row being previewed can be
+    // marked and bolded.
+    for (row, &index) in picker_order().iter().enumerate() {
+        let builtin = &BUILTIN_THEMES[index];
+        let is_selected = row == selected;
         let name_style = if is_selected {
             Style::new()
                 .fg(theme.accent_selected)

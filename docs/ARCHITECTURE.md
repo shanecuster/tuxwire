@@ -272,9 +272,16 @@ theme, WCAG contrast against `background` of ≥ 4.5 for `text_primary` and
 pair of unread/read/skipped/saved/selected. Nord's `accent_read` uses
 nord14, not nord7, because nord7 vs nord8 (`accent_selected`) is ΔE ≈ 10.
 
-The default is defined in two places that tests keep in sync:
-`BUILTIN_THEMES[0]` (used when `theme.toml` has no `base`) and the
-`base = "..."` line in `theme.toml.example` (what a fresh install loads).
+**Order and default.** The table's order doesn't matter. The `t` picker
+lists themes alphabetically by name, ignoring case
+(`theme::picker_order()`), and stores "which theme" as a `BUILTIN_THEMES`
+index, so sorting only affects display. The default is named, not
+positional: `DEFAULT_THEME = "Everforest"`, resolved by `default_index()`
+for both `ThemeSettings::default()` and a `theme.toml` without `base`. The
+bundled `theme.toml.example` also says `base = "Everforest"` (what a fresh
+install loads). Tests pin the default to Everforest along every path,
+check that the picker's first row (Catppuccin Macchiato) doesn't leak into
+it, and check that the picker order is alphabetical.
 
 The `t` picker previews live: moving the selection sets
 `ThemeSettings::base` and re-resolves the theme, so the whole screen

@@ -24,6 +24,9 @@ unchanged.
 4. Theme picker with seven built-in themes.
 5. Catppuccin Macchiato as the eighth built-in.
 6. Docs (README, ARCHITECTURE, CHANGELOG, this file).
+7. `CLAUDE.md` for the standalone app (FreshRSS rules removed; the branch rule is now
+   "feature branches off master; master changes only by merging a branch whose tests pass").
+8. Theme picker in alphabetical order, with the default made explicit (see below).
 
 ### What was left out (FreshRSS-only)
 
@@ -44,27 +47,31 @@ unchanged.
 | `src/ui/mod.rs` | Draws icons everywhere and the footer `notice`. `i` cycles icon mode, `t` opens the theme picker (live preview), and the first run opens the icon check. |
 | `src/main.rs` | Loads both settings files, records the startup fetch, and hands everything to `ui::run` as `SessionStart`. |
 
-**Tests:** 66 (master had 29). They cover glyph widths in every mode, icon names, category
+**Tests:** 67 (master had 29). They cover glyph widths in every mode, icon names, category
 lookup and overrides, `icons.toml` parsing and saving, offline detection against a refused
 connection on `127.0.0.1:1`, article state icons, footer messages, theme lookup, override
 merging, `theme.toml` saving, and per-theme contrast and distinctness for all 8 themes.
 
 ### Making Catppuccin Macchiato the default
 
-The default lives in two places, and the tests fail if they disagree:
+(Updated after the alphabetical-picker commit: the default is now a named constant, not
+"entry 0", so table order no longer matters.)
 
-1. **`theme.toml.example`: change `base = "Everforest"` to `base = "Catppuccin Macchiato"`.**
-   This is what a fresh install actually loads, since there's no `theme.toml` yet and the
-   bundled example is used. Its comment says which theme is "(default)", and its
-   commented-out override values are Everforest's (cosmetic only), so update those too.
-2. **`src/theme.rs`: move the Macchiato block to the top of `BUILTIN_THEMES`.** Index 0 is
-   what a `theme.toml` *without* a `base` line gets. Then set the test constant
-   `DEFAULT_THEME = "Catppuccin Macchiato"`, and rename the test
-   `bundled_default_is_everforest_without_overrides`.
+1. **`src/theme.rs`: set `DEFAULT_THEME = "Catppuccin Macchiato"`.** That's the default for a
+   `theme.toml` with no `base` line and for `ThemeSettings::default()` (both go through
+   `default_index()`). There's no need to move any table entry.
+2. **`theme.toml.example`: change `base = "Everforest"` to `base = "Catppuccin Macchiato"`.**
+   That's what a fresh install loads. Its "(default)" comment and its commented-out override
+   values (Everforest's, cosmetic only) should follow.
+3. **Tests:** `default_is_everforest_by_name_not_by_position` deliberately pins the literal
+   `"Everforest"` and checks that the picker's first row (Macchiato) is *not* the default. It
+   must be rewritten for Macchiato, and the "first row isn't the default" assert dropped,
+   since Macchiato is alphabetically first. Rename
+   `bundled_default_is_everforest_without_overrides` too.
 
 Then update the docs that say "Everforest (default)": README, ARCHITECTURE, and the CHANGELOG
-"Changed" entry, which goes away (Macchiato was the old default too). The picker would then
-list Macchiato first. Users with an old full `theme.toml` see no difference either way.
+"Changed" entry, which goes away (Macchiato was the old default too). Users with an old full
+`theme.toml` see no difference either way.
 
 ### Contrast rules
 
@@ -121,3 +128,50 @@ concluding something is misaligned.
   back instead).
 - **"New"** = inserted this session and still unread, detected by the `articles` row count
   growing across each insert, so `storage/` didn't change.
+
+---
+
+## Alphabetical theme picker, explicit default (branch `feature/standalone-ui`, 2026-10-08)
+
+The `t` picker now lists the built-in themes alphabetically by name, ignoring case:
+Catppuccin Macchiato, Catppuccin Mocha, Dracula, Everforest, Gruvbox, Nord, Solarized Dark,
+Tokyo Night. **The default is still Everforest.**
+
+### Why the default needed fixing first
+
+Before this, "the default" meant `BUILTIN_THEMES[0]`. That was used when `theme.toml` had no
+`base` line, and by `ThemeSettings::default()` (a derived `Default`, so `base: 0`). Any change
+to the table's order would have silently changed the default. Sorting the picker by moving the
+table entries would have made the default Catppuccin Macchiato.
+
+### What changed
+
+| Where | Change |
+|---|---|
+| `src/theme.rs` | `DEFAULT_THEME = "Everforest"` is now a real constant (it was test-only), and `default_index()` looks it up by name. `ThemeSettings`'s `Default` is written by hand to use it, and `parse` uses it when `base` is missing. New `picker_order()` returns `BUILTIN_THEMES` indices sorted by lowercase name. The table itself is unchanged; its order no longer matters. |
+| `src/ui/mod.rs` | `Mode::ThemePicker.selected` is now a *row* (a position in `picker_order()`). Moving maps row → theme with `order[row]`, and opening finds the current theme's row. `themes.base` stays a table index, so saving and `Esc` work as before. |
+
+### Tests (67, up from 66)
+
+- `default_is_everforest_by_name_not_by_position`: the literal `"Everforest"` comes out of
+  `default_index()`, `ThemeSettings::default()`, an empty `theme.toml`, and a `theme.toml` with
+  only overrides. It also checks that the picker's first row (Macchiato) is not the default.
+  I verified it catches the bug: temporarily making `default_index()` return
+  `picker_order()[0]` fails it with `"Catppuccin Macchiato"` vs `"Everforest"`.
+- `picker_order_is_alphabetical`: each theme appears exactly once, names are non-decreasing
+  ignoring case, and the full expected order is spelled out.
+- The bundled-example test now compares against `BUILTIN_THEMES[default_index()]`, not `[0]`.
+
+### Commands
+
+```sh
+cargo test theme      # includes the two new tests
+cargo test && cargo clippy --all-targets -- -D warnings && cargo fmt --check
+
+# Live check (named session; kill only it):
+tmux new-session -d -s tuxwire-sort-test -x 140 -y 48 \
+    "env -u XDG_CONFIG_HOME -u XDG_DATA_HOME HOME=$t ./target/debug/tuxwire; sleep 600"
+tmux send-keys -t tuxwire-sort-test t
+tmux capture-pane -p -t tuxwire-sort-test       # rows alphabetical, ▸ on Everforest
+tmux kill-session -t tuxwire-sort-test
+```
