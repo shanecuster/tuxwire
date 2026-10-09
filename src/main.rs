@@ -20,6 +20,7 @@
 //! matter here — these declarations just make each corresponding
 //! file part of the compiled program.
 mod export;
+mod feedlists;
 mod fetch_report;
 mod fetchers;
 mod icons;

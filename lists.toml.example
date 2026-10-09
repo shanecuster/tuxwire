@@ -1,0 +1,29 @@
+# tuxwire feed lists (src/feedlists/).
+#
+# Optional. Copy to ~/.config/tuxwire/lists.toml to keep more than one feed
+# list, e.g. a "main" list you read daily and a "casual" one for
+# lower-priority feeds. Without this file (or with only one [[list]]),
+# tuxwire uses ~/.config/tuxwire/sources.toml exactly as before, and the
+# `f` picker never opens.
+#
+# Each list's file uses the normal sources.toml format ([[source]] blocks).
+# All lists share one database: read, saved, and note state follow the
+# article, whichever list you're in. Saved, History (y), and search (/)
+# always cover every list.
+#
+# To add a list: add a [[list]] block here and create its file, then
+# restart tuxwire. Lists are only defined in this file; there's no
+# in-app prompt.
+
+# The list to start with. The `f` picker rewrites only this line, so your
+# comments are kept.
+active = "main"
+
+[[list]]
+name = "main"
+path = "~/.config/tuxwire/sources.toml"
+
+[[list]]
+name = "casual"
+# Relative paths are relative to this file's folder (~/.config/tuxwire/).
+path = "casual.toml"
