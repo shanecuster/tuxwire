@@ -20,13 +20,21 @@ archived as the tag `archive/freshrss` and will not be merged.
 
 - **No new dependencies and no changes to existing dependency features**
   without asking first.
-- `src/icons/` must not import `ratatui`, `crossterm`, or anything from
-  `src/ui/` outside of tests, and must not hardcode paths. It has to stay
-  extractable for a future Android app.
+- **`core/` (the `tuxwire-core` crate) is shared with the Android app.** It
+  must never depend on `ratatui` or `crossterm` (not even in tests), never
+  import anything from `tui/`, and never read `$HOME`/`$XDG_*` or hardcode a
+  path: the program using it decides where files live and passes the path in
+  (e.g. `Storage::open_at`). Terminal-only things (the UI, key handling,
+  `~/.config/tuxwire/*.toml` loading, launching w3m/browsers) stay in `tui/`.
+  Check with `cargo tree -p tuxwire-core | grep -E 'ratatui|crossterm'`
+  (it should print nothing).
 - UI code never hard-codes a color or a glyph: colors come from `Theme`
-  slots (`src/theme.rs`), icons from `IconSettings` (`src/icons/`).
-- Don't treat saved articles or notes as anything but local-only. They are
-  permanent.
+  slots (`tui/src/theme.rs`, filled from the palettes in
+  `core/src/theme.rs`), icons from `IconSettings` (`core/src/icons/`).
+- Saved articles and notes are permanent and stay on the device by default.
+  Syncing them (read state, saved articles, notes) to a user's own CouchDB
+  is an optional feature that is off by default and tucked away in settings
+  -- never sync anything unless the user turned it on.
 
 ## How to work
 
@@ -63,9 +71,10 @@ new code:
 - Comments must be accurate. If code changes, update its comments in the same
   commit. A misleading comment is worse than none.
 - Before writing, reread one or two of the best-commented existing files
-  (for example under `src/storage/`) and match their tone and depth.
+  (for example under `core/src/storage/`) and match their tone and depth.
 - New modules start with `#![warn(clippy::missing_docs_in_private_items)]`
-  (as `src/icons/mod.rs`, `src/theme.rs`, and `src/fetch_report.rs` do) so
+  (as `core/src/icons/mod.rs`, `core/src/theme.rs`, and
+  `core/src/fetch_report.rs` do) so
   clippy flags any undocumented item. (Clippy can't check the inline `//`
   comments, so those are checked by the person reviewing.)
 - At the end of each piece of work, show one or two functions that best
@@ -76,8 +85,9 @@ it says "non-trivial block", this file's stricter rule wins.
 
 ## Building and testing
 
-All three must pass before calling anything done (and before a branch is
-merged into master):
+The repo is a Cargo workspace (`core/` + `tui/`). Run at the repo root, these
+commands cover both crates. All three must pass before calling anything done
+(and before a branch is merged into master):
 
 ```bash
 cargo test
@@ -114,6 +124,9 @@ fine for testing offline handling).
 - Primary machine: Linux (Hyprland). The app is also run on Android through
   Termux, where Rust builds must live in Termux's private filesystem (not
   shared/SAF storage). Don't introduce absolute or desktop-only paths.
+- A native Android app (Kotlin + Jetpack Compose, separate private repo
+  `tuxwire-android`) will use `tuxwire-core` through UniFFI. Anything added
+  to `core/` should make sense on a phone, not just in a terminal.
 - Config lives in `~/.config/tuxwire/` (`sources.toml`, `theme.toml`,
   `icons.toml`, `export.toml`); data in `~/.local/share/tuxwire/`.
   Config-driven, no interactive path prompts.

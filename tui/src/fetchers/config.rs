@@ -173,7 +173,7 @@ pub fn load_sources_at(path: &Path, create_if_missing: bool) -> anyhow::Result<V
 /// The full path to the user's sources config: `~/.config/tuxwire/sources.toml`,
 /// per ARCHITECTURE.md's "Config lives separately at `~/.config/tuxwire/`".
 ///
-/// Mirrors `theme::theme_path`/`storage::data_dir` exactly -- same
+/// Mirrors `theme::theme_path`/`paths::data_dir` exactly -- same
 /// XDG-fallback pattern (`$XDG_CONFIG_HOME`, falling back to
 /// `$HOME/.config`), just one more filename joined onto the same
 /// `tuxwire` config directory those two already agree on.

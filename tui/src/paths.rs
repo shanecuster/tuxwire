@@ -14,7 +14,7 @@
 //! and is told its data directory by the operating system. Each program now
 //! decides where its own data lives and passes the path to the core.
 
-// Has clippy flag any undocumented item here, the same as in `src/icons/`.
+// Has clippy flag any undocumented item here, the same as in `core/src/icons/`.
 #![warn(clippy::missing_docs_in_private_items)]
 
 use anyhow::Context;

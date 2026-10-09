@@ -15,7 +15,7 @@
 //!    full `[theme]` table, no `base`) therefore still loads and looks
 //!    exactly as it did before, since every slot is overridden.
 
-// Has clippy flag any undocumented item here, the same as in `src/icons/`.
+// Has clippy flag any undocumented item here, the same as in `core/src/icons/`.
 #![warn(clippy::missing_docs_in_private_items)]
 
 use anyhow::{Context, anyhow};
@@ -410,7 +410,7 @@ fn parse_slot(value: Option<String>, key: &str) -> anyhow::Result<Option<Color>>
 /// The full path to the user's theme config: `~/.config/tuxwire/theme.toml`,
 /// per ARCHITECTURE.md's "Config lives separately at `~/.config/tuxwire/`".
 ///
-/// This mirrors `storage::data_dir`'s reasoning almost exactly (see that
+/// This mirrors `paths::data_dir`'s reasoning almost exactly (see that
 /// function's doc comment for the full explanation of why no `dirs` crate
 /// is used) — same XDG-fallback pattern, just for `$XDG_CONFIG_HOME`
 /// instead of `$XDG_DATA_HOME`, since config and data are two different

@@ -177,7 +177,7 @@ fn save_mode_at(path: &Path, mode: IconMode) -> anyhow::Result<()> {
 /// The full path to `icons.toml`: `$XDG_CONFIG_HOME/tuxwire/icons.toml`,
 /// or `~/.config/tuxwire/icons.toml` when `XDG_CONFIG_HOME` isn't set.
 /// Same XDG fallback as `theme.rs`'s `theme_path` (see that function, and
-/// `storage::data_dir`, for why there's no `dirs` crate).
+/// `paths::data_dir`, for why there's no `dirs` crate).
 fn icons_path() -> anyhow::Result<PathBuf> {
     if let Ok(xdg_config_home) = std::env::var("XDG_CONFIG_HOME") {
         return Ok(PathBuf::from(xdg_config_home)
