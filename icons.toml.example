@@ -1,0 +1,44 @@
+# tuxwire icons (src/icons/).
+#
+# tuxwire writes this file to ~/.config/tuxwire/icons.toml the first time
+# you answer the "Do you see an icon here?" check, and again whenever you
+# press `i` to change the icon mode. Only the `mode` line is rewritten, so
+# your comments and [categories] entries are kept. Edit freely; changes
+# take effect the next time tuxwire starts.
+#
+# This exact file is also compiled into the tuxwire binary as the
+# defaults used before ~/.config/tuxwire/icons.toml exists.
+
+# Which glyph set to draw:
+#   "nerd"    - Nerd Font icons. Needs a Nerd Font *Mono* font in your
+#               terminal (e.g. "JetBrainsMono Nerd Font Mono"). The Mono
+#               variants draw every icon exactly one cell wide; the
+#               non-Mono ones draw icons wider than a cell, which breaks
+#               tuxwire's borders and columns.
+#   "unicode" - plain Unicode symbols (● ○ ★ ▸) that almost every font has.
+#   "ascii"   - single ASCII characters (o . * >). Works everywhere.
+mode = "nerd"
+
+# Custom icons for sidebar topics (the `topic = "..."` values from
+# sources.toml). Matching ignores upper/lower case and surrounding spaces.
+#
+# Each value is either:
+#   - an icon name: unread read starred skipped new refresh error offline
+#     expanded collapsed linux rust security news sports tech gaming blog
+#     science code music feed category
+#     These switch automatically between their Nerd/Unicode/ASCII versions.
+#   - a single character, such as "⌂", or a Nerd Font glyph written as a
+#     TOML escape like "\uF015" (search https://www.nerdfonts.com/cheat-sheet).
+#     A single character has only one version, so in a mode that can't show
+#     it (a Nerd glyph in "unicode" mode, anything non-ASCII in "ascii"
+#     mode) the topic's built-in icon is used instead. Pick a glyph that
+#     is one terminal cell wide; most emoji are two and will misalign the
+#     sidebar.
+#
+# Topics with no entry here use a built-in icon if their name is a common
+# one (linux, rust, security, news, sports, tech, gaming, blog, science,
+# programming, music, rss, ...), and a folder icon otherwise.
+[categories]
+# homelab = "tech"
+# "world events" = "news"
+# kernel = "\uF17C"
