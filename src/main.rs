@@ -40,7 +40,7 @@ mod ui;
 use fetch_report::FetchReport;
 use fetchers::Fetcher;
 use storage::Storage;
-use theme::Theme;
+use theme::ThemeSettings;
 
 /// `#[tokio::main]` is a *macro* that rewrites this function at compile
 /// time. Rust's real `fn main()` can't be `async` — something has to own
@@ -139,32 +139,34 @@ async fn main() -> anyhow::Result<()> {
         storage.article_count()?
     );
 
-    // Fourth milestone: the TUI shell itself. `Theme::load` reads
-    // `~/.config/tuxwire/theme.toml` (falling back to the bundled
-    // Catppuccin Macchiato default if that file doesn't exist yet -- see
-    // `theme.rs`), and `ui::run` takes it from there: raw mode, the
+    // Fourth milestone: the TUI shell itself. `ThemeSettings::load` reads
+    // `~/.config/tuxwire/theme.toml` (the selected built-in theme plus any
+    // color overrides), falling back to the bundled default, Everforest,
+    // if that file doesn't exist yet -- see `theme.rs`. `ui::run` takes it
+    // from there: raw mode, the
     // alternate screen, and the two-pane layout + footer, all restored
     // back to a normal terminal the moment this returns. Everything
     // printed above (the fetch log, the storage summary) will already have
     // scrolled off by the time this happens, since entering the alternate
     // screen swaps to a blank buffer -- that's expected, not a bug losing
     // that output.
-    let theme = Theme::load()?;
+    let themes = ThemeSettings::load()?;
 
     // Icon settings from `~/.config/tuxwire/icons.toml`, or the bundled
     // defaults (Nerd mode) when that file doesn't exist yet. A missing
     // file also means the first-run "Do you see an icon here?" check
     // hasn't been answered, so `first_run` asks the TUI to open with it.
-    // `?` for the same reason as `Theme::load`: a malformed `icons.toml`
+    // `?` for the same reason as `ThemeSettings::load`: a malformed `icons.toml`
     // should be reported, not silently ignored.
     let icons = icons::config::load()?;
     let session = ui::SessionStart {
+        themes,
         icons: icons.settings,
         show_icon_check: icons.first_run,
         report,
     };
 
-    ui::run(&storage, &theme, &sources, session)?;
+    ui::run(&storage, &sources, session)?;
 
     Ok(())
 }

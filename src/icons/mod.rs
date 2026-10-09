@@ -146,7 +146,13 @@ pub enum Icon {
     /// The sidebar marker on a topic whose sources are showing (`→`/`l`).
     Expanded,
     /// The sidebar marker on a topic whose sources are hidden (`←`/`h`).
+    /// Also the pointer next to the highlighted row in the theme picker.
     Collapsed,
+    /// The theme picker's title (`t`).
+    Theme,
+    /// A solid block, drawn in a theme's own colors as a preview swatch in
+    /// the theme picker.
+    Swatch,
     /// Category: Linux. Also the first-run test glyph (Tux the penguin).
     Linux,
     /// Category: the Rust language.
@@ -179,9 +185,9 @@ pub enum Icon {
 impl Icon {
     /// Every icon, in declaration order. Used by [`Icon::from_name`] to look
     /// up a name from `icons.toml`, and by the tests to check every row of
-    /// the table. The `[Icon; 23]` length is checked by the compiler, so
+    /// the table. The `[Icon; 25]` length is checked by the compiler, so
     /// adding a variant without adding it here fails to build.
-    pub const ALL: [Icon; 23] = [
+    pub const ALL: [Icon; 25] = [
         Icon::Unread,
         Icon::Read,
         Icon::Starred,
@@ -192,6 +198,8 @@ impl Icon {
         Icon::Offline,
         Icon::Expanded,
         Icon::Collapsed,
+        Icon::Theme,
+        Icon::Swatch,
         Icon::Linux,
         Icon::Rust,
         Icon::Security,
@@ -238,6 +246,10 @@ impl Icon {
             Icon::Expanded => ("\u{f0d7}", "▾", "v"), // nf-fa-caret_down
             Icon::Collapsed => ("\u{f0da}", "▸", ">"), // nf-fa-caret_right
 
+            // Theme picker.
+            Icon::Theme => ("\u{f1fc}", "◐", "&"), // nf-fa-paint_brush
+            Icon::Swatch => ("\u{f0c8}", "█", "#"), // nf-fa-square
+
             // Feed categories.
             Icon::Linux => ("\u{f17c}", "λ", "L"), // nf-fa-linux
             Icon::Rust => ("\u{e7a8}", "⚙", "R"),  // nf-dev-rust
@@ -282,6 +294,8 @@ impl Icon {
             Icon::Offline => "offline",
             Icon::Expanded => "expanded",
             Icon::Collapsed => "collapsed",
+            Icon::Theme => "theme",
+            Icon::Swatch => "swatch",
             Icon::Linux => "linux",
             Icon::Rust => "rust",
             Icon::Security => "security",
@@ -305,7 +319,7 @@ impl Icon {
     /// `.iter().copied().find(...)` walks `ALL` one icon at a time, copies
     /// each one out of the array (`Icon` is `Copy`, so that's free), and
     /// stops at the first one whose name matches. It's a linear search, but
-    /// over 23 items and only while loading config, so a `HashMap` would be
+    /// over 25 items and only while loading config, so a `HashMap` would be
     /// overkill.
     pub fn from_name(name: &str) -> Option<Icon> {
         Icon::ALL.iter().copied().find(|icon| icon.name() == name)

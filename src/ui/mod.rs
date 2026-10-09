@@ -58,6 +58,13 @@
 //! navigation over the (still-filtered) results, `Esc` drops it and
 //! restores whichever view's own unfiltered list was showing.
 //!
+//! Themes (`crate::theme`): `draw_until_quit` owns the `ThemeSettings`
+//! (selected built-in + `theme.toml` overrides) and the `Theme` they resolve
+//! to. Every frame borrows that `Theme`, so nothing here hard-codes a color.
+//! `t` opens `Mode::ThemePicker`, which previews by re-resolving the theme
+//! as the selection moves; `Enter` saves `base` to `theme.toml`, and `Esc`
+//! restores the original.
+//!
 //! Icons (`crate::icons`): every symbol this module draws comes from an
 //! `IconSettings` by name (`Icon::Unread`, `Icon::Collapsed`, a topic's
 //! category icon, ...), never a hard-coded glyph. Article rows get a state
@@ -73,7 +80,7 @@ use crate::fetchers::{self, ConfiguredSource, Fetcher};
 use crate::icons::{self, Icon, IconMode, IconSettings};
 use crate::models::Article;
 use crate::storage::Storage;
-use crate::theme::Theme;
+use crate::theme::{self, BUILTIN_THEMES, Theme, ThemeSettings};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
@@ -82,11 +89,15 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 use std::collections::{HashMap, HashSet};
 
-/// Everything else `main.rs` hands `ui::run` from startup: the icon
-/// settings, whether to open with the first-run icon check, and what the
-/// startup fetch found. Bundled into one struct so `ui::run` gains one
-/// parameter for all of it instead of three.
+/// Everything else `main.rs` hands `ui::run` from startup: the theme and
+/// icon settings, whether to open with the first-run icon check, and what
+/// the startup fetch found. Bundled into one struct so `ui::run` gains one
+/// parameter for all of it instead of four.
 pub struct SessionStart {
+    /// The selected built-in theme plus the user's color overrides, from
+    /// `theme.toml`. Moved into `draw_until_quit`, which owns it so the
+    /// `t` theme picker can switch the base theme in place.
+    pub themes: ThemeSettings,
     /// The icon mode and category icons from `icons.toml` (or the
     /// defaults). Moved into `draw_until_quit`, which owns it from then
     /// on so the `i` key can change the mode in place.
@@ -100,6 +111,10 @@ pub struct SessionStart {
     /// the first footer message (see `fetch_notice`).
     pub report: FetchReport,
 }
+
+/// The footer hint line shown while the `t` theme picker
+/// (`Mode::ThemePicker`) is open.
+const THEME_PICKER_HINTS: &str = "j/k or ↑/↓ preview · Enter keep · Esc cancel";
 
 /// The footer hint line shown while the first-run icon check
 /// (`Mode::IconCheck`) is open.
@@ -214,9 +229,10 @@ const NOTE_PREVIEW_CHARS: usize = 45;
 /// scoped to a single row), even though it only actually does anything
 /// while `View::Saved` is showing.
 ///
-/// `i` (cycle the icon mode: Nerd → Unicode → ASCII) is listed here too,
-/// since it changes the whole app's look rather than one row.
-const KEY_HINTS: [(&str, &str); 12] = [
+/// `i` (cycle the icon mode: Nerd → Unicode → ASCII) and `t` (the theme
+/// picker) are listed here too, since they change the whole app's look
+/// rather than one row.
+const KEY_HINTS: [(&str, &str); 13] = [
     ("s", "save"),
     ("x", "close"),
     ("n", "note"),
@@ -227,6 +243,7 @@ const KEY_HINTS: [(&str, &str); 12] = [
     ("a", "add source"),
     ("E", "export all saved"),
     ("i", "icon mode"),
+    ("t", "theme"),
     ("→/l", "expand topic"),
     ("←/h", "collapse topic"),
 ];
@@ -304,6 +321,18 @@ enum Mode {
     /// comes back next launch. Only shown when `icons.toml` doesn't exist
     /// yet (see `SessionStart::show_icon_check`).
     IconCheck,
+    /// The `t` theme picker is open. `selected` is the `BUILTIN_THEMES`
+    /// index being previewed. The whole screen is already drawn in that
+    /// theme, because moving the selection re-resolves `current_theme`
+    /// right away. `original` is the index to go back to on `Esc`.
+    /// `overrides` is how many `theme.toml` `[theme]` slots apply on top of
+    /// every built-in, captured when the picker opens so the popup can say
+    /// so (see `render_theme_picker_popup`).
+    ThemePicker {
+        selected: usize,
+        original: usize,
+        overrides: usize,
+    },
     /// The `a` "add a new source" flow is open -- see `AddSourceStep` for
     /// which of its two steps is currently showing. Wrapping the step in
     /// its own type (rather than adding more `Mode` variants directly, one
@@ -402,13 +431,12 @@ enum ConfirmField {
 /// `draw_until_quit`, since switching topics has to re-query `storage` for
 /// the newly selected topic's articles.
 ///
-/// `storage: &Storage` and `theme: &Theme` are both borrowed rather than
-/// owned: this function only ever *reads* through them, and taking
-/// ownership would force whoever calls `ui::run` to give up their own
-/// `Storage`/`Theme` (or clone them) just to display something once.
+/// `storage: &Storage` is borrowed rather than owned: this function only
+/// ever *reads* through it, and taking ownership would force whoever calls
+/// `ui::run` to give up their own `Storage` just to display something.
 ///
 /// `session` (see `SessionStart`) is moved in, not borrowed, because
-/// `draw_until_quit` changes the icon settings it carries.
+/// `draw_until_quit` changes the theme and icon settings it carries.
 ///
 /// `sources: &[ConfiguredSource]` is `main`'s own already-loaded,
 /// already-fetched-from list (the same one it built via
@@ -418,7 +446,6 @@ enum ConfirmField {
 /// sources with no new `sources.toml` read and no new database query.
 pub fn run(
     storage: &Storage,
-    theme: &Theme,
     sources: &[ConfiguredSource],
     session: SessionStart,
 ) -> anyhow::Result<()> {
@@ -440,14 +467,7 @@ pub fn run(
     // below hits an error partway through, the user's shell must not be
     // left in raw mode / the alternate screen.
     ratatui::run(|terminal| {
-        draw_until_quit(
-            terminal,
-            theme,
-            storage,
-            &mut topics,
-            &sources_by_topic,
-            session,
-        )
+        draw_until_quit(terminal, storage, &mut topics, &sources_by_topic, session)
     })
 }
 
@@ -494,7 +514,6 @@ fn group_sources_by_topic(sources: &[ConfiguredSource]) -> HashMap<String, Vec<S
 /// `topics` gets reordered.
 fn draw_until_quit(
     terminal: &mut ratatui::DefaultTerminal,
-    theme: &Theme,
     storage: &Storage,
     topics: &mut Vec<String>,
     sources_by_topic: &HashMap<String, Vec<String>>,
@@ -519,6 +538,15 @@ fn draw_until_quit(
     // first-run check can change `icons.mode` in place. The very next
     // frame then draws with the new mode, so a change applies immediately.
     let mut icons = session.icons;
+
+    // The theme settings (selected built-in + overrides), and the colors
+    // they currently resolve to. Both `mut` so the `t` picker can change the
+    // base and re-resolve, which repaints the whole screen on the next frame
+    // (the picker's live preview). `current_theme` is cached here rather
+    // than calling `themes.resolve()` every frame, since it only changes
+    // when the picker moves.
+    let mut themes = session.themes;
+    let mut current_theme = themes.resolve();
 
     // A one-shot footer message (refresh results, icon mode changes) that
     // replaces the keybind hints until the next keypress clears it, so it
@@ -548,6 +576,12 @@ fn draw_until_quit(
     let mut search: Option<String> = None;
 
     loop {
+        // A short-lived borrow of this frame's colors, named `theme` so the
+        // `render(frame, theme, ...)` call below reads as it always has.
+        // Re-taken at the top of each pass, so after the picker assigns a
+        // new `current_theme` the next frame borrows that one.
+        let theme = &current_theme;
+
         // The sidebar only ever reflects the current *topic* selection,
         // even while `view` is `View::Saved` -- there's no per-row
         // selection in the saved view that maps onto it, so leaving this
@@ -599,6 +633,68 @@ fn draw_until_quit(
         // screen for at least one frame, and whatever this key does may set
         // a fresh one below.
         notice = None;
+
+        // While the theme picker is open, every keypress belongs to it, the
+        // same isolation as the other popups. Moving the selection changes
+        // `themes.base` and re-resolves `current_theme` immediately, which is
+        // the live preview: the next frame paints the whole app in that
+        // theme. `if let ... = mode` copies the three `usize` fields out
+        // (they're `Copy`), so `mode` itself is free to be reassigned below.
+        if let Mode::ThemePicker {
+            selected,
+            original,
+            overrides,
+        } = mode
+        {
+            let count = BUILTIN_THEMES.len();
+            match key.code {
+                // Up/down wrap around the list. Adding `count - 1` and then
+                // taking `% count` is "minus one, wrapping" without ever
+                // going below zero, which a `usize` can't represent.
+                KeyCode::Up | KeyCode::Char('k') | KeyCode::Down | KeyCode::Char('j') => {
+                    let next = if matches!(key.code, KeyCode::Up | KeyCode::Char('k')) {
+                        (selected + count - 1) % count
+                    } else {
+                        (selected + 1) % count
+                    };
+                    themes.base = next;
+                    current_theme = themes.resolve();
+                    mode = Mode::ThemePicker {
+                        selected: next,
+                        original,
+                        overrides,
+                    };
+                }
+                // `Enter` keeps the previewed theme and saves it as `base`
+                // in `theme.toml`. Even if saving fails, the theme stays
+                // for this session, and the notice says so.
+                KeyCode::Enter => {
+                    notice = Some(match theme::save_base(themes.base_name()) {
+                        Ok(()) => format!(
+                            "{} Theme: {} (press t to change)",
+                            icons.glyph(Icon::Theme),
+                            themes.base_name()
+                        ),
+                        Err(err) => format!(
+                            "{} Theme is {} for now, but saving theme.toml failed: {err:#}",
+                            icons.glyph(Icon::Error),
+                            themes.base_name()
+                        ),
+                    });
+                    mode = Mode::Normal;
+                }
+                // `Esc` (or `q`, since quitting from inside a popup would be
+                // surprising) puts back the theme that was active when the
+                // picker opened, and saves nothing.
+                KeyCode::Esc | KeyCode::Char('q') => {
+                    themes.base = original;
+                    current_theme = themes.resolve();
+                    mode = Mode::Normal;
+                }
+                _ => {}
+            }
+            continue;
+        }
 
         // While the first-run icon check is open, every keypress belongs to
         // it, the same isolation as the popups below. Checked first because
@@ -1168,6 +1264,17 @@ fn draw_until_quit(
                 KeyCode::Char('i') => {
                     icons.mode = icons.mode.next();
                     notice = Some(save_icon_mode_notice(&icons));
+                }
+
+                // `t` opens the theme picker on the current theme. Both
+                // `selected` and `original` start there, so `Esc` with no
+                // movement changes nothing.
+                KeyCode::Char('t') => {
+                    mode = Mode::ThemePicker {
+                        selected: themes.base,
+                        original: themes.base,
+                        overrides: themes.override_count(),
+                    };
                 }
 
                 // `E` exports every saved article at once into one
@@ -2094,6 +2201,16 @@ fn render(
     if let Mode::IconCheck = mode {
         render_icon_check_popup(frame, theme, body);
     }
+    // The theme picker, also last so it sits on top. Everything behind it is
+    // already drawn in the previewed theme (`theme` *is* the preview).
+    if let Mode::ThemePicker {
+        selected,
+        overrides,
+        ..
+    } = mode
+    {
+        render_theme_picker_popup(frame, theme, icons, body, *selected, *overrides);
+    }
 }
 
 /// The top banner bar (`docs/ARCHITECTURE.md` § 3. TUI): the `tuxwire`
@@ -2755,6 +2872,7 @@ fn render_footer(
         Mode::Error { .. } => ERROR_HINTS,
         Mode::Searching { .. } => SEARCH_HINTS,
         Mode::IconCheck => ICON_CHECK_HINTS,
+        Mode::ThemePicker { .. } => THEME_PICKER_HINTS,
         Mode::Normal => match view {
             View::Topic => KEYBIND_HINTS,
             View::Saved | View::History => SAVED_HINTS,
@@ -2982,6 +3100,94 @@ fn render_add_source_popup(frame: &mut Frame, theme: &Theme, area: Rect, step: &
             frame.set_cursor_position((cursor_x, cursor_y));
         }
     }
+}
+
+/// The `t` theme picker popup (`Mode::ThemePicker`): one row per built-in
+/// theme, with the highlighted row marked, and a few color swatches drawn
+/// in *that theme's own* colors (background, text, unread, read, saved,
+/// skipped, selected). You can compare themes before moving to them, while
+/// the screen behind shows the highlighted one in full.
+///
+/// When `overrides > 0`, a note explains that `theme.toml` is replacing some
+/// of every theme's colors. Otherwise an old full `[theme]` table makes
+/// the picker look broken, since nothing would visibly change.
+fn render_theme_picker_popup(
+    frame: &mut Frame,
+    theme: &Theme,
+    icons: &IconSettings,
+    area: Rect,
+    selected: usize,
+    overrides: usize,
+) {
+    let mut lines = Vec::new();
+
+    // One line per built-in. `.enumerate()` pairs each entry with its index,
+    // so the row being previewed can be marked and bolded.
+    for (index, builtin) in BUILTIN_THEMES.iter().enumerate() {
+        let is_selected = index == selected;
+        let name_style = if is_selected {
+            Style::new()
+                .fg(theme.accent_selected)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::new().fg(theme.text_primary)
+        };
+        // The pointer on the highlighted row, or a blank of the same
+        // one-cell width, so the names line up.
+        let pointer = if is_selected {
+            icons.glyph(Icon::Collapsed)
+        } else {
+            " "
+        };
+
+        // `{:<18}` pads the name with spaces to 18 characters (left-aligned),
+        // so every row's swatches start in the same column. 18 fits the
+        // longest name, "Catppuccin Mocha", plus a gap.
+        let mut spans = vec![
+            Span::styled(format!("{pointer} "), name_style),
+            Span::styled(format!("{:<18}", builtin.name), name_style),
+        ];
+        // The swatches. `c` is that theme's palette, not the current one.
+        let c = &builtin.colors;
+        for color in [
+            c.background,
+            c.text_primary,
+            c.accent_unread,
+            c.accent_read,
+            c.accent_saved,
+            c.accent_skipped,
+            c.accent_selected,
+        ] {
+            spans.push(Span::styled(
+                format!("{} ", icons.glyph(Icon::Swatch)),
+                Style::new().fg(color),
+            ));
+        }
+        lines.push(Line::from(spans));
+    }
+
+    // The overrides note, only when it applies.
+    if overrides > 0 {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            format!("theme.toml overrides {overrides} of 11 colors in every theme"),
+            Style::new().fg(theme.accent_saved),
+        )));
+    }
+
+    // `+ 2` for the border, same as every other popup in this module.
+    let popup_area = centered_rect(area, 60, lines.len() as u16 + 2);
+
+    // Same `Clear` reasoning as `render_note_popup`.
+    frame.render_widget(Clear, popup_area);
+
+    let block = Block::new()
+        .title(format!(" {} Theme ", icons.glyph(Icon::Theme)))
+        .borders(Borders::ALL)
+        .style(Style::new().bg(theme.background).fg(theme.text_primary))
+        .border_style(Style::new().fg(theme.accent_selected));
+
+    frame.render_widget(Paragraph::new(lines).block(block), popup_area);
 }
 
 /// The first-run icon check popup (`Mode::IconCheck`): one Nerd Font
