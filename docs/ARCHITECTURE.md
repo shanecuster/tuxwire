@@ -147,7 +147,12 @@ underneath.
 - **Right pane, below the banner bar:** article list for the selected
   topic (or saved articles, in Saved view), sorted by recency
 - **Footer:** remaining hints not already covered by the sidebar's Keys
-  section, plus last-refresh timestamp
+  section (or a one-shot notice), plus the active feed list's file,
+  right-aligned: "Feed List: <path>" (the file icon in Nerd mode), home as
+  `~`, `text_muted`. Hints/notices keep priority; the path gets the cells
+  left over after them plus a 2-cell gap, is cut from the left by display
+  cells keeping `/<filename>`, and is hidden when even the label plus file
+  name won't fit, or below 60 columns (`NARROW_FOOTER_WIDTH`)
 - **Saved view:** a dedicated view filtering to `saved = true` across
   all topics, independent of the topic sidebar (toggled with `S`)
 
@@ -343,6 +348,48 @@ writes `~/.config/tuxwire/icons.toml`. Modeled on zerohour's
   one-shot footer message that clears on the next key. "Offline" means
   every attempted source failed with a `reqwest` connect/timeout error.
 
+### `lists.toml` — multiple feed lists (built)
+
+Optional `~/.config/tuxwire/lists.toml` (`src/feedlists/`, ratatui-free)
+defines named feed lists, each a file in the `sources.toml` format, with
+`active = "<name>"` remembering the last one picked (`f`), saved via
+`toml_edit`. Paths: absolute, `~/...`, or relative to the `lists.toml`
+folder. Names are unique ignoring case. A malformed `lists.toml` is a
+startup error, like the other config files.
+
+- **One list (no file, no `[[list]]`, or one entry):** identical to before.
+  Topic queries use `Scope::All`, `f` isn't in Keys (pressing it only shows
+  a hint), and a broken `sources.toml` is still a clean startup error.
+- **Shared storage, shared state.** One database. Migration **005** adds
+  a nullable `articles.feed_url` (the `[[source]]` url) plus an index. It's
+  numbered 5 because the archived FreshRSS build used 4, so a database
+  that ran it is already at `user_version = 4`. A list's topic views are
+  `feed_url IN (<its sources' urls>)` (`storage::Scope::Feeds`).
+  Read/skipped/saved/note are per article, so they're shared across lists.
+  Saved, History, search, and export stay global.
+- **Backfill.** `insert_article` sets `feed_url` with
+  `ON CONFLICT(url) DO UPDATE SET feed_url = COALESCE(feed_url, excluded.feed_url)`,
+  which fills it only when missing and touches nothing else. On startup,
+  `backfill_feed_urls` fills remaining NULLs by source *name* across
+  every list, skipping names that map to more than one feed URL. Unfilled
+  rows stay visible in the global views.
+- **Startup.** `feedlists::activate` tries the remembered list, then the
+  others in config order. Failures become one footer notice (list, `~` path,
+  root-cause first line). If nothing loads, the TUI opens empty with the
+  message. Only the active list is fetched.
+- **Switching (`f`).** The picker shows name, `~` path, and unread count
+  (`Storage::unread_count` per list; other lists' files are read, never
+  fetched). `feedlists::try_switch` loads only the target and stays on
+  the current list on failure. Success reloads topics and articles from the
+  database (instant), updates the footer path, and saves `active`. The
+  sidebar also includes the active list's configured topics before they
+  have articles, so a never-fetched list can be refreshed with `r`.
+- **`r` / `a`** act on the active list's file. Only the default
+  `sources.toml` is auto-created when missing; any other missing list file
+  is reported.
+- **Adding lists:** by editing `lists.toml` only (config-driven, no
+  interactive path prompts).
+
 ---
 
 ## Adding Sources
@@ -394,6 +441,9 @@ struct Article {
     skipped: bool,
     saved: bool,
     note: Option<String>,
+    saved_at: Option<DateTime<Utc>>,
+    noted_at: Option<DateTime<Utc>>,
+    feed_url: Option<String>, // the feed (source url) it came from; migration 005
 }
 ```
 
@@ -411,6 +461,8 @@ tuxwire/
 │   ├── theme.rs           # built-in themes + theme.toml loading/saving
 │   ├── icons/             # the icon table + icons.toml loading
 │   ├── fetch_report.rs    # per-fetch new/failed/offline tally
+│   ├── feedlists/         # lists.toml + active-list choice/switching (ratatui-free)
+│   ├── paths.rs           # ~ abbreviation for displayed paths (ratatui-free)
 │   └── ui/                # ratatui views/widgets
 ├── migrations/
 │   └── 001_init.sql
@@ -421,6 +473,7 @@ tuxwire/
 ├── sources.toml.example
 ├── theme.toml.example
 ├── icons.toml.example
+├── lists.toml.example
 └── Cargo.toml
 ```
 

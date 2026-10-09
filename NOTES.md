@@ -175,3 +175,109 @@ tmux send-keys -t tuxwire-sort-test t
 tmux capture-pane -p -t tuxwire-sort-test       # rows alphabetical, ▸ on Everforest
 tmux kill-session -t tuxwire-sort-test
 ```
+
+---
+
+## Multiple feed lists + footer path (branch `feature/feed-lists`, 2026-10-08)
+
+Branched from `master` (which has the icons/themes work merged). Note: the "footer-path"
+work that was expected on master didn't exist anywhere, so it's built here as the first
+commit.
+
+### Decisions (agreed before building)
+
+- **Shared read state.** One database. Read/saved/note follow the article, whichever list
+  you're in. Saved, History, `/` search, and `E` export stay global.
+- **Key `f`**, a separate `lists.toml`, and lists added **only by editing `lists.toml`**
+  (CLAUDE.md: "config-driven, no interactive path prompts").
+- **One list = identical to before**, including a broken `sources.toml` being a clean startup
+  error (nothing to fall back to). With several lists: footer message plus fallback.
+
+### Commits, in order
+
+1. **Footer path.** "Feed List: <path>" right-aligned, `~` for home, cut from the left by
+   display cells keeping `/<filename>`, hidden when it can't fit or below 60 columns (tuxwire
+   had no narrow mode, so `NARROW_FOOTER_WIDTH = 60`, zerohour's threshold). Nerd mode shows
+   the file glyph; Unicode/ASCII say "Feed List:". Muted slot, no new theme slots. New
+   `src/paths.rs` (ratatui-free `~` abbreviation).
+2. **Migration 005, `articles.feed_url`.** Numbered 5, not 4: the archived FreshRSS build used
+   4, so a database that ever ran it is at `user_version = 4` and would silently skip a new
+   migration 4 (a test covers this). `insert_article` fills a missing `feed_url` on
+   re-fetch (`COALESCE`, nothing else touched), and a startup backfill matches old rows by
+   source name, skipping ambiguous names.
+3. **`src/feedlists/`** (ratatui-free): `lists.toml` parsing/validation, `~`/relative paths,
+   `activate` (startup choice with fallback), and `try_switch` (switch, or stay put). Loaders
+   are closures, so the logic is tested without files. It carried a temporary
+   `#![allow(dead_code)]` until commit 4 so that each commit passes clippy on its own.
+4. **Picker and switching.** `storage::Scope` limits topic views and unread counts to the
+   active list. `f` picker, instant switch (database only), `r`/`a` on the active list's file.
+   - **Bug found in the live test and fixed:** a never-fetched list had no topics, and `r`
+     refreshes the selected topic, so it couldn't be fetched at all. With several lists the
+     sidebar now also shows the list's *configured* topics.
+5. **Docs.**
+
+### How it behaves
+
+| Situation | Result |
+|---|---|
+| No `lists.toml` | Single list on `sources.toml`; no `f` in Keys; `f` shows a hint about `lists.toml` |
+| Several lists, remembered one loads | That list; only it is fetched |
+| Remembered list's file missing/broken | Footer: `✗ Feed list "x" couldn't be loaded (~/…: reason); using "main"` |
+| `active` names no list | Footer says so; first list used |
+| No list loads | TUI opens empty, footer explains |
+| Picker on a broken list | Row shows `✗ unavailable`; Enter → message, `still on "<current>"` |
+| Switch | Instant (database only); footer path updates; `active` saved; press `r` to fetch |
+
+### Tests (101, up from 67)
+
+Footer: short path, home abbreviation, long path, wide characters, no space, plus
+label/ellipsis per icon mode. `paths`: under home, home itself, lookalike prefix, outside home.
+Storage: `feed_url` round trip, fill-only-missing (state preserved), backfill
+(unique/ambiguous/unconfigured/already set/rerun), migration 005 on a version-4 database, and
+`Scope` filtering plus unread counts. feedlists: parsing and paths, single-list cases, every
+validation error, `~` handling, `save_active` preserving the file, activation
+(default/remembered/fallback/unknown/none/loads-only-what-it-needs), switching
+(ok/no-op/failed), one-line reasons. UI: `truncate_path_left`, `list_scope` single vs
+several, configured topics in the sidebar.
+
+### Commands
+
+```sh
+cargo test && cargo clippy --all-targets -- -D warnings && cargo fmt --check
+cargo test feedlists      # list config + fallback + switching
+cargo test feed_list      # footer path fitting
+cargo test scope          # per-list database queries
+
+# Throwaway setup with three lists (one deliberately broken):
+t=$(mktemp -d); mkdir -p "$t/.config/tuxwire"
+cat > "$t/.config/tuxwire/lists.toml" <<'TOML'
+[[list]]
+name = "main"
+path = "sources.toml"
+[[list]]
+name = "casual"
+path = "casual.toml"
+[[list]]
+name = "broken"
+path = "~/nowhere/missing.toml"
+TOML
+printf '[[source]]\nname = "LWN"\ntype = "rss"\nurl = "https://lwn.net/headlines/rss"\ntopic = "kernel"\n' \
+    > "$t/.config/tuxwire/casual.toml"
+cargo build
+tmux new-session -d -s tuxwire-lists-test -x 140 -y 48 \
+    "env -u XDG_CONFIG_HOME -u XDG_DATA_HOME HOME=$t ./target/debug/tuxwire; sleep 600"
+tmux send-keys -t tuxwire-lists-test f          # picker
+tmux send-keys -t tuxwire-lists-test j Enter    # switch to casual, then r to fetch it
+tmux capture-pane -p -t tuxwire-lists-test | tail -1   # footer
+tmux kill-session -t tuxwire-lists-test         # only this session
+```
+
+### Not done / worth knowing
+
+- **Moving a feed between lists:** works by editing the files. Its old articles follow it,
+  since membership is by `feed_url`.
+- **Two lists with the same feed:** both show it, with shared state. Same article URL from two
+  *different* feeds: `feed_url` keeps the first feed it was fetched from.
+- **Not updated: CLAUDE.md's "Environment notes".** They still list the config files without
+  `lists.toml`. Not in this task's doc list.
+

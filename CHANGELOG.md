@@ -7,6 +7,21 @@ messages — what changed and why, not just what.
 
 ### Added
 
+- **Multiple feed lists.** An optional `~/.config/tuxwire/lists.toml`
+  defines named lists (e.g. "main" and "casual"), each a file in the
+  `sources.toml` format. `f` opens a picker showing each list's name,
+  file, and unread count, and switches instantly. Only the active list is
+  fetched, at startup and on `r`, and `a` adds sources to it. The choice
+  is remembered across restarts. A missing or broken list file is a footer
+  message, and tuxwire falls back to another list instead of failing.
+  Read, saved, and note state are shared across lists, and Saved, History,
+  search, and export cover all of them. With no `lists.toml` (or one list)
+  nothing changes.
+- **Feed list path in the footer.** "Feed List: ~/.config/tuxwire/…" on the
+  right of the footer (the file icon in Nerd mode), cut from the left to
+  keep the file name visible, and hidden when there's no room or the
+  terminal is under 60 columns. Key hints and notices keep priority.
+
 - **Theme picker with eight built-in themes.** Press `t` to choose between
   Everforest (the new default), Dracula, Gruvbox, Catppuccin Mocha, Nord,
   Solarized Dark, Tokyo Night, and Catppuccin Macchiato (the original
@@ -30,6 +45,9 @@ messages — what changed and why, not just what.
 
 ### Changed
 
+- **Database migration 005** adds a `feed_url` column to articles (which
+  feed each came from), filled in for older articles where possible.
+  Nothing else in the database changes.
 - **Default theme is now Everforest** (was Catppuccin Macchiato) when no
   `theme.toml` exists. Users with their own `theme.toml` see no change, and
   Macchiato is still one keypress away in the picker.
