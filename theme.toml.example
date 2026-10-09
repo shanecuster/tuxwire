@@ -7,7 +7,7 @@
 
 # The built-in theme to start from. One of:
 #   "Everforest" (default), "Dracula", "Gruvbox", "Catppuccin Mocha",
-#   "Nord", "Solarized Dark", "Tokyo Night"
+#   "Nord", "Solarized Dark", "Tokyo Night", "Catppuccin Macchiato"
 # The `t` picker rewrites only this line, so your comments and the
 # overrides below are kept.
 base = "Everforest"

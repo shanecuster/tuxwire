@@ -3140,12 +3140,12 @@ fn render_theme_picker_popup(
             " "
         };
 
-        // `{:<18}` pads the name with spaces to 18 characters (left-aligned),
-        // so every row's swatches start in the same column. 18 fits the
-        // longest name, "Catppuccin Mocha", plus a gap.
+        // `{:<22}` pads the name with spaces to 22 characters (left-aligned),
+        // so every row's swatches start in the same column. 22 fits the
+        // longest name, "Catppuccin Macchiato", plus a gap.
         let mut spans = vec![
             Span::styled(format!("{pointer} "), name_style),
-            Span::styled(format!("{:<18}", builtin.name), name_style),
+            Span::styled(format!("{:<22}", builtin.name), name_style),
         ];
         // The swatches. `c` is that theme's palette, not the current one.
         let c = &builtin.colors;

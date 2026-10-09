@@ -243,6 +243,25 @@ pub const BUILTIN_THEMES: &[BuiltinTheme] = &[
             accent_selected: rgb(0x7aa2f7),
         },
     },
+    // https://catppuccin.com/palette (Macchiato flavor). tuxwire's original
+    // and only palette before built-in themes existed, with exactly the
+    // colors the old `theme.toml.example` shipped.
+    BuiltinTheme {
+        name: "Catppuccin Macchiato",
+        colors: Theme {
+            background: rgb(0x24273a),
+            panel_border: rgb(0x363a4f),
+            text_primary: rgb(0xcad3f5),
+            text_muted: rgb(0x6e738d),
+            text_dim: rgb(0x494d64),
+            accent_unread: rgb(0xf5a97f),
+            accent_read: rgb(0x8bd5ca),
+            accent_skipped: rgb(0xc6a0f6),
+            accent_saved: rgb(0xeed49f),
+            accent_breaking: rgb(0xed8796),
+            accent_selected: rgb(0x8aadf4),
+        },
+    },
 ];
 
 /// The position of the built-in theme called `name` in [`BUILTIN_THEMES`],
@@ -691,9 +710,9 @@ accent_selected = "#8aadf4"
         assert_eq!(ThemeSettings::default().base_name(), DEFAULT_THEME);
     }
 
-    /// All seven requested themes exist, with no duplicate names.
+    /// All eight built-in themes exist, with no duplicate names.
     #[test]
-    fn all_seven_themes_exist_with_unique_names() {
+    fn all_eight_themes_exist_with_unique_names() {
         for expected in [
             "Everforest",
             "Dracula",
@@ -702,6 +721,7 @@ accent_selected = "#8aadf4"
             "Nord",
             "Solarized Dark",
             "Tokyo Night",
+            "Catppuccin Macchiato",
         ] {
             assert!(
                 builtin_index(expected).is_some(),
@@ -824,6 +844,12 @@ accent_selected = "#8aadf4"
         let theme = settings.resolve();
         assert_eq!(theme.background, Color::Rgb(0x24, 0x27, 0x3a));
         assert_eq!(theme.accent_selected, Color::Rgb(0x8a, 0xad, 0xf4));
+
+        // ...and those are exactly the Catppuccin Macchiato built-in, so a
+        // user can delete their 11 override lines, pick Macchiato, and see
+        // no difference at all.
+        let macchiato = builtin_index("Catppuccin Macchiato").unwrap();
+        assert_eq!(theme, BUILTIN_THEMES[macchiato].colors);
     }
 
     /// A partial `[theme]` table overrides only the slots it sets, and those
