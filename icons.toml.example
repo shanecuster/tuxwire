@@ -24,7 +24,7 @@ mode = "nerd"
 #
 # Each value is either:
 #   - an icon name: unread read starred skipped new refresh error offline
-#     expanded collapsed theme swatch linux rust security news sports tech gaming blog
+#     expanded collapsed theme swatch file linux rust security news sports tech gaming blog
 #     science code music feed category
 #     These switch automatically between their Nerd/Unicode/ASCII versions.
 #   - a single character, such as "⌂", or a Nerd Font glyph written as a

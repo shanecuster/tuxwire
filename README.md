@@ -358,7 +358,7 @@ kernel = "\uF17C"        # ...or a single character / Nerd Font glyph
   news, sports, tech, gaming, blog, science, programming, music, rss),
   and a folder icon otherwise.
 - Icon names: `unread read starred skipped new refresh error offline
-  expanded collapsed theme swatch linux rust security news sports tech
+  expanded collapsed theme swatch file linux rust security news sports tech
   gaming blog science code music feed category`. See `icons.toml.example`
   for the full commented file.
 

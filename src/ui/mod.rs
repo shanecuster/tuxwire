@@ -110,7 +110,21 @@ pub struct SessionStart {
     /// (they get `Icon::New` while unread), plus the failure counts for
     /// the first footer message (see `fetch_notice`).
     pub report: FetchReport,
+    /// The feed list file in use, shown at the right of the footer as
+    /// "Feed List: <path>" (see `fit_feed_list`).
+    pub feed_list_path: std::path::PathBuf,
 }
+
+/// Below this terminal width (in columns) the footer never shows the feed
+/// list path, however short the hint line is. tuxwire has no other
+/// "narrow mode"; this is the footer's own, matching zerohour's 60-column
+/// narrow threshold. At that width the hint line alone nearly fills the
+/// row.
+const NARROW_FOOTER_WIDTH: u16 = 60;
+
+/// Blank cells kept between the footer's hint/notice text on the left and
+/// the feed list path on the right, so the two never run together.
+const FOOTER_GAP: u16 = 2;
 
 /// The footer hint line shown while the `t` theme picker
 /// (`Mode::ThemePicker`) is open.
@@ -563,6 +577,11 @@ fn draw_until_quit(
     // because the startup report isn't needed again after `notice` above
     // was built from it.
     let mut new_article_ids = session.report.new_article_ids;
+
+    // The feed list path for the footer, with the home directory shown as
+    // `~`. Converted to text once here rather than on every frame.
+    let feed_list_display =
+        crate::paths::abbreviate_home(&session.feed_list_path, crate::paths::home_dir().as_deref());
     let mut expanded_topics: HashSet<String> = HashSet::new();
     let mut selected_source: Option<String> = None;
 
@@ -614,6 +633,7 @@ fn draw_until_quit(
                 view,
                 search.as_deref(),
                 notice.as_deref(),
+                &feed_list_display,
             )
         })?;
 
@@ -2114,6 +2134,9 @@ fn render(
     // `draw_until_quit`'s one-shot `notice` (refresh results, icon mode
     // changes), shown in the footer in place of the keybind hints.
     notice: Option<&str>,
+    // The feed list path (home already shown as `~`), drawn at the right
+    // of the footer when there's room.
+    feed_list: &str,
 ) {
     // Painting a plain background-colored block across the whole frame
     // first means every gap between/around the panes below (e.g. if the
@@ -2192,7 +2215,16 @@ fn render(
         view,
         search_status,
     );
-    render_footer(frame, theme, footer_area, mode, view, notice);
+    render_footer(
+        frame,
+        theme,
+        icons,
+        footer_area,
+        mode,
+        view,
+        notice,
+        feed_list,
+    );
 
     // The note popup, if open, paints on top of everything drawn above --
     // see `render_note_popup` for why it has to come last (after the panes
@@ -2857,27 +2889,139 @@ fn truncate_preview(text: &str, max_chars: usize) -> String {
 /// `notice` (a one-shot message from `draw_until_quit`) replaces the hint
 /// line when it's `Some`, except during the first-run icon check, whose
 /// `y`/`n` hint is the only way to learn how to answer it.
+///
+/// `feed_list` (the active feed list's path, home as `~`) is drawn
+/// right-aligned on the same row, as "Feed List: <path>" (or the file icon
+/// in Nerd mode), in `text_muted`. The hint or notice on the left always
+/// keeps priority: the path only gets the cells left over after it plus
+/// `FOOTER_GAP`, is shortened from the left to fit (see `fit_feed_list`),
+/// and is hidden when even the file name won't fit, or when the terminal
+/// is narrower than `NARROW_FOOTER_WIDTH`.
+///
+/// Eight parameters, past clippy's default limit of seven. Same reasoning
+/// as `render`'s own `#[allow]`: one call site, and every argument is
+/// already in the caller's hands.
+#[allow(clippy::too_many_arguments)]
 fn render_footer(
     frame: &mut Frame,
     theme: &Theme,
+    icons: &IconSettings,
     area: Rect,
     mode: &Mode,
     view: View,
     notice: Option<&str>,
+    feed_list: &str,
 ) {
-    // The notice wins over the hint line: the footer is one row, and a
-    // refresh result is more useful in the moment than a reminder of what
-    // `j`/`k` do. `&& !matches!(...)` keeps the icon check's hints visible.
-    if let Some(notice) = notice
-        && !matches!(mode, Mode::IconCheck)
-    {
-        let footer = Paragraph::new(notice.to_string())
-            .style(Style::new().bg(theme.background).fg(theme.text_muted));
-        frame.render_widget(footer, area);
+    // The left side: the notice if there is one (except during the icon
+    // check, see above), otherwise the hint line for the current mode.
+    let left = match notice {
+        Some(notice) if !matches!(mode, Mode::IconCheck) => notice,
+        _ => footer_hints(mode, view),
+    };
+    let footer = Paragraph::new(left).style(Style::new().bg(theme.background).fg(theme.text_muted));
+    frame.render_widget(footer, area);
+
+    // The right side, only on a wide-enough terminal. `cell_width` counts
+    // display cells, not characters, so wide characters in the hint line
+    // reserve the space they really take.
+    if area.width < NARROW_FOOTER_WIDTH {
         return;
     }
+    let used = cell_width(left) as u16 + FOOTER_GAP;
+    let available = area.width.saturating_sub(used) as usize;
+    if let Some(text) = fit_feed_list(
+        icons.feed_list_label(),
+        feed_list,
+        icons.ellipsis(),
+        available,
+    ) {
+        // A one-row `Rect` exactly as wide as the text, pushed against the
+        // right edge of the footer. `area.x + area.width - width` is the
+        // first column of that strip; `fit_feed_list` already guaranteed
+        // `width <= available < area.width`, so this can't underflow.
+        let width = cell_width(&text) as u16;
+        let strip = Rect {
+            x: area.x + area.width - width,
+            y: area.y,
+            width,
+            height: 1,
+        };
+        let path =
+            Paragraph::new(text).style(Style::new().bg(theme.background).fg(theme.text_muted));
+        frame.render_widget(path, strip);
+    }
+}
 
-    let hints = match mode {
+/// How many terminal cells `text` takes up: one for most characters, two
+/// for wide ones like CJK and most emoji. Uses ratatui's own measurement
+/// (`Span::width`), so it always agrees with how ratatui lays the text
+/// out, without adding a dependency.
+fn cell_width(text: &str) -> usize {
+    Span::raw(text).width()
+}
+
+/// The footer's feed list text, made to fit in `available` cells, or
+/// `None` if it can't. Shortens from the *left* so the file name, the
+/// most useful part, stays visible:
+///
+/// 1. `"<label> <path>"` if it fits as is.
+/// 2. Otherwise `"<label> <ellipsis><end of path>"`, keeping as much of the
+///    end of the path as fits. The kept part must include the last `/`
+///    and the whole file name, e.g. `"Feed List: …/casual.toml"`.
+/// 3. Otherwise `None`: not even the label plus file name fit, so the
+///    footer shows no path at all rather than a meaningless fragment.
+///
+/// Widths are display cells (`cell_width`), so a wide character counts
+/// as two, and the path is cut on character boundaries, never mid-character.
+fn fit_feed_list(label: &str, path: &str, ellipsis: &str, available: usize) -> Option<String> {
+    // Step 1: the whole thing fits.
+    let full = format!("{label} {path}");
+    if cell_width(&full) <= available {
+        return Some(full);
+    }
+
+    // The byte position where the part we must keep starts: the last `/`
+    // (so the kept text reads `…/name`), or the very start when the path
+    // has no `/` at all, in which case nothing can be dropped.
+    // `rfind` searches from the right and returns a byte index.
+    let must_keep_from = path.rfind('/').unwrap_or(0);
+
+    // Step 2: how many cells are left for the end of the path once the
+    // label, its space, and the ellipsis are placed. `checked_sub` returns
+    // `None` instead of wrapping around below zero, and `?` then returns
+    // `None` from this function: no room even for the label.
+    let budget = available.checked_sub(cell_width(label) + 1 + cell_width(ellipsis))?;
+
+    // Walk the path backwards one character at a time, adding each
+    // character's width, and stop before the first one that doesn't fit.
+    // `char_indices().rev()` yields `(byte_index, char)` pairs from the
+    // end. `keep_from` ends up as the byte index where the kept text
+    // starts.
+    let mut keep_from = path.len();
+    let mut used = 0;
+    for (index, ch) in path.char_indices().rev() {
+        // `encode_utf8` writes the char into a small stack buffer and
+        // returns it as a `&str`, so `cell_width` can measure it without
+        // allocating a `String`.
+        let width = cell_width(ch.encode_utf8(&mut [0u8; 4]));
+        if used + width > budget {
+            break;
+        }
+        used += width;
+        keep_from = index;
+    }
+
+    // Step 3: only show it if the file name (and its `/`) made it in.
+    if keep_from > must_keep_from {
+        return None;
+    }
+    Some(format!("{label} {ellipsis}{}", &path[keep_from..]))
+}
+
+/// The footer's hint line for `mode` and `view`, used whenever there's no
+/// notice to show instead (see `render_footer`).
+fn footer_hints(mode: &Mode, view: View) -> &'static str {
+    match mode {
         Mode::EditingNote { .. } => EDITING_NOTE_HINTS,
         Mode::AddSource(AddSourceStep::Url { .. }) => ADD_SOURCE_URL_HINTS,
         Mode::AddSource(AddSourceStep::Confirm { .. }) => ADD_SOURCE_CONFIRM_HINTS,
@@ -2889,12 +3033,7 @@ fn render_footer(
             View::Topic => KEYBIND_HINTS,
             View::Saved | View::History => SAVED_HINTS,
         },
-    };
-
-    let footer =
-        Paragraph::new(hints).style(Style::new().bg(theme.background).fg(theme.text_muted));
-
-    frame.render_widget(footer, area);
+    }
 }
 
 /// The note popup: a bordered box centered over `area` (the sidebar +
@@ -3420,5 +3559,79 @@ mod tests {
                 .unwrap()
                 .starts_with("@ No sources")
         );
+    }
+
+    /// A short path fits in full, with the label and one space.
+    #[test]
+    fn feed_list_short_path_fits_whole() {
+        assert_eq!(
+            fit_feed_list("Feed List:", "~/.config/tuxwire/sources.toml", "…", 80).as_deref(),
+            Some("Feed List: ~/.config/tuxwire/sources.toml")
+        );
+        // Exactly the needed width still fits (11 label+space + 30 path = 41).
+        assert!(fit_feed_list("Feed List:", "~/.config/tuxwire/sources.toml", "…", 41).is_some());
+    }
+
+    /// The home abbreviation and the footer text work together: a real
+    /// path under home shows as `~/...` in the footer.
+    #[test]
+    fn feed_list_home_abbreviation() {
+        let shown = crate::paths::abbreviate_home(
+            std::path::Path::new("/home/shane/.config/tuxwire/casual.toml"),
+            Some(std::path::Path::new("/home/shane")),
+        );
+        assert_eq!(
+            fit_feed_list("Feed List:", &shown, "…", 80).as_deref(),
+            Some("Feed List: ~/.config/tuxwire/casual.toml")
+        );
+    }
+
+    /// A long path is cut from the left, keeping the file name, and the
+    /// result uses exactly the cells available (or fewer).
+    #[test]
+    fn feed_list_long_path_truncates_from_left() {
+        let path = "~/Documents/feeds/very/deeply/nested/folder/structure/casual.toml";
+        let text = fit_feed_list("Feed List:", path, "…", 30).unwrap();
+        assert!(text.starts_with("Feed List: …"), "{text}");
+        assert!(text.ends_with("/casual.toml"), "{text}");
+        assert!(cell_width(&text) <= 30, "{text}");
+        // The ASCII ellipsis works the same way.
+        let ascii = fit_feed_list("Feed List:", path, "...", 30).unwrap();
+        assert!(ascii.starts_with("Feed List: ...") && ascii.ends_with("/casual.toml"));
+        assert!(ascii.is_ascii() && ascii.len() <= 30);
+    }
+
+    /// Wide characters count as two cells each, and the cut never splits
+    /// one: a 2-cell character that would overflow by one cell is dropped.
+    #[test]
+    fn feed_list_wide_characters() {
+        // "ニュース" is 4 characters but 8 cells.
+        let path = "~/ニュース/feeds.toml";
+        let full = fit_feed_list("Feed List:", path, "…", 80).unwrap();
+        assert_eq!(cell_width(&full), 11 + 2 + 8 + 11);
+
+        // 11 (label+space) + 1 (…) + 13 cells left: "ス/feeds.toml" is
+        // 2 + 11 = 13, and the next "ー" (2 more) doesn't fit.
+        let cut = fit_feed_list("Feed List:", path, "…", 25).unwrap();
+        assert_eq!(cut, "Feed List: …ス/feeds.toml");
+        // 12 cells left: "ス" (2) no longer fits after "/feeds.toml" (11),
+        // so the kept part is exactly "/feeds.toml".
+        let tighter = fit_feed_list("Feed List:", path, "…", 24).unwrap();
+        assert_eq!(tighter, "Feed List: …/feeds.toml");
+        assert!(cell_width(&tighter) <= 24);
+    }
+
+    /// With no room for the label plus file name, there's no text at all,
+    /// including when the space is zero.
+    #[test]
+    fn feed_list_no_space_hides_path() {
+        let path = "~/.config/tuxwire/sources.toml";
+        // "Feed List: …/sources.toml" needs 11 + 1 + 13 = 25 cells.
+        assert!(fit_feed_list("Feed List:", path, "…", 25).is_some());
+        assert_eq!(fit_feed_list("Feed List:", path, "…", 24), None);
+        assert_eq!(fit_feed_list("Feed List:", path, "…", 5), None);
+        assert_eq!(fit_feed_list("Feed List:", path, "…", 0), None);
+        // A bare file name with no `/` is never shortened.
+        assert_eq!(fit_feed_list("Feed List:", "sources.toml", "…", 20), None);
     }
 }

@@ -24,6 +24,7 @@ mod fetch_report;
 mod fetchers;
 mod icons;
 mod models;
+mod paths;
 mod scoring;
 mod storage;
 mod theme;
@@ -164,6 +165,10 @@ async fn main() -> anyhow::Result<()> {
         icons: icons.settings,
         show_icon_check: icons.first_run,
         report,
+        // The feed list file the footer shows ("Feed List: <path>"). Today
+        // that's always `sources.toml`; `sources_path` is the same
+        // function `configured_sources` used to find it above.
+        feed_list_path: fetchers::config::sources_path()?,
     };
 
     ui::run(&storage, &sources, session)?;

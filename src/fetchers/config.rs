@@ -203,7 +203,9 @@ pub fn load_sources() -> anyhow::Result<Vec<SourceConfig>> {
 /// XDG-fallback pattern (`$XDG_CONFIG_HOME`, falling back to
 /// `$HOME/.config`), just one more filename joined onto the same
 /// `tuxwire` config directory those two already agree on.
-fn sources_path() -> anyhow::Result<PathBuf> {
+///
+/// `pub` so the TUI footer can show which feed list file is in use.
+pub fn sources_path() -> anyhow::Result<PathBuf> {
     if let Ok(xdg_config_home) = std::env::var("XDG_CONFIG_HOME") {
         return Ok(PathBuf::from(xdg_config_home)
             .join("tuxwire")
