@@ -187,7 +187,8 @@ impl Storage {
         // `anyhow::Error` return type, the same conversion `?` performs
         // automatically -- spelled out explicitly here because `?` can't
         // reach inside the `.collect()` call itself.
-        rows.collect::<rusqlite::Result<Vec<Article>>>().map_err(Into::into)
+        rows.collect::<rusqlite::Result<Vec<Article>>>()
+            .map_err(Into::into)
     }
 
     /// All articles filed under `topic` *and* published by `source`
@@ -199,14 +200,19 @@ impl Storage {
     /// ARCHITECTURE.md, "a source's topic is already fixed, so 'articles
     /// from source X' is just 'articles in X's topic, further filtered by
     /// source name.'"
-    pub fn articles_by_topic_and_source(&self, topic: &str, source: &str) -> anyhow::Result<Vec<Article>> {
+    pub fn articles_by_topic_and_source(
+        &self,
+        topic: &str,
+        source: &str,
+    ) -> anyhow::Result<Vec<Article>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, title, url, source, topic, timestamp, read, skipped, saved, note, saved_at, noted_at
              FROM articles WHERE topic = ?1 AND source = ?2 ORDER BY timestamp DESC",
         )?;
 
         let rows = stmt.query_map(params![topic, source], row_to_article)?;
-        rows.collect::<rusqlite::Result<Vec<Article>>>().map_err(Into::into)
+        rows.collect::<rusqlite::Result<Vec<Article>>>()
+            .map_err(Into::into)
     }
 
     /// Every saved article, across all topics, most recent first -- backs
@@ -219,7 +225,8 @@ impl Storage {
         )?;
 
         let rows = stmt.query_map([], row_to_article)?;
-        rows.collect::<rusqlite::Result<Vec<Article>>>().map_err(Into::into)
+        rows.collect::<rusqlite::Result<Vec<Article>>>()
+            .map_err(Into::into)
     }
 
     /// Every article tuxwire has ever fetched, regardless of read/skipped/
@@ -237,7 +244,8 @@ impl Storage {
         )?;
 
         let rows = stmt.query_map([], row_to_article)?;
-        rows.collect::<rusqlite::Result<Vec<Article>>>().map_err(Into::into)
+        rows.collect::<rusqlite::Result<Vec<Article>>>()
+            .map_err(Into::into)
     }
 
     /// Every article whose `title` or `note` contains `query` as a
@@ -281,16 +289,20 @@ impl Storage {
 
         let pattern = format!("%{query}%");
         let rows = stmt.query_map(params![pattern], row_to_article)?;
-        rows.collect::<rusqlite::Result<Vec<Article>>>().map_err(Into::into)
+        rows.collect::<rusqlite::Result<Vec<Article>>>()
+            .map_err(Into::into)
     }
 
     /// Every distinct topic currently present in `articles`, alphabetical
     /// -- feeds the TUI's topic sidebar.
     pub fn topics(&self) -> anyhow::Result<Vec<String>> {
-        let mut stmt = self.conn.prepare("SELECT DISTINCT topic FROM articles ORDER BY topic")?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT DISTINCT topic FROM articles ORDER BY topic")?;
 
         let rows = stmt.query_map([], |row| row.get(0))?;
-        rows.collect::<rusqlite::Result<Vec<String>>>().map_err(Into::into)
+        rows.collect::<rusqlite::Result<Vec<String>>>()
+            .map_err(Into::into)
     }
 
     /// Marks an article read -- the `Enter` keybind (open in `$BROWSER`).
@@ -380,6 +392,7 @@ impl Storage {
     /// whether it existed" would in application code, but as a single
     /// atomic statement -- no risk of another write sneaking in between a
     /// separate lookup and the following insert/update.
+    #[allow(dead_code)] // for scoring.rs's skip-weighting, not built yet; exercised by tests only
     pub fn increment_skip_weight(&self, keyword: &str) -> anyhow::Result<()> {
         self.conn.execute(
             "INSERT INTO skip_weights (keyword, weight) VALUES (?1, 1)
@@ -393,6 +406,7 @@ impl Storage {
     /// skipped (i.e. has no row in `skip_weights` at all) -- callers doing
     /// scoring want a plain number to compare/sum, not a `None` they'd
     /// have to special-case at every call site.
+    #[allow(dead_code)] // for scoring.rs's skip-weighting, not built yet; exercised by tests only
     pub fn skip_weight(&self, keyword: &str) -> anyhow::Result<i64> {
         // `.optional()` (from the `OptionalExtension` trait, imported
         // above) adapts a query that might legitimately return zero rows:
@@ -422,13 +436,15 @@ impl Storage {
     /// at `skip_weights` and understand exactly why an article was
     /// deprioritized." Also the natural source for a future stats view's
     /// "top skipped keywords" (see ARCHITECTURE.md's Planned Features).
+    #[allow(dead_code)] // for scoring.rs's skip-weighting, not built yet; exercised by tests only
     pub fn all_skip_weights(&self) -> anyhow::Result<Vec<(String, i64)>> {
         let mut stmt = self
             .conn
             .prepare("SELECT keyword, weight FROM skip_weights ORDER BY weight DESC")?;
 
         let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
-        rows.collect::<rusqlite::Result<Vec<(String, i64)>>>().map_err(Into::into)
+        rows.collect::<rusqlite::Result<Vec<(String, i64)>>>()
+            .map_err(Into::into)
     }
 }
 
@@ -581,7 +597,9 @@ mod tests {
         storage.insert_article(&lwn).unwrap();
         storage.insert_article(&phoronix).unwrap();
 
-        let lwn_only = storage.articles_by_topic_and_source("linux-news", "LWN.net").unwrap();
+        let lwn_only = storage
+            .articles_by_topic_and_source("linux-news", "LWN.net")
+            .unwrap();
         assert_eq!(lwn_only.len(), 1);
         assert_eq!(lwn_only[0].source, "LWN.net");
 
@@ -589,7 +607,12 @@ mod tests {
         // filter on one must never leak the other's articles in, and a
         // source name that matches no row at all (right topic, wrong or
         // unknown source) comes back empty rather than erroring.
-        assert!(storage.articles_by_topic_and_source("linux-news", "unknown-source").unwrap().is_empty());
+        assert!(
+            storage
+                .articles_by_topic_and_source("linux-news", "unknown-source")
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -612,11 +635,21 @@ mod tests {
         refetched.title = "Btrfs send/receive got even faster".to_string();
         let second_id = storage.insert_article(&refetched).unwrap();
 
-        assert_eq!(first_id, second_id, "re-inserting an existing URL must return its existing id");
+        assert_eq!(
+            first_id, second_id,
+            "re-inserting an existing URL must return its existing id"
+        );
 
         let articles = storage.articles_by_topic("linux-news").unwrap();
-        assert_eq!(articles.len(), 1, "duplicate URL must not create a second row");
-        assert_eq!(articles[0].title, "Btrfs send/receive got faster", "the original row must be left untouched");
+        assert_eq!(
+            articles.len(),
+            1,
+            "duplicate URL must not create a second row"
+        );
+        assert_eq!(
+            articles[0].title, "Btrfs send/receive got faster",
+            "the original row must be left untouched"
+        );
     }
 
     #[test]
@@ -656,7 +689,9 @@ mod tests {
 
         storage.mark_read(id).unwrap();
         storage.mark_skipped(id).unwrap();
-        storage.update_note(id, Some("revisit this".to_string())).unwrap();
+        storage
+            .update_note(id, Some("revisit this".to_string()))
+            .unwrap();
 
         let fetched = &storage.articles_by_topic("topic").unwrap()[0];
         assert!(fetched.read);
@@ -680,7 +715,10 @@ mod tests {
         let id = storage.insert_article(&article).unwrap();
 
         let fetched = &storage.articles_by_topic("topic").unwrap()[0];
-        assert_eq!(fetched.saved_at, None, "an article that was never saved has no saved_at");
+        assert_eq!(
+            fetched.saved_at, None,
+            "an article that was never saved has no saved_at"
+        );
 
         let before = Utc::now();
         storage.save_article(id, None).unwrap();
@@ -712,14 +750,21 @@ mod tests {
         let id = storage.insert_article(&article).unwrap();
 
         let fetched = &storage.articles_by_topic("topic").unwrap()[0];
-        assert_eq!(fetched.noted_at, None, "an article with no note has no noted_at");
+        assert_eq!(
+            fetched.noted_at, None,
+            "an article with no note has no noted_at"
+        );
 
         let before = Utc::now();
-        storage.update_note(id, Some("revisit this".to_string())).unwrap();
+        storage
+            .update_note(id, Some("revisit this".to_string()))
+            .unwrap();
         let after = Utc::now();
 
         let noted = &storage.articles_by_topic("topic").unwrap()[0];
-        let noted_at = noted.noted_at.expect("a non-empty note must populate noted_at");
+        let noted_at = noted
+            .noted_at
+            .expect("a non-empty note must populate noted_at");
         assert!(
             noted_at >= before && noted_at <= after,
             "noted_at should land at the moment update_note ran"
@@ -732,13 +777,19 @@ mod tests {
         storage.update_note(id, None).unwrap();
         let cleared = &storage.articles_by_topic("topic").unwrap()[0];
         assert_eq!(cleared.note, None);
-        assert_eq!(cleared.noted_at, None, "clearing the note must clear noted_at too");
+        assert_eq!(
+            cleared.noted_at, None,
+            "clearing the note must clear noted_at too"
+        );
     }
 
     #[test]
     fn all_articles_includes_every_state_regardless_of_read_saved_skipped() {
         let storage = test_storage();
-        for (i, title) in ["unread", "read-only", "saved", "skipped"].into_iter().enumerate() {
+        for (i, title) in ["unread", "read-only", "saved", "skipped"]
+            .into_iter()
+            .enumerate()
+        {
             let article = Article::new(
                 title.to_string(),
                 format!("https://example.com/{i}"),
@@ -749,8 +800,17 @@ mod tests {
             storage.insert_article(&article).unwrap();
         }
 
-        let ids: Vec<i64> = storage.all_articles().unwrap().iter().map(|a| a.id).collect();
-        assert_eq!(ids.len(), 4, "all_articles must return every fetched article, untouched or not");
+        let ids: Vec<i64> = storage
+            .all_articles()
+            .unwrap()
+            .iter()
+            .map(|a| a.id)
+            .collect();
+        assert_eq!(
+            ids.len(),
+            4,
+            "all_articles must return every fetched article, untouched or not"
+        );
 
         storage.mark_read(ids[1]).unwrap();
         storage.save_article(ids[2], None).unwrap();
@@ -792,13 +852,20 @@ mod tests {
         // appear anywhere in the title -- and even though this article was
         // never saved, since search runs across all articles, not just
         // saved ones.
-        storage.update_note(btrfs_id, Some("worth trying this weekend".to_string())).unwrap();
+        storage
+            .update_note(btrfs_id, Some("worth trying this weekend".to_string()))
+            .unwrap();
         let by_note = storage.search_articles("weekend").unwrap();
         assert_eq!(by_note.len(), 1);
         assert_eq!(by_note[0].id, btrfs_id);
 
         // No match at all comes back empty, not an error.
-        assert!(storage.search_articles("nonexistent-keyword").unwrap().is_empty());
+        assert!(
+            storage
+                .search_articles("nonexistent-keyword")
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -815,13 +882,19 @@ mod tests {
         assert_eq!(storage.skip_weight("wayland").unwrap(), 1);
 
         let all = storage.all_skip_weights().unwrap();
-        assert_eq!(all, vec![("systemd".to_string(), 2), ("wayland".to_string(), 1)]);
+        assert_eq!(
+            all,
+            vec![("systemd".to_string(), 2), ("wayland".to_string(), 1)]
+        );
     }
 
     #[test]
     fn topics_lists_distinct_topics_alphabetically() {
         let storage = test_storage();
-        for (i, topic) in ["linux-news", "gaming", "linux-news"].into_iter().enumerate() {
+        for (i, topic) in ["linux-news", "gaming", "linux-news"]
+            .into_iter()
+            .enumerate()
+        {
             // Distinct `url`s per row -- `url` is unique now (migration
             // 002), and this test wants three real rows, not one row two
             // of these inserts silently collide into.

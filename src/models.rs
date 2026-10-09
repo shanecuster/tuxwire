@@ -147,7 +147,13 @@ impl Article {
     /// function, not tied to any trait — is the idiomatic Rust equivalent
     /// of a constructor in other languages. Rust structs have no
     /// built-in concept of a constructor; `new` is just a convention.
-    pub fn new(title: String, url: String, source: String, topic: String, timestamp: DateTime<Utc>) -> Self {
+    pub fn new(
+        title: String,
+        url: String,
+        source: String,
+        topic: String,
+        timestamp: DateTime<Utc>,
+    ) -> Self {
         // `Self` here refers to `Article` — inside an `impl Article`
         // block, `Self` is shorthand for the type being implemented, so
         // renaming `Article` later wouldn't require updating this line.

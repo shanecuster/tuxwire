@@ -128,7 +128,12 @@ impl RawSource {
             )
         })?;
 
-        Ok(SourceConfig { name, source_type, url, topic })
+        Ok(SourceConfig {
+            name,
+            source_type,
+            url,
+            topic,
+        })
     }
 }
 
@@ -166,22 +171,29 @@ pub fn load_sources() -> anyhow::Result<Vec<SourceConfig>> {
         Ok(contents) => contents,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
             if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent)
-                    .with_context(|| format!("failed to create config directory {}", parent.display()))?;
+                std::fs::create_dir_all(parent).with_context(|| {
+                    format!("failed to create config directory {}", parent.display())
+                })?;
             }
-            std::fs::write(&path, DEFAULT_SOURCES_TOML)
-                .with_context(|| format!("failed to write default sources file to {}", path.display()))?;
+            std::fs::write(&path, DEFAULT_SOURCES_TOML).with_context(|| {
+                format!("failed to write default sources file to {}", path.display())
+            })?;
             DEFAULT_SOURCES_TOML.to_string()
         }
         Err(err) => {
-            return Err(err).with_context(|| format!("failed to read sources file {}", path.display()));
+            return Err(err)
+                .with_context(|| format!("failed to read sources file {}", path.display()));
         }
     };
 
     let raw: RawSourcesFile = toml::from_str(&contents)
         .with_context(|| format!("failed to parse sources file {}", path.display()))?;
 
-    raw.source.into_iter().enumerate().map(|(index, raw_source)| raw_source.validate(index)).collect()
+    raw.source
+        .into_iter()
+        .enumerate()
+        .map(|(index, raw_source)| raw_source.validate(index))
+        .collect()
 }
 
 /// The full path to the user's sources config: `~/.config/tuxwire/sources.toml`,
@@ -193,7 +205,9 @@ pub fn load_sources() -> anyhow::Result<Vec<SourceConfig>> {
 /// `tuxwire` config directory those two already agree on.
 fn sources_path() -> anyhow::Result<PathBuf> {
     if let Ok(xdg_config_home) = std::env::var("XDG_CONFIG_HOME") {
-        return Ok(PathBuf::from(xdg_config_home).join("tuxwire").join("sources.toml"));
+        return Ok(PathBuf::from(xdg_config_home)
+            .join("tuxwire")
+            .join("sources.toml"));
     }
 
     let home = std::env::var("HOME")
@@ -222,7 +236,12 @@ fn sources_path() -> anyhow::Result<PathBuf> {
 /// `sources.toml` from disk on every call (it's never cached), so the
 /// very next refresh -- in the TUI, `ui`'s `r` keybind -- already sees
 /// whatever this function just wrote.
-pub fn add_source(name: &str, source_type: SourceType, url: &str, topic: &str) -> anyhow::Result<()> {
+pub fn add_source(
+    name: &str,
+    source_type: SourceType,
+    url: &str,
+    topic: &str,
+) -> anyhow::Result<()> {
     add_source_at(&sources_path()?, name, source_type, url, topic)
 }
 
@@ -256,7 +275,11 @@ fn add_source_at(
     // load), but this guards the theoretical case of a hand-edited file
     // with the `source` key removed entirely: auto-vivify an empty array
     // of tables to append into, rather than erroring.
-    if doc.get("source").and_then(|item| item.as_array_of_tables()).is_none() {
+    if doc
+        .get("source")
+        .and_then(|item| item.as_array_of_tables())
+        .is_none()
+    {
         doc["source"] = toml_edit::Item::ArrayOfTables(toml_edit::ArrayOfTables::new());
     }
 
@@ -313,8 +336,13 @@ mod tests {
         "#;
 
         let raw: RawSourcesFile = toml::from_str(toml).unwrap();
-        let sources: Vec<SourceConfig> =
-            raw.source.into_iter().enumerate().map(|(i, s)| s.validate(i)).collect::<anyhow::Result<_>>().unwrap();
+        let sources: Vec<SourceConfig> = raw
+            .source
+            .into_iter()
+            .enumerate()
+            .map(|(i, s)| s.validate(i))
+            .collect::<anyhow::Result<_>>()
+            .unwrap();
 
         assert_eq!(sources.len(), 2);
         assert_eq!(sources[0].source_type, SourceType::Rss);
@@ -335,11 +363,23 @@ mod tests {
         "#;
 
         let raw: RawSourcesFile = toml::from_str(toml).unwrap();
-        let err = raw.source.into_iter().next().unwrap().validate(0).unwrap_err();
+        let err = raw
+            .source
+            .into_iter()
+            .next()
+            .unwrap()
+            .validate(0)
+            .unwrap_err();
 
         let message = err.to_string();
-        assert!(message.contains("Phoronix"), "error should name the source: {message}");
-        assert!(message.contains("topic"), "error should name the missing field: {message}");
+        assert!(
+            message.contains("Phoronix"),
+            "error should name the source: {message}"
+        );
+        assert!(
+            message.contains("topic"),
+            "error should name the missing field: {message}"
+        );
     }
 
     /// An unknown `type` value is rejected at parse time (serde's own
@@ -356,7 +396,10 @@ mod tests {
         "#;
 
         let result: Result<RawSourcesFile, _> = toml::from_str(toml);
-        assert!(result.is_err(), "an unrecognized source type must fail to parse");
+        assert!(
+            result.is_err(),
+            "an unrecognized source type must fail to parse"
+        );
     }
 
     /// A temporary `sources.toml`-shaped file, seeded with `contents` --
@@ -367,8 +410,10 @@ mod tests {
     /// separate threads in parallel) -- good enough for a test that writes
     /// one file and never runs concurrently with itself.
     fn temp_sources_file(contents: &str) -> std::path::PathBuf {
-        let path = std::env::temp_dir()
-            .join(format!("tuxwire-test-sources-{:?}.toml", std::thread::current().id()));
+        let path = std::env::temp_dir().join(format!(
+            "tuxwire-test-sources-{:?}.toml",
+            std::thread::current().id()
+        ));
         std::fs::write(&path, contents).unwrap();
         path
     }
@@ -390,7 +435,14 @@ topic = "kernel"
 "#;
         let path = temp_sources_file(original);
 
-        add_source_at(&path, "Hacker News", SourceType::Rss, "https://hnrss.org/frontpage", "tech").unwrap();
+        add_source_at(
+            &path,
+            "Hacker News",
+            SourceType::Rss,
+            "https://hnrss.org/frontpage",
+            "tech",
+        )
+        .unwrap();
 
         let written = std::fs::read_to_string(&path).unwrap();
         std::fs::remove_file(&path).ok();
@@ -399,10 +451,17 @@ topic = "kernel"
             written.contains("# a comment a real user left for themselves"),
             "existing comments must survive a write: {written}"
         );
-        assert!(written.contains(r#"name = "Phoronix""#), "the original source must still be there: {written}");
+        assert!(
+            written.contains(r#"name = "Phoronix""#),
+            "the original source must still be there: {written}"
+        );
 
         let raw: RawSourcesFile = toml::from_str(&written).unwrap();
-        assert_eq!(raw.source.len(), 2, "the new source must be appended, not replace the file: {written}");
+        assert_eq!(
+            raw.source.len(),
+            2,
+            "the new source must be appended, not replace the file: {written}"
+        );
 
         let added = &raw.source[1];
         assert_eq!(added.name.as_deref(), Some("Hacker News"));
@@ -420,7 +479,14 @@ topic = "kernel"
     fn add_source_to_file_with_no_existing_sources() {
         let path = temp_sources_file("# empty sources file, nothing configured yet\n");
 
-        add_source_at(&path, "Phoronix", SourceType::Rss, "https://www.phoronix.com/rss.php", "kernel").unwrap();
+        add_source_at(
+            &path,
+            "Phoronix",
+            SourceType::Rss,
+            "https://www.phoronix.com/rss.php",
+            "kernel",
+        )
+        .unwrap();
 
         let written = std::fs::read_to_string(&path).unwrap();
         std::fs::remove_file(&path).ok();

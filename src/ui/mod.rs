@@ -64,12 +64,12 @@ use crate::models::Article;
 use crate::storage::Storage;
 use crate::theme::Theme;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
-use std::collections::{HashMap, HashSet};
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
+use std::collections::{HashMap, HashSet};
 
 /// Keybind hints for the footer, for the normal (not editing-a-note,
 /// not adding-a-source) state while `View::Topic` is showing -- see
@@ -249,7 +249,9 @@ enum View {
 /// fields happening to be kept in sync by convention.
 enum Mode {
     Normal,
-    EditingNote { text: String },
+    EditingNote {
+        text: String,
+    },
     /// The `a` "add a new source" flow is open -- see `AddSourceStep` for
     /// which of its two steps is currently showing. Wrapping the step in
     /// its own type (rather than adding more `Mode` variants directly, one
@@ -273,7 +275,10 @@ enum Mode {
     /// with different heading text" -- a `&'static str` rather than
     /// `String` since every title used is a fixed literal chosen at the
     /// call site, never built at runtime.
-    Error { title: &'static str, message: String },
+    Error {
+        title: &'static str,
+        message: String,
+    },
 
     /// The `/` search input is open -- `text` is the live query buffer,
     /// re-run against `Storage::search_articles` on every keystroke so the
@@ -289,7 +294,9 @@ enum Mode {
     /// `search: Option<String>`, set once `Enter` confirms this): that's
     /// what stays active while browsing the filtered results afterward,
     /// this is only the moment of actively typing the query.
-    Searching { text: String },
+    Searching {
+        text: String,
+    },
 }
 
 /// Which step of the `a` add-source flow is currently showing (`ARCHITECTURE.md`
@@ -372,7 +379,9 @@ pub fn run(storage: &Storage, theme: &Theme, sources: &[ConfiguredSource]) -> an
     // exactly the guarantee this function needs: if `draw_until_quit`
     // below hits an error partway through, the user's shell must not be
     // left in raw mode / the alternate screen.
-    ratatui::run(|terminal| draw_until_quit(terminal, theme, storage, &mut topics, &sources_by_topic))
+    ratatui::run(|terminal| {
+        draw_until_quit(terminal, theme, storage, &mut topics, &sources_by_topic)
+    })
 }
 
 /// Groups every configured source's name under its one topic
@@ -385,7 +394,10 @@ pub fn run(storage: &Storage, theme: &Theme, sources: &[ConfiguredSource]) -> an
 fn group_sources_by_topic(sources: &[ConfiguredSource]) -> HashMap<String, Vec<String>> {
     let mut grouped: HashMap<String, Vec<String>> = HashMap::new();
     for source in sources {
-        grouped.entry(source.topic().to_string()).or_default().push(source.name().to_string());
+        grouped
+            .entry(source.topic().to_string())
+            .or_default()
+            .push(source.name().to_string());
     }
     grouped
 }
@@ -574,7 +586,13 @@ fn draw_until_quit(
                 KeyCode::Esc => {
                     search = None;
                     mode = Mode::Normal;
-                    articles = articles_for_view(storage, view, topics, topic_index, selected_source.as_deref())?;
+                    articles = articles_for_view(
+                        storage,
+                        view,
+                        topics,
+                        topic_index,
+                        selected_source.as_deref(),
+                    )?;
                     article_index = 0;
                 }
 
@@ -589,7 +607,13 @@ fn draw_until_quit(
                     let trimmed = text.trim();
                     if trimmed.is_empty() {
                         search = None;
-                        articles = articles_for_view(storage, view, topics, topic_index, selected_source.as_deref())?;
+                        articles = articles_for_view(
+                            storage,
+                            view,
+                            topics,
+                            topic_index,
+                            selected_source.as_deref(),
+                        )?;
                     } else {
                         search = Some(trimmed.to_string());
                         articles = storage.search_articles(trimmed)?;
@@ -667,8 +691,11 @@ fn draw_until_quit(
                         &mut topic_index,
                         &mut selected_source,
                     );
-                    articles =
-                        load_articles_for_selection(storage, &topics[topic_index], selected_source.as_deref())?;
+                    articles = load_articles_for_selection(
+                        storage,
+                        &topics[topic_index],
+                        selected_source.as_deref(),
+                    )?;
                     article_index = 0;
                 }
                 KeyCode::Down if view == View::Topic && !topics.is_empty() => {
@@ -680,8 +707,11 @@ fn draw_until_quit(
                         &mut topic_index,
                         &mut selected_source,
                     );
-                    articles =
-                        load_articles_for_selection(storage, &topics[topic_index], selected_source.as_deref())?;
+                    articles = load_articles_for_selection(
+                        storage,
+                        &topics[topic_index],
+                        selected_source.as_deref(),
+                    )?;
                     article_index = 0;
                 }
 
@@ -704,7 +734,9 @@ fn draw_until_quit(
                     if view == View::Topic && selected_source.is_none() && !topics.is_empty() =>
                 {
                     if let Some(topic) = topics.get(topic_index)
-                        && sources_by_topic.get(topic).is_some_and(|sources| !sources.is_empty())
+                        && sources_by_topic
+                            .get(topic)
+                            .is_some_and(|sources| !sources.is_empty())
                     {
                         expanded_topics.insert(topic.clone());
                     }
@@ -723,7 +755,8 @@ fn draw_until_quit(
                         expanded_topics.remove(topic);
                     }
                     if selected_source.take().is_some() {
-                        articles = load_articles_for_selection(storage, &topics[topic_index], None)?;
+                        articles =
+                            load_articles_for_selection(storage, &topics[topic_index], None)?;
                         article_index = 0;
                     }
                 }
@@ -888,7 +921,8 @@ fn draw_until_quit(
                 // swap the saved view out for a single topic's list without
                 // actually leaving `View::Saved`.
                 KeyCode::Char('r') if view == View::Topic && !topics.is_empty() => {
-                    articles = refresh_topic(storage, &topics[topic_index], selected_source.as_deref())?;
+                    articles =
+                        refresh_topic(storage, &topics[topic_index], selected_source.as_deref())?;
                     article_index = article_index.min(articles.len().saturating_sub(1));
                 }
 
@@ -918,7 +952,11 @@ fn draw_until_quit(
                 // filtering it," so `/` has to be pressed again from
                 // scratch in the new view if that's still wanted.
                 KeyCode::Char('S') => {
-                    view = if view == View::Saved { View::Topic } else { View::Saved };
+                    view = if view == View::Saved {
+                        View::Topic
+                    } else {
+                        View::Saved
+                    };
                     selected_source = None;
                     search = None;
                     articles = articles_for_view(storage, view, topics, topic_index, None)?;
@@ -942,7 +980,11 @@ fn draw_until_quit(
                 // -- see `S`'s own comment just above, which applies
                 // identically to this arm.
                 KeyCode::Char('y') => {
-                    view = if view == View::History { View::Topic } else { View::History };
+                    view = if view == View::History {
+                        View::Topic
+                    } else {
+                        View::History
+                    };
                     selected_source = None;
                     search = None;
                     articles = articles_for_view(storage, view, topics, topic_index, None)?;
@@ -960,7 +1002,10 @@ fn draw_until_quit(
                 // ...` guard) since adding a source has nothing to do with
                 // which view happens to be showing.
                 KeyCode::Char('a') => {
-                    mode = Mode::AddSource(AddSourceStep::Url { text: String::new(), error: None });
+                    mode = Mode::AddSource(AddSourceStep::Url {
+                        text: String::new(),
+                        error: None,
+                    });
                 }
 
                 // `/` opens the search input (switches `mode` to
@@ -1005,7 +1050,10 @@ fn draw_until_quit(
                     }) {
                         Ok((count, path)) => Mode::Error {
                             title: "Export",
-                            message: format!("Exported {count} saved article(s) to {}", path.display()),
+                            message: format!(
+                                "Exported {count} saved article(s) to {}",
+                                path.display()
+                            ),
                         },
                         Err(err) => Mode::Error {
                             title: "Error",
@@ -1163,10 +1211,12 @@ fn open_in_browser(url: &str) -> bool {
             .is_ok()
     };
 
-    if let Ok(browser) = std::env::var("BROWSER") {
-        if spawn(&browser) {
-            return true;
-        }
+    // A `let`-chain (`if let ... && ...`): only runs the body when
+    // `$BROWSER` is set *and* spawning it succeeded.
+    if let Ok(browser) = std::env::var("BROWSER")
+        && spawn(&browser)
+    {
+        return true;
     }
 
     spawn("xdg-open")
@@ -1193,8 +1243,15 @@ fn open_in_browser(url: &str) -> bool {
 /// while this one fetch is in flight. This only works because
 /// `#[tokio::main]`'s default multi-threaded runtime has more than one
 /// worker thread to hand off to.
-fn refresh_topic(storage: &Storage, topic: &str, source: Option<&str>) -> anyhow::Result<Vec<Article>> {
-    for configured_source in fetchers::configured_sources()?.into_iter().filter(|source| source.topic() == topic) {
+fn refresh_topic(
+    storage: &Storage,
+    topic: &str,
+    source: Option<&str>,
+) -> anyhow::Result<Vec<Article>> {
+    for configured_source in fetchers::configured_sources()?
+        .into_iter()
+        .filter(|source| source.topic() == topic)
+    {
         let fetch_result = tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(configured_source.fetch())
         });
@@ -1235,7 +1292,11 @@ fn refresh_topic(storage: &Storage, topic: &str, source: Option<&str>) -> anyhow
 /// so every call site that needs to reload `articles` from the current
 /// sidebar selection goes through this one function instead of
 /// re-deriving the `if source.is_some() { ... } else { ... }` split itself.
-fn load_articles_for_selection(storage: &Storage, topic: &str, source: Option<&str>) -> anyhow::Result<Vec<Article>> {
+fn load_articles_for_selection(
+    storage: &Storage,
+    topic: &str,
+    source: Option<&str>,
+) -> anyhow::Result<Vec<Article>> {
     match source {
         Some(name) => storage.articles_by_topic_and_source(topic, name),
         None => storage.articles_by_topic(topic),
@@ -1311,7 +1372,11 @@ fn sidebar_rows<'a>(
         if expanded_topics.contains(topic)
             && let Some(sources) = sources_by_topic.get(topic)
         {
-            rows.extend(sources.iter().map(|name| SidebarRow::Source(index, name.as_str())));
+            rows.extend(
+                sources
+                    .iter()
+                    .map(|name| SidebarRow::Source(index, name.as_str())),
+            );
         }
     }
     rows
@@ -1396,7 +1461,11 @@ fn move_sidebar_selection(
 /// for why nothing here needs to separately "reload" the in-memory
 /// fetcher list) -- every other keypress just edits `step`'s fields in
 /// memory.
-fn handle_add_source_key(key: KeyCode, step: AddSourceStep, topics: &mut Vec<String>) -> anyhow::Result<Mode> {
+fn handle_add_source_key(
+    key: KeyCode,
+    step: AddSourceStep,
+    topics: &mut Vec<String>,
+) -> anyhow::Result<Mode> {
     match step {
         AddSourceStep::Url { mut text, error } => match key {
             KeyCode::Esc => Ok(Mode::Normal),
@@ -1458,7 +1527,9 @@ fn handle_add_source_key(key: KeyCode, step: AddSourceStep, topics: &mut Vec<Str
                     // than retype from scratch.
                     Err(err) => Ok(Mode::AddSource(AddSourceStep::Url {
                         text,
-                        error: Some(format!("couldn't parse this as a feed -- check the URL ({err:#})")),
+                        error: Some(format!(
+                            "couldn't parse this as a feed -- check the URL ({err:#})"
+                        )),
                     })),
                 }
             }
@@ -1466,7 +1537,14 @@ fn handle_add_source_key(key: KeyCode, step: AddSourceStep, topics: &mut Vec<Str
             _ => Ok(Mode::AddSource(AddSourceStep::Url { text, error })),
         },
 
-        AddSourceStep::Confirm { url, mut name, mut topic, mut field, topic_options, error } => match key {
+        AddSourceStep::Confirm {
+            url,
+            mut name,
+            mut topic,
+            mut field,
+            topic_options,
+            error,
+        } => match key {
             KeyCode::Esc => Ok(Mode::Normal),
 
             KeyCode::Tab => {
@@ -1921,7 +1999,9 @@ fn render_topics_section(
                     selected_row_index = Some(row_index);
                 }
 
-                let has_sources = sources_by_topic.get(topic).is_some_and(|sources| !sources.is_empty());
+                let has_sources = sources_by_topic
+                    .get(topic)
+                    .is_some_and(|sources| !sources.is_empty());
                 let indicator = if !has_sources {
                     "  "
                 } else if expanded_topics.contains(topic) {
@@ -1932,7 +2012,9 @@ fn render_topics_section(
                 ListItem::new(format!("{indicator}{topic}"))
             }
             SidebarRow::Source(topic_index, name) => {
-                if Some(topics[topic_index].as_str()) == selected_topic && selected_source == Some(name) {
+                if Some(topics[topic_index].as_str()) == selected_topic
+                    && selected_source == Some(name)
+                {
                     selected_row_index = Some(row_index);
                 }
                 ListItem::new(format!("    {name}"))
@@ -1976,7 +2058,12 @@ fn render_keys_section(frame: &mut Frame, theme: &Theme, area: Rect) {
         .iter()
         .map(|(key, action)| {
             Line::from(vec![
-                Span::styled(*key, Style::new().fg(theme.accent_selected).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    *key,
+                    Style::new()
+                        .fg(theme.accent_selected)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(format!(" {action}"), Style::new().fg(theme.text_primary)),
             ])
         })
@@ -2087,7 +2174,11 @@ fn render_articles(
     let title = match search {
         SearchStatus::Typing(text) => format!(" Search: {text} "),
         SearchStatus::Committed(query) => {
-            format!(" Search: \u{201c}{query}\u{201d} ({} result{}) ", articles.len(), if articles.len() == 1 { "" } else { "s" })
+            format!(
+                " Search: \u{201c}{query}\u{201d} ({} result{}) ",
+                articles.len(),
+                if articles.len() == 1 { "" } else { "s" }
+            )
         }
         SearchStatus::None => match view {
             View::Saved => " Saved Articles ".to_string(),
@@ -2233,7 +2324,9 @@ fn article_item<'a>(theme: &Theme, article: &'a Article, view: View) -> ListItem
     // *and* when a note actually exists, so an article saved without one
     // still renders as the plain two-line item above instead of a blank or
     // missing third line.
-    if view == View::Saved && let Some(note) = article.note.as_deref() {
+    if view == View::Saved
+        && let Some(note) = article.note.as_deref()
+    {
         let preview_line = Line::from(Span::styled(
             format!(
                 "  \u{201c}{}\u{201d}",
@@ -2474,7 +2567,14 @@ fn render_add_source_popup(frame: &mut Frame, theme: &Theme, area: Rect, step: &
             frame.set_cursor_position((cursor_x, cursor_y));
         }
 
-        AddSourceStep::Confirm { url, name, topic, field, topic_options, error } => {
+        AddSourceStep::Confirm {
+            url,
+            name,
+            topic,
+            field,
+            topic_options,
+            error,
+        } => {
             // Four content lines (URL, Name, Topic, the "existing topics"
             // hint) always show; a fifth appears only when there's a
             // validation/write error to surface. `+ 2` for the border,
@@ -2503,9 +2603,18 @@ fn render_add_source_popup(frame: &mut Frame, theme: &Theme, area: Rect, step: &
             };
 
             let mut lines = vec![
-                Line::from(Span::styled(format!("URL:   {url}"), Style::new().fg(theme.text_muted))),
-                Line::from(Span::styled(format!("Name:  {name}"), focus_style(ConfirmField::Name))),
-                Line::from(Span::styled(format!("Topic: {topic}"), focus_style(ConfirmField::Topic))),
+                Line::from(Span::styled(
+                    format!("URL:   {url}"),
+                    Style::new().fg(theme.text_muted),
+                )),
+                Line::from(Span::styled(
+                    format!("Name:  {name}"),
+                    focus_style(ConfirmField::Name),
+                )),
+                Line::from(Span::styled(
+                    format!("Topic: {topic}"),
+                    focus_style(ConfirmField::Topic),
+                )),
                 Line::from(Span::styled(
                     format!("       existing: {}", topic_options.join(", ")),
                     Style::new().fg(theme.text_muted),

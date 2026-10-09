@@ -127,14 +127,17 @@ pub async fn fetch_feed(url: &str) -> anyhow::Result<feed_rs::model::Feed> {
     // is the same parser regardless of whether the feed turns out to
     // be RSS or Atom — `feed-rs` detects the format and returns one
     // unified `Feed` either way.
-    feed_rs::parser::parse(body.as_bytes()).with_context(|| format!("failed to parse feed XML from {url}"))
+    feed_rs::parser::parse(body.as_bytes())
+        .with_context(|| format!("failed to parse feed XML from {url}"))
 }
 
 impl Fetcher for RssFetcher {
     /// Fetches and parses `self.url` (via `fetch_feed` above) and maps
     /// every entry in the result into an `Article`.
     async fn fetch(&self) -> anyhow::Result<Vec<Article>> {
-        let feed = fetch_feed(&self.url).await.with_context(|| format!("fetching '{}'", self.name))?;
+        let feed = fetch_feed(&self.url)
+            .await
+            .with_context(|| format!("fetching '{}'", self.name))?;
 
         // Build the `Vec<Article>` we're returning. `feed.entries` is a
         // `Vec<feed_rs::model::Entry>` — we walk it with `.into_iter()`

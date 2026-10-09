@@ -29,6 +29,7 @@ pub struct Theme {
     pub panel_border: Color,
     pub text_primary: Color,
     pub text_muted: Color,
+    #[allow(dead_code)] // theme.toml's skipped-text shade; parsed, not painted yet
     pub text_dim: Color,
     pub accent_unread: Color,
     pub accent_read: Color,
@@ -90,9 +91,12 @@ impl Theme {
 
         let contents = match std::fs::read_to_string(&path) {
             Ok(contents) => contents,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => DEFAULT_THEME_TOML.to_string(),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                DEFAULT_THEME_TOML.to_string()
+            }
             Err(err) => {
-                return Err(err).with_context(|| format!("failed to read theme file {}", path.display()));
+                return Err(err)
+                    .with_context(|| format!("failed to read theme file {}", path.display()));
             }
         };
 
@@ -120,8 +124,10 @@ impl RawThemeColors {
             accent_read: hex_to_color(&self.accent_read).context("theme.accent_read")?,
             accent_skipped: hex_to_color(&self.accent_skipped).context("theme.accent_skipped")?,
             accent_saved: hex_to_color(&self.accent_saved).context("theme.accent_saved")?,
-            accent_breaking: hex_to_color(&self.accent_breaking).context("theme.accent_breaking")?,
-            accent_selected: hex_to_color(&self.accent_selected).context("theme.accent_selected")?,
+            accent_breaking: hex_to_color(&self.accent_breaking)
+                .context("theme.accent_breaking")?,
+            accent_selected: hex_to_color(&self.accent_selected)
+                .context("theme.accent_selected")?,
         })
     }
 }
@@ -159,7 +165,9 @@ fn hex_to_color(hex: &str) -> anyhow::Result<Color> {
 /// XDG base directories with two different environment variables.
 fn theme_path() -> anyhow::Result<PathBuf> {
     if let Ok(xdg_config_home) = std::env::var("XDG_CONFIG_HOME") {
-        return Ok(PathBuf::from(xdg_config_home).join("tuxwire").join("theme.toml"));
+        return Ok(PathBuf::from(xdg_config_home)
+            .join("tuxwire")
+            .join("theme.toml"));
     }
 
     let home = std::env::var("HOME")
