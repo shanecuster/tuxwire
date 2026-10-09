@@ -125,6 +125,21 @@ async fn main() -> anyhow::Result<()> {
     let storage = Storage::open()?;
     println!("Storage ready at ~/.local/share/tuxwire/tuxwire.db (migrations up to date).");
 
+    // Best-effort backfill of `feed_url` (migration 005) for articles
+    // stored before it existed, by matching their `source` name against
+    // the configured sources. Rows that already have one are untouched,
+    // so this is a cheap no-op on every later startup. `.map(...)` builds
+    // the `(name, feed_url)` pairs the function takes; `.to_string()` makes
+    // owned copies, since the list outlives this one expression.
+    let source_feeds: Vec<(String, String)> = sources
+        .iter()
+        .map(|source| (source.name().to_string(), source.url().to_string()))
+        .collect();
+    let filled = storage.backfill_feed_urls(&source_feeds)?;
+    if filled > 0 {
+        println!("Recorded the feed for {filled} older article(s).");
+    }
+
     // `insert_article` is idempotent on `url` (see its doc comment in
     // `storage/mod.rs`), so running this binary again against the same
     // feed re-inserts nothing -- every article that was already on disk

@@ -121,6 +121,16 @@ impl ConfiguredSource {
             ConfiguredSource::Reddit(fetcher) => &fetcher.topic,
         }
     }
+
+    /// This source's feed URL from `sources.toml`: what fetched articles
+    /// record as their `feed_url`, and what the startup backfill
+    /// (`Storage::backfill_feed_urls`) matches older articles against.
+    pub fn url(&self) -> &str {
+        match self {
+            ConfiguredSource::Rss(fetcher) => &fetcher.url,
+            ConfiguredSource::Reddit(fetcher) => &fetcher.url,
+        }
+    }
 }
 
 impl Fetcher for ConfiguredSource {
