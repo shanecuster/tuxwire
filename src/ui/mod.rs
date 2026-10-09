@@ -75,11 +75,12 @@
 //! `Mode::IconCheck` ("Do you see an icon here?").
 
 use crate::export::{self, ExportConfig};
+use crate::feedlists::{self, FeedLists, Switch};
 use crate::fetch_report::FetchReport;
 use crate::fetchers::{self, ConfiguredSource, Fetcher};
 use crate::icons::{self, Icon, IconMode, IconSettings};
 use crate::models::Article;
-use crate::storage::Storage;
+use crate::storage::{Scope, Storage};
 use crate::theme::{self, BUILTIN_THEMES, Theme, ThemeSettings, picker_order};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use ratatui::Frame;
@@ -88,6 +89,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 
 /// Everything else `main.rs` hands `ui::run` from startup: the theme and
 /// icon settings, whether to open with the first-run icon check, and what
@@ -110,9 +112,17 @@ pub struct SessionStart {
     /// (they get `Icon::New` while unread), plus the failure counts for
     /// the first footer message (see `fetch_notice`).
     pub report: FetchReport,
-    /// The feed list file in use, shown at the right of the footer as
-    /// "Feed List: <path>" (see `fit_feed_list`).
-    pub feed_list_path: std::path::PathBuf,
+    /// Every feed list from `lists.toml` (or the single implicit one).
+    /// Moved into `draw_until_quit`, which uses it for the `f` picker, the
+    /// footer path, and `r`/`a` on the active list's file.
+    pub feed_lists: FeedLists,
+    /// Which of `feed_lists` is active: an index into its lists. `main`
+    /// already loaded and fetched this list's sources.
+    pub active_list: usize,
+    /// Why the remembered list wasn't used at startup (a missing or broken
+    /// file, or all lists failing), shown as the first footer notice. `None`
+    /// when everything loaded as expected.
+    pub list_notice: Option<String>,
 }
 
 /// Below this terminal width (in columns) the footer never shows the feed
@@ -125,6 +135,15 @@ const NARROW_FOOTER_WIDTH: u16 = 60;
 /// Blank cells kept between the footer's hint/notice text on the left and
 /// the feed list path on the right, so the two never run together.
 const FOOTER_GAP: u16 = 2;
+
+/// The footer hint line shown while the `f` feed list picker
+/// (`Mode::ListPicker`) is open.
+const LIST_PICKER_HINTS: &str = "j/k or ↑/↓ choose · Enter switch · Esc cancel";
+
+/// The sidebar Keys entry for `f`, shown only when there's more than one
+/// feed list. With a single list, the Keys section looks exactly as it did
+/// before lists existed. Kept out of `KEY_HINTS` for that reason.
+const FEED_LIST_KEY_HINT: (&str, &str) = ("f", "feed lists");
 
 /// The footer hint line shown while the `t` theme picker
 /// (`Mode::ThemePicker`) is open.
@@ -349,6 +368,15 @@ enum Mode {
         original: usize,
         overrides: usize,
     },
+    /// The `f` feed list picker is open (only possible with two or more
+    /// lists). `selected` is the highlighted row, in `lists.toml` order, the
+    /// same order as `rows`. `rows` (name, path, unread count) is built once
+    /// when the picker opens (see `list_picker_rows`) rather than on every
+    /// frame, since counting unread articles queries the database.
+    ListPicker {
+        selected: usize,
+        rows: Vec<ListRow>,
+    },
     /// The `a` "add a new source" flow is open -- see `AddSourceStep` for
     /// which of its two steps is currently showing. Wrapping the step in
     /// its own type (rather than adding more `Mode` variants directly, one
@@ -394,6 +422,19 @@ enum Mode {
     Searching {
         text: String,
     },
+}
+
+/// One row of the `f` feed list picker, everything it shows for one list.
+struct ListRow {
+    /// The list's name from `lists.toml`.
+    name: String,
+    /// Its file, with the home directory shown as `~`.
+    path: String,
+    /// Unread articles from that list's feeds, or `None` if its file
+    /// couldn't be read (the row then says "unavailable").
+    unread: Option<i64>,
+    /// Whether this is the list currently being viewed.
+    active: bool,
 }
 
 /// Which step of the `a` add-source flow is currently showing (`ARCHITECTURE.md`
@@ -471,8 +512,13 @@ pub fn run(
     // ARCHITECTURE.md's "usable immediately without restart"), which means
     // mutating this same `Vec` in place rather than only ever reading it
     // once here at startup.
-    let mut topics = storage.topics()?;
-    let sources_by_topic = group_sources_by_topic(sources);
+    // What the topic views cover: everything with one feed list (exactly
+    // as before lists existed), or just the active list's feeds.
+    let scope = list_scope(&session.feed_lists, sources);
+    let mut topics = list_topics(storage, &scope, &session.feed_lists, sources)?;
+    // `mut`: switching lists (and adding a source to a list) replaces
+    // this with the new list's sources.
+    let mut sources_by_topic = group_sources_by_topic(sources);
 
     // `ratatui::run` (see the doc comment on it in the `ratatui` crate)
     // is the "simplest path" helper: it puts the terminal into raw mode +
@@ -483,8 +529,106 @@ pub fn run(
     // below hits an error partway through, the user's shell must not be
     // left in raw mode / the alternate screen.
     ratatui::run(|terminal| {
-        draw_until_quit(terminal, storage, &mut topics, &sources_by_topic, session)
+        draw_until_quit(
+            terminal,
+            storage,
+            &mut topics,
+            &mut sources_by_topic,
+            scope,
+            session,
+        )
     })
+}
+
+/// Which articles the topic views cover for the list whose sources are
+/// `sources`: everything (`Scope::All`) when there's only one feed list, so
+/// behavior is exactly as before lists existed (including articles from
+/// feeds since removed from `sources.toml`). With several lists, only the
+/// articles whose `feed_url` is one of these sources' URLs.
+fn list_scope(lists: &FeedLists, sources: &[ConfiguredSource]) -> Scope {
+    if lists.is_single() {
+        Scope::All
+    } else {
+        Scope::Feeds(
+            sources
+                .iter()
+                .map(|source| source.url().to_string())
+                .collect(),
+        )
+    }
+}
+
+/// The sidebar's topics for the active list.
+///
+/// With one feed list this is just `Storage::topics` over everything,
+/// exactly as before lists existed. With several, it also includes every
+/// topic the list's sources are configured with, even ones with no articles
+/// yet. Otherwise a list that has never been fetched would have an empty
+/// sidebar, and since `r` refreshes the selected topic, there'd be no way
+/// to fetch it without restarting. An empty topic shows "No articles yet",
+/// and `r` on it fetches that topic's sources.
+///
+/// `extend` adds each configured topic, then `sort` + `dedup` (which
+/// removes *adjacent* duplicates, hence sorting first) keep the list
+/// alphabetical with no repeats, matching `Storage::topics`'s own order.
+fn list_topics(
+    storage: &Storage,
+    scope: &Scope,
+    lists: &FeedLists,
+    sources: &[ConfiguredSource],
+) -> anyhow::Result<Vec<String>> {
+    let mut topics = storage.topics(scope)?;
+    if !lists.is_single() {
+        topics.extend(sources.iter().map(|source| source.topic().to_string()));
+        topics.sort();
+        topics.dedup();
+    }
+    Ok(topics)
+}
+
+/// The `f` picker's rows, one per feed list in `lists.toml` order: name,
+/// `~`-abbreviated path, and unread count.
+///
+/// The active list's count uses `active_scope`, which is already known.
+/// Every other list's file is *read* to learn its feed URLs (TOML parsing
+/// only: nothing is fetched or refreshed), then counted with one SQL
+/// query. A file that can't be read gives `unread: None`, so the picker
+/// still opens and shows which list is broken.
+fn list_picker_rows(
+    storage: &Storage,
+    lists: &FeedLists,
+    active: usize,
+    active_scope: &Scope,
+    home: Option<&Path>,
+) -> Vec<ListRow> {
+    lists
+        .lists()
+        .iter()
+        .enumerate()
+        .map(|(index, list)| {
+            // `.ok()` turns each failure into `None`; `and_then` only
+            // continues while there's a value.
+            let unread = if index == active {
+                storage.unread_count(active_scope).ok()
+            } else {
+                fetchers::configured_sources_at(&list.path)
+                    .ok()
+                    .and_then(|sources| {
+                        let urls = sources
+                            .iter()
+                            .map(|source| source.url().to_string())
+                            .collect();
+                        storage.unread_count(&Scope::Feeds(urls)).ok()
+                    })
+            };
+            ListRow {
+                name: list.name.clone(),
+                path: crate::paths::abbreviate_home(&list.path, home),
+                unread,
+                active: index == active,
+            }
+        })
+        .collect()
 }
 
 /// Groups every configured source's name under its one topic
@@ -532,13 +676,18 @@ fn draw_until_quit(
     terminal: &mut ratatui::DefaultTerminal,
     storage: &Storage,
     topics: &mut Vec<String>,
-    sources_by_topic: &HashMap<String, Vec<String>>,
+    // `&mut` so switching lists can replace it with the new list's
+    // sources (see the `Mode::ListPicker` handling).
+    sources_by_topic: &mut HashMap<String, Vec<String>>,
+    // What the topic views cover (see `list_scope`). Owned and `mut` for
+    // the same reason.
+    mut scope: Scope,
     session: SessionStart,
 ) -> anyhow::Result<()> {
     let mut topic_index: usize = 0;
     let mut article_index: usize = 0;
     let mut articles: Vec<Article> = match topics.first() {
-        Some(topic) => storage.articles_by_topic(topic)?,
+        Some(topic) => storage.articles_by_topic(&scope, topic)?,
         None => Vec::new(),
     };
     // Open on the first-run icon check if `icons.toml` doesn't exist yet,
@@ -568,7 +717,14 @@ fn draw_until_quit(
     // replaces the keybind hints until the next keypress clears it, so it
     // never hides them for long. Starts with the startup fetch's own
     // summary when there's something worth saying (see `fetch_notice`).
-    let mut notice: Option<String> = fetch_notice(&icons, &session.report, false);
+    //
+    // A startup problem with the feed lists (see `SessionStart::list_notice`)
+    // comes first, since it explains why a different list is showing.
+    // `Option::or_else` only builds the fetch summary when there isn't one.
+    let mut notice: Option<String> = session
+        .list_notice
+        .map(|message| format!("{} {message}", icons.glyph(Icon::Error)))
+        .or_else(|| fetch_notice(&icons, &session.report, false));
 
     // IDs of articles that arrived this session (startup fetch, plus every
     // `r` refresh), drawn with `Icon::New` while still unread. Grows as
@@ -578,10 +734,20 @@ fn draw_until_quit(
     // was built from it.
     let mut new_article_ids = session.report.new_article_ids;
 
-    // The feed list path for the footer, with the home directory shown as
-    // `~`. Converted to text once here rather than on every frame.
-    let feed_list_display =
-        crate::paths::abbreviate_home(&session.feed_list_path, crate::paths::home_dir().as_deref());
+    // The feed lists, and which one is active. `active_list` changes when
+    // the `f` picker switches; `feed_lists` itself never changes while
+    // running (lists are added by editing `lists.toml`).
+    let feed_lists = session.feed_lists;
+    let mut active_list = session.active_list;
+
+    // The home directory, used to show paths with `~`.
+    let home = crate::paths::home_dir();
+
+    // The active list's path for the footer, with the home directory shown
+    // as `~`. Converted to text once here (and again on each switch) rather
+    // than on every frame.
+    let mut feed_list_display =
+        crate::paths::abbreviate_home(&feed_lists.lists()[active_list].path, home.as_deref());
     let mut expanded_topics: HashSet<String> = HashSet::new();
     let mut selected_source: Option<String> = None;
 
@@ -634,6 +800,7 @@ fn draw_until_quit(
                 search.as_deref(),
                 notice.as_deref(),
                 &feed_list_display,
+                !feed_lists.is_single(),
             )
         })?;
 
@@ -655,6 +822,88 @@ fn draw_until_quit(
         // screen for at least one frame, and whatever this key does may set
         // a fresh one below.
         notice = None;
+
+        // While the feed list picker is open, every keypress belongs to it.
+        // Moving the highlight only moves it (no preview); `Enter` switches.
+        // `&mut mode` borrows the variant's fields so `selected` can be
+        // changed in place. Once `Enter` has copied `selected` out, that
+        // borrow is over, so `mode` itself can be reassigned.
+        if let Mode::ListPicker { selected, rows } = &mut mode {
+            let count = rows.len();
+            match key.code {
+                // Wrap around at either end, same as the theme picker.
+                KeyCode::Up | KeyCode::Char('k') => *selected = (*selected + count - 1) % count,
+                KeyCode::Down | KeyCode::Char('j') => *selected = (*selected + 1) % count,
+                KeyCode::Esc | KeyCode::Char('q') => mode = Mode::Normal,
+                KeyCode::Enter => {
+                    let target = *selected;
+                    mode = Mode::Normal;
+                    // Load only the target list's file. On success swap in
+                    // its sources and reload the views from the database,
+                    // which is instant and fetches nothing (press `r` to
+                    // refresh). On failure stay on the current list.
+                    match feedlists::try_switch(
+                        &feed_lists,
+                        active_list,
+                        target,
+                        home.as_deref(),
+                        |list| fetchers::configured_sources_at(&list.path),
+                    ) {
+                        Switch::Switched { index, loaded } => {
+                            active_list = index;
+                            *sources_by_topic = group_sources_by_topic(&loaded);
+                            scope = list_scope(&feed_lists, &loaded);
+                            *topics = list_topics(storage, &scope, &feed_lists, &loaded)?;
+
+                            // A different list means a different sidebar, so
+                            // start from its first topic. Saved, History, and
+                            // search are global, but returning to the topic
+                            // view shows the switch happened.
+                            topic_index = 0;
+                            selected_source = None;
+                            expanded_topics.clear();
+                            view = View::Topic;
+                            search = None;
+                            articles = articles_for_view(
+                                storage,
+                                &scope,
+                                view,
+                                topics,
+                                topic_index,
+                                None,
+                            )?;
+                            article_index = 0;
+
+                            // Footer path, and remember the choice in
+                            // `lists.toml`. The switch has already happened
+                            // either way; a failed save only means it won't
+                            // be remembered next time, which the notice says.
+                            let list = &feed_lists.lists()[active_list];
+                            feed_list_display =
+                                crate::paths::abbreviate_home(&list.path, home.as_deref());
+                            notice = Some(match feedlists::config::save_active(&list.name) {
+                                Ok(()) => format!(
+                                    "{} Feed list: {} (press f to change)",
+                                    icons.glyph(Icon::FeedFile),
+                                    list.name
+                                ),
+                                Err(err) => format!(
+                                    "{} Switched to {} for now, but saving lists.toml failed: {err:#}",
+                                    icons.glyph(Icon::Error),
+                                    list.name
+                                ),
+                            });
+                        }
+                        Switch::Unchanged => {}
+                        Switch::Failed { message } => {
+                            notice = Some(format!("{} {message}", icons.glyph(Icon::Error)));
+                        }
+                    }
+                }
+                _ => {}
+            }
+            continue;
+        }
 
         // While the theme picker is open, every keypress belongs to it, the
         // same isolation as the other popups. Moving the selection changes
@@ -776,7 +1025,12 @@ fn draw_until_quit(
             let Mode::AddSource(step) = mode else {
                 unreachable!("just checked mode is Mode::AddSource above")
             };
-            mode = handle_add_source_key(key.code, step, topics)?;
+            mode = handle_add_source_key(
+                key.code,
+                step,
+                topics,
+                &feed_lists.lists()[active_list].path,
+            )?;
 
             // `mode` is back to `Mode::Normal` once the flow ends, whether
             // that's by successfully confirming or by cancelling with
@@ -789,6 +1043,26 @@ fn draw_until_quit(
             // right away instead of staying on the "no articles yet"
             // placeholder against a still-empty topic list.
             if matches!(mode, Mode::Normal) {
+                // With several lists, re-read the active list's file so a
+                // newly added source's feed joins `scope`. Otherwise its
+                // articles wouldn't appear in this list after the next `r`.
+                // With a single list, `scope` is `All` and the sidebar tree
+                // stays as it was, exactly as before lists existed.
+                if !feed_lists.is_single() {
+                    match fetchers::configured_sources_at(&feed_lists.lists()[active_list].path) {
+                        Ok(sources) => {
+                            *sources_by_topic = group_sources_by_topic(&sources);
+                            scope = list_scope(&feed_lists, &sources);
+                        }
+                        Err(err) => {
+                            notice = Some(format!(
+                                "{} Couldn't re-read the feed list: {err:#}",
+                                icons.glyph(Icon::Error)
+                            ));
+                        }
+                    }
+                }
+
                 topic_index = previously_selected_topic
                     .and_then(|name| topics.iter().position(|t| *t == name))
                     .unwrap_or(0);
@@ -800,7 +1074,7 @@ fn draw_until_quit(
                 // still makes sense.
                 selected_source = None;
                 articles = match topics.get(topic_index) {
-                    Some(topic) => storage.articles_by_topic(topic)?,
+                    Some(topic) => storage.articles_by_topic(&scope, topic)?,
                     None => Vec::new(),
                 };
                 article_index = article_index.min(articles.len().saturating_sub(1));
@@ -836,6 +1110,7 @@ fn draw_until_quit(
                     mode = Mode::Normal;
                     articles = articles_for_view(
                         storage,
+                        &scope,
                         view,
                         topics,
                         topic_index,
@@ -857,6 +1132,7 @@ fn draw_until_quit(
                         search = None;
                         articles = articles_for_view(
                             storage,
+                            &scope,
                             view,
                             topics,
                             topic_index,
@@ -941,6 +1217,7 @@ fn draw_until_quit(
                     );
                     articles = load_articles_for_selection(
                         storage,
+                        &scope,
                         &topics[topic_index],
                         selected_source.as_deref(),
                     )?;
@@ -957,6 +1234,7 @@ fn draw_until_quit(
                     );
                     articles = load_articles_for_selection(
                         storage,
+                        &scope,
                         &topics[topic_index],
                         selected_source.as_deref(),
                     )?;
@@ -1003,8 +1281,12 @@ fn draw_until_quit(
                         expanded_topics.remove(topic);
                     }
                     if selected_source.take().is_some() {
-                        articles =
-                            load_articles_for_selection(storage, &topics[topic_index], None)?;
+                        articles = load_articles_for_selection(
+                            storage,
+                            &scope,
+                            &topics[topic_index],
+                            None,
+                        )?;
                         article_index = 0;
                     }
                 }
@@ -1033,12 +1315,13 @@ fn draw_until_quit(
                         view = View::Topic;
                         selected_source = None;
                         search = None;
-                        articles = articles_for_view(storage, view, topics, topic_index, None)?;
+                        articles =
+                            articles_for_view(storage, &scope, view, topics, topic_index, None)?;
                         article_index = 0;
                     } else if !topics.is_empty() {
                         topic_index = (topic_index + 1).min(topics.len() - 1);
                         selected_source = None;
-                        articles = storage.articles_by_topic(&topics[topic_index])?;
+                        articles = storage.articles_by_topic(&scope, &topics[topic_index])?;
                         article_index = 0;
                     }
                 }
@@ -1052,7 +1335,7 @@ fn draw_until_quit(
                     view = View::Topic;
                     selected_source = None;
                     search = None;
-                    articles = articles_for_view(storage, view, topics, topic_index, None)?;
+                    articles = articles_for_view(storage, &scope, view, topics, topic_index, None)?;
                     article_index = 0;
                 }
 
@@ -1171,8 +1454,13 @@ fn draw_until_quit(
                 KeyCode::Char('r') if view == View::Topic && !topics.is_empty() => {
                     // `refresh_topic` returns two things as a tuple, and
                     // `let (a, b) = ...` unpacks it into two variables.
-                    let (refreshed, report) =
-                        refresh_topic(storage, &topics[topic_index], selected_source.as_deref())?;
+                    let (refreshed, report) = refresh_topic(
+                        storage,
+                        &scope,
+                        &feed_lists.lists()[active_list].path,
+                        &topics[topic_index],
+                        selected_source.as_deref(),
+                    )?;
                     articles = refreshed;
                     article_index = article_index.min(articles.len().saturating_sub(1));
                     // Remember this refresh's new articles for the
@@ -1216,7 +1504,7 @@ fn draw_until_quit(
                     };
                     selected_source = None;
                     search = None;
-                    articles = articles_for_view(storage, view, topics, topic_index, None)?;
+                    articles = articles_for_view(storage, &scope, view, topics, topic_index, None)?;
                     article_index = 0;
                 }
 
@@ -1244,7 +1532,7 @@ fn draw_until_quit(
                     };
                     selected_source = None;
                     search = None;
-                    articles = articles_for_view(storage, view, topics, topic_index, None)?;
+                    articles = articles_for_view(storage, &scope, view, topics, topic_index, None)?;
                     article_index = 0;
                 }
 
@@ -1290,6 +1578,31 @@ fn draw_until_quit(
                 KeyCode::Char('i') => {
                     icons.mode = icons.mode.next();
                     notice = Some(save_icon_mode_notice(&icons));
+                }
+
+                // `f` opens the feed list picker, with the active list
+                // highlighted. With only one list there's nothing to pick,
+                // so instead of a one-row picker the footer says how to add
+                // lists. The rows' unread counts are computed once, here.
+                KeyCode::Char('f') => {
+                    if feed_lists.is_single() {
+                        notice = Some(format!(
+                            "{} Only one feed list. To add more, define them in {}",
+                            icons.glyph(Icon::FeedFile),
+                            lists_toml_display(home.as_deref())
+                        ));
+                    } else {
+                        mode = Mode::ListPicker {
+                            selected: active_list,
+                            rows: list_picker_rows(
+                                storage,
+                                &feed_lists,
+                                active_list,
+                                &scope,
+                                home.as_deref(),
+                            ),
+                        };
+                    }
                 }
 
                 // `t` opens the theme picker with the current theme's row
@@ -1531,14 +1844,21 @@ fn open_in_browser(url: &str) -> bool {
 /// Also returns a `FetchReport` for this refresh (sources tried and failed,
 /// and which articles were new), which the `r` arm turns into a footer
 /// message with `fetch_notice` and uses for the `Icon::New` markers.
+///
+/// `list_path` is the active feed list's file, re-read on every `r` (so an
+/// edit to it takes effect without restarting), and `scope` is its feeds,
+/// for reloading the article list afterwards. Other lists are never
+/// fetched here.
 fn refresh_topic(
     storage: &Storage,
+    scope: &Scope,
+    list_path: &Path,
     topic: &str,
     source: Option<&str>,
 ) -> anyhow::Result<(Vec<Article>, FetchReport)> {
     let mut report = FetchReport::default();
 
-    for configured_source in fetchers::configured_sources()?
+    for configured_source in fetchers::configured_sources_at(list_path)?
         .into_iter()
         .filter(|source| source.topic() == topic)
     {
@@ -1570,7 +1890,10 @@ fn refresh_topic(
         }
     }
 
-    Ok((load_articles_for_selection(storage, topic, source)?, report))
+    Ok((
+        load_articles_for_selection(storage, scope, topic, source)?,
+        report,
+    ))
 }
 
 /// The one-shot footer message summarizing a fetch round, with an icon in
@@ -1656,14 +1979,18 @@ fn save_icon_mode_notice(icons: &IconSettings) -> String {
 /// so every call site that needs to reload `articles` from the current
 /// sidebar selection goes through this one function instead of
 /// re-deriving the `if source.is_some() { ... } else { ... }` split itself.
+///
+/// `scope` limits both queries to the active feed list's feeds when there
+/// are several lists (see `storage::Scope`).
 fn load_articles_for_selection(
     storage: &Storage,
+    scope: &Scope,
     topic: &str,
     source: Option<&str>,
 ) -> anyhow::Result<Vec<Article>> {
     match source {
-        Some(name) => storage.articles_by_topic_and_source(topic, name),
-        None => storage.articles_by_topic(topic),
+        Some(name) => storage.articles_by_topic_and_source(scope, topic, name),
+        None => storage.articles_by_topic(scope, topic),
     }
 }
 
@@ -1682,8 +2009,12 @@ fn load_articles_for_selection(
 /// Before this existed, every one of those call sites duplicated that
 /// three-way split; a fourth view (or a future fifth) would otherwise mean
 /// hunting down and updating every one of them individually.
+///
+/// `scope` only applies to `View::Topic`: Saved and History always cover
+/// every feed list.
 fn articles_for_view(
     storage: &Storage,
+    scope: &Scope,
     view: View,
     topics: &[String],
     topic_index: usize,
@@ -1693,7 +2024,7 @@ fn articles_for_view(
         View::Saved => storage.saved_articles(),
         View::History => storage.all_articles(),
         View::Topic => match topics.get(topic_index) {
-            Some(topic) => load_articles_for_selection(storage, topic, selected_source),
+            Some(topic) => load_articles_for_selection(storage, scope, topic, selected_source),
             None => Ok(Vec::new()),
         },
     }
@@ -1820,15 +2151,16 @@ fn move_sidebar_selection(
 /// has to be a real, in-place mutation rather than something the caller
 /// re-derives afterward.
 ///
-/// This function only ever touches `sources.toml` on a successful
-/// confirm (via `fetchers::config::add_source`, see its own doc comment
-/// for why nothing here needs to separately "reload" the in-memory
-/// fetcher list) -- every other keypress just edits `step`'s fields in
-/// memory.
+/// This function only ever touches the active feed list's file
+/// (`list_path`, normally `sources.toml`) on a successful confirm (via
+/// `fetchers::config::add_source_at`, see its own doc comment for why
+/// nothing here needs to separately "reload" the in-memory fetcher list)
+/// -- every other keypress just edits `step`'s fields in memory.
 fn handle_add_source_key(
     key: KeyCode,
     step: AddSourceStep,
     topics: &mut Vec<String>,
+    list_path: &Path,
 ) -> anyhow::Result<Mode> {
     match step {
         AddSourceStep::Url { mut text, error } => match key {
@@ -2027,7 +2359,8 @@ fn handle_add_source_key(
                     }));
                 }
 
-                match fetchers::config::add_source(
+                match fetchers::config::add_source_at(
+                    list_path,
                     trimmed_name,
                     fetchers::config::SourceType::Rss,
                     &url,
@@ -2137,6 +2470,9 @@ fn render(
     // The feed list path (home already shown as `~`), drawn at the right
     // of the footer when there's room.
     feed_list: &str,
+    // Whether to list `f` (feed lists) in the sidebar's Keys section: only
+    // when there's more than one list.
+    show_list_key: bool,
 ) {
     // Painting a plain background-colored block across the whole frame
     // first means every gap between/around the panes below (e.g. if the
@@ -2174,11 +2510,22 @@ fn render(
         .constraints([Constraint::Percentage(25), Constraint::Percentage(75)])
         .areas(body);
 
+    // The Keys section's rows: the fixed `KEY_HINTS`, plus `f` when there
+    // are several feed lists. `.then_some(x)` is `Some(x)` when the bool is
+    // true and `None` otherwise, and chaining an `Option` adds zero or one
+    // item.
+    let key_hints: Vec<(&str, &str)> = KEY_HINTS
+        .iter()
+        .copied()
+        .chain(show_list_key.then_some(FEED_LIST_KEY_HINT))
+        .collect();
+
     render_banner(frame, theme, banner_area);
     render_sidebar(
         frame,
         theme,
         icons,
+        &key_hints,
         sidebar_area,
         topics,
         sources_by_topic,
@@ -2255,6 +2602,9 @@ fn render(
     {
         render_theme_picker_popup(frame, theme, icons, body, *selected, *overrides);
     }
+    if let Mode::ListPicker { selected, rows } = mode {
+        render_list_picker_popup(frame, theme, icons, body, *selected, rows);
+    }
 }
 
 /// The top banner bar (`docs/ARCHITECTURE.md` § 3. TUI): the `tuxwire`
@@ -2314,6 +2664,7 @@ fn render_sidebar(
     frame: &mut Frame,
     theme: &Theme,
     icons: &IconSettings,
+    key_hints: &[(&str, &str)],
     area: Rect,
     topics: &[String],
     sources_by_topic: &HashMap<String, Vec<String>>,
@@ -2325,7 +2676,7 @@ fn render_sidebar(
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(0),
-            Constraint::Length(KEY_HINTS.len() as u16 + 2),
+            Constraint::Length(key_hints.len() as u16 + 2),
             Constraint::Length(LEGEND_ROWS as u16 + 2),
         ])
         .areas(area);
@@ -2341,7 +2692,7 @@ fn render_sidebar(
         selected_topic,
         selected_source,
     );
-    render_keys_section(frame, theme, keys_area);
+    render_keys_section(frame, theme, keys_area, key_hints);
     render_colors_section(frame, theme, icons, colors_area);
 }
 
@@ -2464,14 +2815,14 @@ fn render_topics_section(
 /// nothing here to select or scroll, just fixed reference text, so a `List`'s
 /// selection/highlight machinery would be pure overhead with no behavior
 /// behind it.
-fn render_keys_section(frame: &mut Frame, theme: &Theme, area: Rect) {
+fn render_keys_section(frame: &mut Frame, theme: &Theme, area: Rect, key_hints: &[(&str, &str)]) {
     let block = Block::new()
         .title(" Keys ")
         .borders(Borders::ALL)
         .style(Style::new().bg(theme.background).fg(theme.text_primary))
         .border_style(Style::new().fg(theme.panel_border));
 
-    let lines: Vec<Line> = KEY_HINTS
+    let lines: Vec<Line> = key_hints
         .iter()
         .map(|(key, action)| {
             Line::from(vec![
@@ -2961,23 +3312,34 @@ fn cell_width(text: &str) -> usize {
 }
 
 /// The footer's feed list text, made to fit in `available` cells, or
-/// `None` if it can't. Shortens from the *left* so the file name, the
-/// most useful part, stays visible:
-///
-/// 1. `"<label> <path>"` if it fits as is.
-/// 2. Otherwise `"<label> <ellipsis><end of path>"`, keeping as much of the
-///    end of the path as fits. The kept part must include the last `/`
-///    and the whole file name, e.g. `"Feed List: …/casual.toml"`.
-/// 3. Otherwise `None`: not even the label plus file name fit, so the
-///    footer shows no path at all rather than a meaningless fragment.
-///
-/// Widths are display cells (`cell_width`), so a wide character counts
-/// as two, and the path is cut on character boundaries, never mid-character.
+/// `None` if it can't: `"<label> <path>"`, with the path shortened from the
+/// left by `truncate_path_left` when needed (e.g. `"Feed List: …/casual.toml"`).
+/// `None` means not even the label plus the file name fit, so the footer
+/// shows no path at all rather than a meaningless fragment.
 fn fit_feed_list(label: &str, path: &str, ellipsis: &str, available: usize) -> Option<String> {
-    // Step 1: the whole thing fits.
-    let full = format!("{label} {path}");
-    if cell_width(&full) <= available {
-        return Some(full);
+    // The cells left for the path once the label and its space are placed.
+    // `checked_sub` returns `None` instead of wrapping around below zero,
+    // and `?` then returns `None` from this function: no room for the label.
+    let budget = available.checked_sub(cell_width(label) + 1)?;
+    truncate_path_left(path, ellipsis, budget).map(|path| format!("{label} {path}"))
+}
+
+/// `path`, made to fit in `available` cells by cutting from the *left*, so
+/// the file name, the most useful part, stays visible:
+///
+/// 1. the whole path, if it fits;
+/// 2. otherwise `<ellipsis><end of path>`, keeping as much of the end as
+///    fits. The kept part must include the last `/` and the whole file
+///    name (`…/casual.toml`);
+/// 3. otherwise `None`.
+///
+/// Widths are display cells (`cell_width`), so a wide character counts as
+/// two, and the path is cut on character boundaries, never mid-character.
+/// Used by the footer (`fit_feed_list`) and the feed list picker.
+fn truncate_path_left(path: &str, ellipsis: &str, available: usize) -> Option<String> {
+    // Step 1: the whole path fits.
+    if cell_width(path) <= available {
+        return Some(path.to_string());
     }
 
     // The byte position where the part we must keep starts: the last `/`
@@ -2986,11 +3348,9 @@ fn fit_feed_list(label: &str, path: &str, ellipsis: &str, available: usize) -> O
     // `rfind` searches from the right and returns a byte index.
     let must_keep_from = path.rfind('/').unwrap_or(0);
 
-    // Step 2: how many cells are left for the end of the path once the
-    // label, its space, and the ellipsis are placed. `checked_sub` returns
-    // `None` instead of wrapping around below zero, and `?` then returns
-    // `None` from this function: no room even for the label.
-    let budget = available.checked_sub(cell_width(label) + 1 + cell_width(ellipsis))?;
+    // Step 2: the cells left for the end of the path once the ellipsis is
+    // placed (`?` returns `None` if not even that fits).
+    let budget = available.checked_sub(cell_width(ellipsis))?;
 
     // Walk the path backwards one character at a time, adding each
     // character's width, and stop before the first one that doesn't fit.
@@ -3015,7 +3375,17 @@ fn fit_feed_list(label: &str, path: &str, ellipsis: &str, available: usize) -> O
     if keep_from > must_keep_from {
         return None;
     }
-    Some(format!("{label} {ellipsis}{}", &path[keep_from..]))
+    Some(format!("{ellipsis}{}", &path[keep_from..]))
+}
+
+/// Where lists are defined, for messages: `lists.toml`'s path with `~` for
+/// the home directory, or just `lists.toml` if the path can't be worked
+/// out (no `$HOME`).
+fn lists_toml_display(home: Option<&Path>) -> String {
+    match feedlists::config::lists_path() {
+        Ok(path) => crate::paths::abbreviate_home(&path, home),
+        Err(_) => "lists.toml".to_string(),
+    }
 }
 
 /// The footer's hint line for `mode` and `view`, used whenever there's no
@@ -3029,6 +3399,7 @@ fn footer_hints(mode: &Mode, view: View) -> &'static str {
         Mode::Searching { .. } => SEARCH_HINTS,
         Mode::IconCheck => ICON_CHECK_HINTS,
         Mode::ThemePicker { .. } => THEME_PICKER_HINTS,
+        Mode::ListPicker { .. } => LIST_PICKER_HINTS,
         Mode::Normal => match view {
             View::Topic => KEYBIND_HINTS,
             View::Saved | View::History => SAVED_HINTS,
@@ -3251,6 +3622,114 @@ fn render_add_source_popup(frame: &mut Frame, theme: &Theme, area: Rect, step: &
             frame.set_cursor_position((cursor_x, cursor_y));
         }
     }
+}
+
+/// The `f` feed list picker popup (`Mode::ListPicker`): one row per list,
+/// in `lists.toml` order, each showing
+/// `<pointer> <name> <unread icon> <count>  <path>`. The pointer
+/// (`Icon::Collapsed`) marks the highlighted row, the active list's name is
+/// followed by "(active)", and a list whose file can't be read shows the
+/// error icon and "unavailable" instead of a count. Paths are cut from the
+/// left to fit (`truncate_path_left`), so file names stay visible. A last
+/// line says where lists are defined, since lists are added by editing
+/// `lists.toml`, not from here.
+///
+/// All glyphs come from `icons` and all colors from `theme`.
+fn render_list_picker_popup(
+    frame: &mut Frame,
+    theme: &Theme,
+    icons: &IconSettings,
+    area: Rect,
+    selected: usize,
+    rows: &[ListRow],
+) {
+    // The popup takes 80% of the body's width; the border uses one cell on
+    // each side.
+    let popup_width = (area.width as u32 * 80 / 100) as u16;
+    let inner = popup_width.saturating_sub(2) as usize;
+
+    // Each row's name text, with "(active)" for the active list, padded to
+    // the widest so the counts line up. `max()` is `None` only for no rows,
+    // which the picker never has.
+    let names: Vec<String> = rows
+        .iter()
+        .map(|row| {
+            if row.active {
+                format!("{} (active)", row.name)
+            } else {
+                row.name.clone()
+            }
+        })
+        .collect();
+    let name_width = names.iter().map(|name| cell_width(name)).max().unwrap_or(0);
+
+    let muted = Style::new().fg(theme.text_muted);
+    let mut lines = Vec::new();
+    for (index, (row, name)) in rows.iter().zip(&names).enumerate() {
+        let is_selected = index == selected;
+        let name_style = if is_selected {
+            Style::new()
+                .fg(theme.accent_selected)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::new().fg(theme.text_primary)
+        };
+        let pointer = if is_selected {
+            icons.glyph(Icon::Collapsed)
+        } else {
+            " "
+        };
+
+        // The count column: `{:>5}` right-aligns the number in 5 columns.
+        let (count_text, count_style) = match row.unread {
+            Some(count) => (
+                format!("{} {count:>5} unread", icons.glyph(Icon::Unread)),
+                Style::new().fg(theme.accent_unread),
+            ),
+            None => (
+                format!("{} unavailable  ", icons.glyph(Icon::Error)),
+                Style::new().fg(theme.accent_breaking),
+            ),
+        };
+
+        // `{:<width$}` pads to a width held in a variable. Padding is by
+        // characters, so wide characters in a name are padded by hand from
+        // `cell_width` instead.
+        let padding = " ".repeat(name_width - cell_width(name));
+        let used = cell_width(pointer) + 1 + name_width + 2 + cell_width(&count_text) + 2;
+        let path = truncate_path_left(&row.path, icons.ellipsis(), inner.saturating_sub(used))
+            .unwrap_or_default();
+
+        lines.push(Line::from(vec![
+            Span::styled(format!("{pointer} "), name_style),
+            Span::styled(format!("{name}{padding}  "), name_style),
+            Span::styled(count_text, count_style),
+            Span::styled(format!("  {path}"), muted),
+        ]));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        format!(
+            "Add or edit lists in {}",
+            lists_toml_display(crate::paths::home_dir().as_deref())
+        ),
+        muted,
+    )));
+
+    // `+ 2` for the border, same as every other popup in this module.
+    let popup_area = centered_rect(area, 80, lines.len() as u16 + 2);
+
+    // Same `Clear` reasoning as `render_note_popup`.
+    frame.render_widget(Clear, popup_area);
+
+    let block = Block::new()
+        .title(format!(" {} Feed Lists ", icons.glyph(Icon::FeedFile)))
+        .borders(Borders::ALL)
+        .style(Style::new().bg(theme.background).fg(theme.text_primary))
+        .border_style(Style::new().fg(theme.accent_selected));
+
+    frame.render_widget(Paragraph::new(lines).block(block), popup_area);
 }
 
 /// The `t` theme picker popup (`Mode::ThemePicker`): one row per built-in
@@ -3633,5 +4112,77 @@ mod tests {
         assert_eq!(fit_feed_list("Feed List:", path, "…", 0), None);
         // A bare file name with no `/` is never shortened.
         assert_eq!(fit_feed_list("Feed List:", "sources.toml", "…", 20), None);
+    }
+
+    /// `truncate_path_left` on its own (the picker uses it without a label):
+    /// whole path, left-cut keeping `/name`, or `None`.
+    #[test]
+    fn truncate_path_left_keeps_file_name() {
+        let path = "~/.config/tuxwire/casual.toml";
+        assert_eq!(truncate_path_left(path, "…", 40).as_deref(), Some(path));
+        assert_eq!(
+            truncate_path_left(path, "…", 13).as_deref(),
+            Some("…/casual.toml")
+        );
+        assert_eq!(truncate_path_left(path, "…", 12), None);
+    }
+
+    /// One feed list means `Scope::All` (identical to before lists
+    /// existed); several mean only the active list's feed URLs.
+    #[test]
+    fn list_scope_single_vs_several_lists() {
+        let sources = vec![ConfiguredSource::Rss(fetchers::rss::RssFetcher {
+            name: "Arch".to_string(),
+            url: "https://archlinux.org/feeds/news/".to_string(),
+            topic: "linux".to_string(),
+        })];
+
+        let single = FeedLists::single(std::path::PathBuf::from("/x/sources.toml"));
+        assert_eq!(list_scope(&single, &sources), Scope::All);
+
+        let several = feedlists::config::parse(
+            "[[list]]\nname = \"main\"\npath = \"a.toml\"\n[[list]]\nname = \"casual\"\npath = \"b.toml\"",
+            Path::new("/cfg"),
+            None,
+            Path::new("/cfg/sources.toml"),
+        )
+        .unwrap();
+        assert_eq!(
+            list_scope(&several, &sources),
+            Scope::Feeds(vec!["https://archlinux.org/feeds/news/".to_string()])
+        );
+    }
+
+    /// With several lists, a list's configured topics appear in the sidebar
+    /// before anything has been fetched, so `r` has a topic to refresh. With
+    /// one list, the topics are exactly what's stored, as before.
+    #[test]
+    fn list_topics_include_configured_topics_only_with_several_lists() {
+        let storage = Storage::open_in_memory().unwrap();
+        let sources = vec![ConfiguredSource::Rss(fetchers::rss::RssFetcher {
+            name: "LWN".to_string(),
+            url: "https://lwn.net/headlines/rss".to_string(),
+            topic: "kernel".to_string(),
+        })];
+
+        let single = FeedLists::single(std::path::PathBuf::from("/x/sources.toml"));
+        assert!(
+            list_topics(&storage, &Scope::All, &single, &sources)
+                .unwrap()
+                .is_empty()
+        );
+
+        let several = feedlists::config::parse(
+            "[[list]]\nname = \"main\"\npath = \"a.toml\"\n[[list]]\nname = \"casual\"\npath = \"b.toml\"",
+            Path::new("/cfg"),
+            None,
+            Path::new("/cfg/sources.toml"),
+        )
+        .unwrap();
+        let scope = list_scope(&several, &sources);
+        assert_eq!(
+            list_topics(&storage, &scope, &several, &sources).unwrap(),
+            ["kernel"]
+        );
     }
 }

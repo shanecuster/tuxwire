@@ -10,7 +10,7 @@
 
 use anyhow::{Context, anyhow};
 use serde::Deserialize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Which concrete fetcher a `[[source]]` entry's `type = "..."` names.
 ///
@@ -140,19 +140,24 @@ impl RawSource {
 /// The bundled fallback `sources.toml`, embedded into the compiled binary
 /// via `include_str!` -- the same trick `theme.rs` uses for
 /// `theme.toml.example`. Unlike the theme fallback (which only ever lives
-/// in memory), `load_sources` below *writes* this out to
+/// in memory), `load_sources_at` below *writes* this out to
 /// `~/.config/tuxwire/sources.toml` the first time it's needed, so a
 /// first run leaves behind a real, editable file with a couple of working
 /// sources already in it instead of an empty topic sidebar and nothing to
 /// edit.
 const DEFAULT_SOURCES_TOML: &str = include_str!("../../sources.toml.example");
 
-/// Loads, parses, and validates `sources.toml`.
+/// Loads, parses, and validates a sources file at `path`: the usual
+/// `sources.toml`, or any feed list's file (see `lists.toml`).
 ///
-/// If `~/.config/tuxwire/sources.toml` doesn't exist yet, the bundled
-/// default (see `DEFAULT_SOURCES_TOML` above) is written to that path
-/// *and* used for this call -- so the very first run both shows real
-/// articles immediately and leaves a real file behind to edit afterwards.
+/// If the file doesn't exist and `create_if_missing` is `true`, the bundled
+/// default (see `DEFAULT_SOURCES_TOML` above) is written to that path *and*
+/// used for this call -- so the very first run both shows real articles
+/// immediately and leaves a real file behind to edit afterwards. That's
+/// only done for the default `~/.config/tuxwire/sources.toml` (see
+/// `fetchers::configured_sources_at`): a missing *other* list file is an
+/// error, so a typo in `lists.toml` is reported rather than quietly
+/// creating a new file full of sample feeds.
 /// Any other I/O error (permissions, a directory where a file was
 /// expected, ...) is propagated with `?` rather than silently falling
 /// back, matching `Theme::load`'s reasoning: only "the file simply isn't
@@ -164,18 +169,18 @@ const DEFAULT_SOURCES_TOML: &str = include_str!("../../sources.toml.example");
 /// see `RawSource::validate` above for why silently defaulting a missing
 /// `topic` would undermine the "one topic per source" guarantee the whole
 /// rest of the app relies on.
-pub fn load_sources() -> anyhow::Result<Vec<SourceConfig>> {
-    let path = sources_path()?;
-
-    let contents = match std::fs::read_to_string(&path) {
+pub fn load_sources_at(path: &Path, create_if_missing: bool) -> anyhow::Result<Vec<SourceConfig>> {
+    let contents = match std::fs::read_to_string(path) {
         Ok(contents) => contents,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+        // The `if create_if_missing` guard means a missing non-default
+        // list file falls through to the general error arm below.
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound && create_if_missing => {
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent).with_context(|| {
                     format!("failed to create config directory {}", parent.display())
                 })?;
             }
-            std::fs::write(&path, DEFAULT_SOURCES_TOML).with_context(|| {
+            std::fs::write(path, DEFAULT_SOURCES_TOML).with_context(|| {
                 format!("failed to write default sources file to {}", path.display())
             })?;
             DEFAULT_SOURCES_TOML.to_string()
@@ -218,9 +223,10 @@ pub fn sources_path() -> anyhow::Result<PathBuf> {
     Ok(PathBuf::from(home).join(".config/tuxwire/sources.toml"))
 }
 
-/// Appends one new `[[source]]` block to the user's `sources.toml` --
-/// the write side of the in-app "add a source" flow (`ui`'s `a` keybind,
-/// see `docs/ARCHITECTURE.md`'s Adding Sources section). Called only
+/// Appends one new `[[source]]` block to the sources file at `path` (the
+/// active feed list's file, normally `sources.toml`) -- the write side of
+/// the in-app "add a source" flow (`ui`'s `a` keybind, see
+/// `docs/ARCHITECTURE.md`'s Adding Sources section). Called only
 /// *after* the URL the user typed has already been proven valid by
 /// successfully fetching and parsing it (see `fetchers::rss::fetch_feed`),
 /// so this function itself does no further validation beyond "these
@@ -238,23 +244,11 @@ pub fn sources_path() -> anyhow::Result<PathBuf> {
 /// `sources.toml` from disk on every call (it's never cached), so the
 /// very next refresh -- in the TUI, `ui`'s `r` keybind -- already sees
 /// whatever this function just wrote.
-pub fn add_source(
-    name: &str,
-    source_type: SourceType,
-    url: &str,
-    topic: &str,
-) -> anyhow::Result<()> {
-    add_source_at(&sources_path()?, name, source_type, url, topic)
-}
-
-/// The actual read-edit-write logic behind `add_source`, taking `path`
-/// explicitly rather than resolving it via `sources_path()` itself. Split
-/// out purely so the test below can point it at a temporary file instead
-/// of the real `~/.config/tuxwire/sources.toml` -- `sources_path()` reads
-/// `$XDG_CONFIG_HOME`/`$HOME`, and mutating process-wide environment
-/// variables from a test is exactly the kind of global, order-dependent
-/// state that makes `cargo test`'s parallel test execution flaky.
-fn add_source_at(
+///
+/// Taking `path` explicitly (rather than always using `sources_path()`)
+/// is what lets `a` add to whichever feed list is active, and lets the
+/// tests below point it at a temporary file instead of the real config.
+pub fn add_source_at(
     path: &std::path::Path,
     name: &str,
     source_type: SourceType,
@@ -272,7 +266,7 @@ fn add_source_at(
         .with_context(|| format!("failed to parse sources file {} as TOML", path.display()))?;
 
     // `sources.toml` always has at least one `[[source]]` block by the
-    // time this can run (see the doc comment on `load_sources` -- a
+    // time this can run (see the doc comment on `load_sources_at` -- a
     // missing file is written out with the bundled default on first
     // load), but this guards the theoretical case of a hand-edited file
     // with the `source` key removed entirely: auto-vivify an empty array
@@ -473,7 +467,7 @@ topic = "kernel"
     }
 
     /// Appending to a file with no `[[source]]` blocks at all (an edge
-    /// case `load_sources`'s own `#[serde(default)]` already treats as
+    /// case `load_sources_at`'s own `#[serde(default)]` already treats as
     /// valid, just empty) still produces a well-formed array-of-tables
     /// rather than erroring -- see the `doc.get("source")...is_none()`
     /// guard in `add_source_at`.

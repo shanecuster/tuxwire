@@ -29,7 +29,7 @@ mod migrations;
 use crate::models::Article;
 use anyhow::Context;
 use chrono::Utc;
-use rusqlite::{Connection, OptionalExtension, Row, params};
+use rusqlite::{Connection, OptionalExtension, Row, params, params_from_iter};
 use std::path::PathBuf;
 
 /// A handle to tuxwire's SQLite database.
@@ -71,6 +71,14 @@ impl Storage {
             .with_context(|| format!("failed to open database at {}", path.display()))?;
 
         Self::from_connection(conn)
+    }
+
+    /// A fresh, fully migrated database that lives only in memory, for
+    /// tests in other modules (the UI's) that need a real `Storage` without
+    /// touching disk. `#[cfg(test)]` leaves it out of the real binary.
+    #[cfg(test)]
+    pub fn open_in_memory() -> anyhow::Result<Self> {
+        Self::from_connection(Connection::open_in_memory()?)
     }
 
     /// Wraps an already-open `Connection` in a `Storage`, running
@@ -210,14 +218,20 @@ impl Storage {
             .map_err(Into::into)
     }
 
-    /// All articles filed under `topic`, most recent first -- the query
-    /// backing the TUI's right-hand article pane (ARCHITECTURE.md's "Right
-    /// pane: article list for the selected topic, sorted by recency").
-    pub fn articles_by_topic(&self, topic: &str) -> anyhow::Result<Vec<Article>> {
-        let mut stmt = self.conn.prepare(
+    /// All articles filed under `topic` within `scope`, most recent first
+    /// -- the query backing the TUI's right-hand article pane
+    /// (ARCHITECTURE.md's "Right pane: article list for the selected topic,
+    /// sorted by recency"). With several feed lists, `scope` limits it to
+    /// the active list's feeds (see `Scope`).
+    pub fn articles_by_topic(&self, scope: &Scope, topic: &str) -> anyhow::Result<Vec<Article>> {
+        // `scope.clause()` adds `AND feed_url IN (?, ?, ...)` for a list, or
+        // nothing for `Scope::All`. Every placeholder here is a plain `?`,
+        // filled in order: the topic first, then the scope's feed URLs.
+        let mut stmt = self.conn.prepare(&format!(
             "SELECT id, title, url, source, topic, timestamp, read, skipped, saved, note, saved_at, noted_at, feed_url
-             FROM articles WHERE topic = ?1 ORDER BY timestamp DESC",
-        )?;
+             FROM articles WHERE topic = ?{} ORDER BY timestamp DESC",
+            scope.clause()
+        ))?;
 
         // `query_map` runs the query and lazily applies `row_to_article`
         // to each row as it's read. It hands back an iterator, not a
@@ -225,7 +239,12 @@ impl Storage {
         // the caller wants every row materialized at once or would rather
         // stream through them -- `.collect()` below is what actually
         // decides "gather all of them into a `Vec`."
-        let rows = stmt.query_map(params![topic], row_to_article)?;
+        // `params_from_iter` binds every value an iterator yields, in order.
+        // `once(topic).chain(...)` is "the topic, followed by each feed URL".
+        let rows = stmt.query_map(
+            params_from_iter(std::iter::once(topic).chain(scope.feed_urls())),
+            row_to_article,
+        )?;
 
         // Each item out of `rows` is itself a `rusqlite::Result<Article>`
         // (decoding any single row can fail independently). Collecting
@@ -250,18 +269,25 @@ impl Storage {
     /// `AND source = ?2` clause, not a separate query path -- per
     /// ARCHITECTURE.md, "a source's topic is already fixed, so 'articles
     /// from source X' is just 'articles in X's topic, further filtered by
-    /// source name.'"
+    /// source name.'" `scope` works as in `articles_by_topic`.
     pub fn articles_by_topic_and_source(
         &self,
+        scope: &Scope,
         topic: &str,
         source: &str,
     ) -> anyhow::Result<Vec<Article>> {
-        let mut stmt = self.conn.prepare(
+        let mut stmt = self.conn.prepare(&format!(
             "SELECT id, title, url, source, topic, timestamp, read, skipped, saved, note, saved_at, noted_at, feed_url
-             FROM articles WHERE topic = ?1 AND source = ?2 ORDER BY timestamp DESC",
-        )?;
+             FROM articles WHERE topic = ? AND source = ?{} ORDER BY timestamp DESC",
+            scope.clause()
+        ))?;
 
-        let rows = stmt.query_map(params![topic, source], row_to_article)?;
+        // Topic, then source, then the scope's feed URLs: the same order as
+        // the `?`s in the SQL above.
+        let rows = stmt.query_map(
+            params_from_iter([topic, source].into_iter().chain(scope.feed_urls())),
+            row_to_article,
+        )?;
         rows.collect::<rusqlite::Result<Vec<Article>>>()
             .map_err(Into::into)
     }
@@ -344,15 +370,37 @@ impl Storage {
             .map_err(Into::into)
     }
 
-    /// Every distinct topic currently present in `articles`, alphabetical
-    /// -- feeds the TUI's topic sidebar.
-    pub fn topics(&self) -> anyhow::Result<Vec<String>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT DISTINCT topic FROM articles ORDER BY topic")?;
+    /// Every distinct topic among the articles in `scope`, alphabetical --
+    /// feeds the TUI's topic sidebar. With `Scope::All` that's every topic
+    /// in the database, exactly as before feed lists existed.
+    ///
+    /// `WHERE 1` is "always true", there so the scope's `AND ...` clause
+    /// always has a `WHERE` to attach to.
+    pub fn topics(&self, scope: &Scope) -> anyhow::Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT DISTINCT topic FROM articles WHERE 1{} ORDER BY topic",
+            scope.clause()
+        ))?;
 
-        let rows = stmt.query_map([], |row| row.get(0))?;
+        let rows = stmt.query_map(params_from_iter(scope.feed_urls()), |row| row.get(0))?;
         rows.collect::<rusqlite::Result<Vec<String>>>()
+            .map_err(Into::into)
+    }
+
+    /// How many articles in `scope` are unread: not read and not skipped.
+    /// Saving marks an article read, so saved ones don't count either. Used
+    /// for the feed list picker's per-list count, which comes straight from
+    /// the database without fetching anything.
+    pub fn unread_count(&self, scope: &Scope) -> anyhow::Result<i64> {
+        self.conn
+            .query_row(
+                &format!(
+                    "SELECT COUNT(*) FROM articles WHERE read = 0 AND skipped = 0{}",
+                    scope.clause()
+                ),
+                params_from_iter(scope.feed_urls()),
+                |row| row.get(0),
+            )
             .map_err(Into::into)
     }
 
@@ -499,6 +547,60 @@ impl Storage {
     }
 }
 
+/// Which articles a topic-view query covers: every article (`All`, used
+/// when there's only one feed list, so behavior matches the days before
+/// lists existed), or only those whose `feed_url` is one of the given feed
+/// URLs (`Feeds`, the active list's sources).
+///
+/// Only the topic sidebar, the per-topic article lists, and the picker's
+/// unread counts take a scope. Saved, History, and search deliberately stay
+/// global. Articles with no `feed_url` yet (stored before migration 005 and
+/// not backfilled) fall outside every `Feeds` scope but remain in those
+/// global views.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Scope {
+    /// No filtering.
+    All,
+    /// Only articles from these feeds (each a `[[source]]`'s `url`).
+    Feeds(Vec<String>),
+}
+
+impl Scope {
+    /// The SQL to append to a `WHERE`: nothing for `All`,
+    /// ` AND feed_url IN (?, ?, ...)` with one `?` per feed for `Feeds`,
+    /// and ` AND 0` (always false, so nothing matches) for an empty
+    /// `Feeds`, since `IN ()` isn't valid SQL.
+    ///
+    /// Only `?` placeholders are ever formatted into the SQL; the URLs
+    /// themselves are bound as parameters (see `feed_urls`), never pasted
+    /// into the string, so this can't be used for SQL injection.
+    fn clause(&self) -> String {
+        match self {
+            Scope::All => String::new(),
+            Scope::Feeds(urls) if urls.is_empty() => " AND 0".to_string(),
+            // `vec!["?"; n]` is a list of `n` question marks, joined with
+            // commas.
+            Scope::Feeds(urls) => {
+                format!(" AND feed_url IN ({})", vec!["?"; urls.len()].join(", "))
+            }
+        }
+    }
+
+    /// The values for `clause`'s placeholders, in order, as `&str`s
+    /// borrowed from the scope.
+    ///
+    /// `-> impl Iterator<Item = &str> + '_` means "some iterator of string
+    /// slices that borrows from `self`". The two arms return different
+    /// iterator types, so both are boxed into one type
+    /// (`Box<dyn Iterator>`), and `+ '_` ties the borrow to `self`.
+    fn feed_urls(&self) -> Box<dyn Iterator<Item = &str> + '_> {
+        match self {
+            Scope::All => Box::new(std::iter::empty()),
+            Scope::Feeds(urls) => Box::new(urls.iter().map(String::as_str)),
+        }
+    }
+}
+
 /// Maps one row from a `SELECT id, title, url, source, topic, timestamp,
 /// read, skipped, saved, note, saved_at, noted_at, feed_url FROM articles ...` query
 /// into an `Article`.
@@ -618,7 +720,9 @@ mod tests {
         let id = storage.insert_article(&article).unwrap();
         assert!(id > 0);
 
-        let fetched = storage.articles_by_topic("linux-news").unwrap();
+        let fetched = storage
+            .articles_by_topic(&Scope::All, "linux-news")
+            .unwrap();
         assert_eq!(fetched.len(), 1);
         assert_eq!(fetched[0].id, id);
         assert_eq!(fetched[0].title, "Btrfs send/receive got faster");
@@ -626,7 +730,12 @@ mod tests {
         // A different topic should see nothing -- the whole point of
         // filtering by topic in the query rather than fetching everything
         // and filtering in Rust.
-        assert!(storage.articles_by_topic("gaming").unwrap().is_empty());
+        assert!(
+            storage
+                .articles_by_topic(&Scope::All, "gaming")
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -650,7 +759,7 @@ mod tests {
         storage.insert_article(&phoronix).unwrap();
 
         let lwn_only = storage
-            .articles_by_topic_and_source("linux-news", "LWN.net")
+            .articles_by_topic_and_source(&Scope::All, "linux-news", "LWN.net")
             .unwrap();
         assert_eq!(lwn_only.len(), 1);
         assert_eq!(lwn_only[0].source, "LWN.net");
@@ -661,7 +770,7 @@ mod tests {
         // unknown source) comes back empty rather than erroring.
         assert!(
             storage
-                .articles_by_topic_and_source("linux-news", "unknown-source")
+                .articles_by_topic_and_source(&Scope::All, "linux-news", "unknown-source")
                 .unwrap()
                 .is_empty()
         );
@@ -692,7 +801,9 @@ mod tests {
             "re-inserting an existing URL must return its existing id"
         );
 
-        let articles = storage.articles_by_topic("linux-news").unwrap();
+        let articles = storage
+            .articles_by_topic(&Scope::All, "linux-news")
+            .unwrap();
         assert_eq!(
             articles.len(),
             1,
@@ -745,7 +856,7 @@ mod tests {
             .update_note(id, Some("revisit this".to_string()))
             .unwrap();
 
-        let fetched = &storage.articles_by_topic("topic").unwrap()[0];
+        let fetched = &storage.articles_by_topic(&Scope::All, "topic").unwrap()[0];
         assert!(fetched.read);
         assert!(fetched.skipped);
         assert_eq!(fetched.note.as_deref(), Some("revisit this"));
@@ -766,7 +877,7 @@ mod tests {
         );
         let id = storage.insert_article(&article).unwrap();
 
-        let fetched = &storage.articles_by_topic("topic").unwrap()[0];
+        let fetched = &storage.articles_by_topic(&Scope::All, "topic").unwrap()[0];
         assert_eq!(
             fetched.saved_at, None,
             "an article that was never saved has no saved_at"
@@ -801,7 +912,7 @@ mod tests {
         );
         let id = storage.insert_article(&article).unwrap();
 
-        let fetched = &storage.articles_by_topic("topic").unwrap()[0];
+        let fetched = &storage.articles_by_topic(&Scope::All, "topic").unwrap()[0];
         assert_eq!(
             fetched.noted_at, None,
             "an article with no note has no noted_at"
@@ -813,7 +924,7 @@ mod tests {
             .unwrap();
         let after = Utc::now();
 
-        let noted = &storage.articles_by_topic("topic").unwrap()[0];
+        let noted = &storage.articles_by_topic(&Scope::All, "topic").unwrap()[0];
         let noted_at = noted
             .noted_at
             .expect("a non-empty note must populate noted_at");
@@ -827,7 +938,7 @@ mod tests {
         // with it -- "no note" and "no note date" are never allowed to
         // disagree.
         storage.update_note(id, None).unwrap();
-        let cleared = &storage.articles_by_topic("topic").unwrap()[0];
+        let cleared = &storage.articles_by_topic(&Scope::All, "topic").unwrap()[0];
         assert_eq!(cleared.note, None);
         assert_eq!(
             cleared.noted_at, None,
@@ -960,7 +1071,10 @@ mod tests {
             storage.insert_article(&article).unwrap();
         }
 
-        assert_eq!(storage.topics().unwrap(), vec!["gaming", "linux-news"]);
+        assert_eq!(
+            storage.topics(&Scope::All).unwrap(),
+            vec!["gaming", "linux-news"]
+        );
     }
 
     /// A plain test article from source `source` with article URL `url`
@@ -983,7 +1097,7 @@ mod tests {
         let mut article = old_article("https://example.com/a", "LWN");
         article.feed_url = Some("https://lwn.net/feed".to_string());
         storage.insert_article(&article).unwrap();
-        let stored = &storage.articles_by_topic("linux").unwrap()[0];
+        let stored = &storage.articles_by_topic(&Scope::All, "linux").unwrap()[0];
         assert_eq!(stored.feed_url.as_deref(), Some("https://lwn.net/feed"));
     }
 
@@ -1007,7 +1121,7 @@ mod tests {
         other.feed_url = Some("https://elsewhere/feed".to_string());
         storage.insert_article(&other).unwrap();
 
-        let stored = &storage.articles_by_topic("linux").unwrap()[0];
+        let stored = &storage.articles_by_topic(&Scope::All, "linux").unwrap()[0];
         assert_eq!(stored.feed_url.as_deref(), Some("https://lwn.net/feed"));
         assert!(stored.saved && stored.read);
         assert_eq!(stored.note.as_deref(), Some("keep me"));
@@ -1100,5 +1214,74 @@ mod tests {
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
         assert_eq!(version, 5);
+    }
+
+    /// An article in topic `topic` from feed `feed`, unread.
+    fn from_feed(url: &str, topic: &str, feed: &str) -> Article {
+        let mut article = Article::new(
+            "title".to_string(),
+            url.to_string(),
+            "source".to_string(),
+            topic.to_string(),
+            Utc::now(),
+        );
+        article.feed_url = Some(feed.to_string());
+        article
+    }
+
+    /// A `Feeds` scope limits topics, topic articles, and unread counts to
+    /// those feeds. `All` sees everything, including articles with no
+    /// `feed_url`, and an empty `Feeds` sees nothing.
+    #[test]
+    fn scope_limits_topic_views_to_a_lists_feeds() {
+        let storage = test_storage();
+        storage
+            .insert_article(&from_feed("https://e/1", "linux", "https://main/feed"))
+            .unwrap();
+        storage
+            .insert_article(&from_feed("https://e/2", "gaming", "https://casual/feed"))
+            .unwrap();
+        let read_id = storage
+            .insert_article(&from_feed("https://e/3", "linux", "https://casual/feed"))
+            .unwrap();
+        storage.mark_read(read_id).unwrap();
+        storage
+            .insert_article(&old_article("https://e/4", "Old"))
+            .unwrap();
+
+        let main = Scope::Feeds(vec!["https://main/feed".to_string()]);
+        let casual = Scope::Feeds(vec!["https://casual/feed".to_string()]);
+
+        assert_eq!(storage.topics(&main).unwrap(), ["linux"]);
+        assert_eq!(storage.topics(&casual).unwrap(), ["gaming", "linux"]);
+        assert_eq!(storage.topics(&Scope::All).unwrap(), ["gaming", "linux"]);
+
+        assert_eq!(storage.articles_by_topic(&main, "linux").unwrap().len(), 1);
+        assert_eq!(
+            storage.articles_by_topic(&casual, "linux").unwrap().len(),
+            1
+        );
+        assert_eq!(
+            storage
+                .articles_by_topic(&Scope::All, "linux")
+                .unwrap()
+                .len(),
+            3
+        );
+        assert_eq!(
+            storage
+                .articles_by_topic_and_source(&casual, "gaming", "source")
+                .unwrap()
+                .len(),
+            1
+        );
+
+        assert_eq!(storage.unread_count(&main).unwrap(), 1);
+        assert_eq!(storage.unread_count(&casual).unwrap(), 1);
+        assert_eq!(storage.unread_count(&Scope::All).unwrap(), 3);
+
+        let nothing = Scope::Feeds(Vec::new());
+        assert!(storage.topics(&nothing).unwrap().is_empty());
+        assert_eq!(storage.unread_count(&nothing).unwrap(), 0);
     }
 }

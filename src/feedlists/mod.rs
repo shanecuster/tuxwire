@@ -24,11 +24,6 @@
 
 // Has clippy flag any undocumented item here, the same as in `src/icons/`.
 #![warn(clippy::missing_docs_in_private_items)]
-// Nothing outside this module's tests calls it yet: the TUI picker and the
-// startup wiring use it in the next commit, which removes this line.
-// Without it, `clippy -D warnings` would reject this commit for unused
-// code.
-#![allow(dead_code)]
 
 pub mod config;
 

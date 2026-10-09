@@ -190,8 +190,8 @@ fn save_active_at(path: &Path, name: &str) -> anyhow::Result<()> {
 
 /// The full path to `lists.toml`: `$XDG_CONFIG_HOME/tuxwire/lists.toml`, or
 /// `~/.config/tuxwire/lists.toml`. Same XDG fallback as `theme.rs`'s
-/// `theme_path`.
-fn lists_path() -> anyhow::Result<PathBuf> {
+/// `theme_path`. `pub` so the TUI can say where lists are defined.
+pub fn lists_path() -> anyhow::Result<PathBuf> {
     if let Ok(xdg_config_home) = std::env::var("XDG_CONFIG_HOME") {
         return Ok(PathBuf::from(xdg_config_home)
             .join("tuxwire")
