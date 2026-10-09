@@ -144,7 +144,11 @@ impl RawThemeColors {
 fn hex_to_color(hex: &str) -> anyhow::Result<Color> {
     let hex = hex.strip_prefix('#').unwrap_or(hex);
 
-    if hex.len() != 6 {
+    // The `is_ascii` check matters for the byte slicing below: `&hex[0..2]`
+    // slices by *byte* position, and slicing through the middle of a
+    // multi-byte character (say, `"€€"`, which is also 6 bytes) panics.
+    // Requiring ASCII first means every byte is a whole character.
+    if hex.len() != 6 || !hex.is_ascii() {
         bail!("expected a 6-digit hex color like \"#8aadf4\", got {hex:?}");
     }
 
@@ -174,4 +178,32 @@ fn theme_path() -> anyhow::Result<PathBuf> {
         .context("HOME environment variable is not set -- can't locate the theme config")?;
 
     Ok(PathBuf::from(home).join(".config/tuxwire/theme.toml"))
+}
+
+// `#[cfg(test)]`: compiled only for `cargo test`, so none of this ends up
+// in the real binary.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `hex_to_color` accepts colors with or without the `#`, and rejects
+    /// bad input with an error instead of panicking. `"€€"` is the case
+    /// that used to crash tuxwire at startup: it's 6 *bytes* long (each `€`
+    /// is 3 bytes in UTF-8), so it passed the length check, and then
+    /// `&hex[0..2]` sliced through the middle of the first `€`, which
+    /// panics.
+    #[test]
+    fn hex_parsing_rejects_bad_input_without_panicking() {
+        assert_eq!(
+            hex_to_color("#2d353b").unwrap(),
+            Color::Rgb(0x2d, 0x35, 0x3b)
+        );
+        assert_eq!(
+            hex_to_color("2d353b").unwrap(),
+            Color::Rgb(0x2d, 0x35, 0x3b)
+        );
+        assert!(hex_to_color("#12345").is_err());
+        assert!(hex_to_color("#zzzzzz").is_err());
+        assert!(hex_to_color("€€").is_err());
+    }
 }
