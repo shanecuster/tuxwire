@@ -58,6 +58,16 @@ const MIGRATIONS: &[Migration] = &[
         name: "003_add_saved_and_noted_at",
         sql: include_str!("../../migrations/003_add_saved_and_noted_at.sql"),
     },
+    // Version 4 is deliberately skipped: the archived FreshRSS branch used
+    // it, so a database that ever ran that build already reports
+    // `user_version = 4`, and a new migration 4 would never run there.
+    // `run` handles the gap fine, since it only compares
+    // `version > user_version`. See the header of 005_add_feed_url.sql.
+    Migration {
+        version: 5,
+        name: "005_add_feed_url",
+        sql: include_str!("../../migrations/005_add_feed_url.sql"),
+    },
 ];
 
 /// Brings `conn`'s schema up to date by running every migration whose

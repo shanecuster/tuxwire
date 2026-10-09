@@ -126,6 +126,16 @@ pub struct Article {
     /// note" and "no note date" are kept consistent with each other by
     /// `Storage::update_note`, not by this struct itself.
     pub noted_at: Option<DateTime<Utc>>,
+
+    /// The URL of the *feed* this article came from (its `[[source]]`'s
+    /// `url`), as opposed to `url` above, which is the article's own link.
+    /// This is how a feed list knows which articles are its own (see
+    /// `lists.toml` and migration 005).
+    ///
+    /// `None` for an article stored before migration 005 that hasn't been
+    /// re-fetched or backfilled yet (see `Storage::backfill_feed_urls`).
+    /// The fetcher sets it on every freshly fetched article.
+    pub feed_url: Option<String>,
 }
 
 impl Article {
@@ -173,6 +183,10 @@ impl Article {
             note: None,
             saved_at: None,
             noted_at: None,
+            // The fetcher fills this in right after `new` (see
+            // `RssFetcher::fetch`). `None` keeps `new`'s signature the same
+            // for every caller that doesn't know the feed, like tests.
+            feed_url: None,
         }
     }
 }

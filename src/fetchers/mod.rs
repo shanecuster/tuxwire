@@ -121,6 +121,16 @@ impl ConfiguredSource {
             ConfiguredSource::Reddit(fetcher) => &fetcher.topic,
         }
     }
+
+    /// This source's feed URL from `sources.toml`: what fetched articles
+    /// record as their `feed_url`, and what the startup backfill
+    /// (`Storage::backfill_feed_urls`) matches older articles against.
+    pub fn url(&self) -> &str {
+        match self {
+            ConfiguredSource::Rss(fetcher) => &fetcher.url,
+            ConfiguredSource::Reddit(fetcher) => &fetcher.url,
+        }
+    }
 }
 
 impl Fetcher for ConfiguredSource {
@@ -138,20 +148,30 @@ impl Fetcher for ConfiguredSource {
     }
 }
 
-/// Loads and validates `sources.toml` (via `config::load_sources`) and
-/// resolves every entry into a real `ConfiguredSource` ready to
-/// `.fetch()`. This is the single place both the app's initial fetch
-/// (`main.rs`) and the TUI's `r` refresh keybind (`ui/mod.rs`) read
-/// from -- same reasoning as before config-file loading existed, just now
-/// backed by a real file instead of a hardcoded `vec![...]`.
+/// Loads and validates the sources file at `path` (via
+/// `config::load_sources_at`) and resolves every entry into a real
+/// `ConfiguredSource` ready to `.fetch()`. `path` is the active feed list's
+/// file: normally `sources.toml`, or any list from `lists.toml`. This is
+/// the single place the app's initial fetch (`main.rs`), the TUI's `r`
+/// refresh, and feed-list switching read sources from.
+///
+/// Only the default `~/.config/tuxwire/sources.toml` is created from the
+/// bundled sample when it's missing, exactly as before lists existed. Any
+/// other missing list file is an error the caller reports (see
+/// `config::load_sources_at`). If `sources_path()` itself can't be worked
+/// out (no `$HOME`), nothing is treated as the default, so nothing is
+/// created.
 ///
 /// Returns `anyhow::Result` (unlike the hardcoded version this replaces,
 /// which couldn't fail) because loading a config file genuinely can:
 /// the file might not parse as TOML, or a source in it might be missing
 /// its required `topic`. Every caller already propagates this with `?`,
 /// same as any other fallible step.
-pub fn configured_sources() -> anyhow::Result<Vec<ConfiguredSource>> {
-    let sources = config::load_sources()?;
+pub fn configured_sources_at(path: &std::path::Path) -> anyhow::Result<Vec<ConfiguredSource>> {
+    // `is_ok_and` is `true` only when `sources_path()` worked *and* the
+    // closure says it's the same path.
+    let is_default = config::sources_path().is_ok_and(|default| default == path);
+    let sources = config::load_sources_at(path, is_default)?;
 
     Ok(sources
         .into_iter()

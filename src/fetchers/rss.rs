@@ -188,7 +188,14 @@ impl Fetcher for RssFetcher {
                 // idea as `||` for booleans, just for `Option`s.
                 let timestamp = entry.published.or(entry.updated).unwrap_or_else(Utc::now);
 
-                Article::new(title, url, self.name.clone(), self.topic.clone(), timestamp)
+                // Record which feed this came from (`self.url` is the
+                // source's feed URL from `sources.toml`), so feed lists can
+                // tell their articles apart. `mut` because the field is set
+                // after construction.
+                let mut article =
+                    Article::new(title, url, self.name.clone(), self.topic.clone(), timestamp);
+                article.feed_url = Some(self.url.clone());
+                article
             })
             .collect();
 

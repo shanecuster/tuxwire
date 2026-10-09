@@ -153,6 +153,10 @@ pub enum Icon {
     /// A solid block, drawn in a theme's own colors as a preview swatch in
     /// the theme picker.
     Swatch,
+    /// The feed list file shown in the footer ("Feed List: <path>"). Only
+    /// its Nerd glyph is used there: in Unicode and ASCII modes the footer
+    /// spells out "Feed List:" instead (see [`IconSettings::feed_list_label`]).
+    FeedFile,
     /// Category: Linux. Also the first-run test glyph (Tux the penguin).
     Linux,
     /// Category: the Rust language.
@@ -185,9 +189,9 @@ pub enum Icon {
 impl Icon {
     /// Every icon, in declaration order. Used by [`Icon::from_name`] to look
     /// up a name from `icons.toml`, and by the tests to check every row of
-    /// the table. The `[Icon; 25]` length is checked by the compiler, so
+    /// the table. The `[Icon; 26]` length is checked by the compiler, so
     /// adding a variant without adding it here fails to build.
-    pub const ALL: [Icon; 25] = [
+    pub const ALL: [Icon; 26] = [
         Icon::Unread,
         Icon::Read,
         Icon::Starred,
@@ -200,6 +204,7 @@ impl Icon {
         Icon::Collapsed,
         Icon::Theme,
         Icon::Swatch,
+        Icon::FeedFile,
         Icon::Linux,
         Icon::Rust,
         Icon::Security,
@@ -249,6 +254,7 @@ impl Icon {
             // Theme picker.
             Icon::Theme => ("\u{f1fc}", "◐", "&"), // nf-fa-paint_brush
             Icon::Swatch => ("\u{f0c8}", "█", "#"), // nf-fa-square
+            Icon::FeedFile => ("\u{f0f6}", "▭", "f"), // nf-fa-file_text_o
 
             // Feed categories.
             Icon::Linux => ("\u{f17c}", "λ", "L"), // nf-fa-linux
@@ -296,6 +302,7 @@ impl Icon {
             Icon::Collapsed => "collapsed",
             Icon::Theme => "theme",
             Icon::Swatch => "swatch",
+            Icon::FeedFile => "file",
             Icon::Linux => "linux",
             Icon::Rust => "rust",
             Icon::Security => "security",
@@ -319,7 +326,7 @@ impl Icon {
     /// `.iter().copied().find(...)` walks `ALL` one icon at a time, copies
     /// each one out of the array (`Icon` is `Copy`, so that's free), and
     /// stops at the first one whose name matches. It's a linear search, but
-    /// over 25 items and only while loading config, so a `HashMap` would be
+    /// over 26 items and only while loading config, so a `HashMap` would be
     /// overkill.
     pub fn from_name(name: &str) -> Option<Icon> {
         Icon::ALL.iter().copied().find(|icon| icon.name() == name)
@@ -434,6 +441,31 @@ impl IconSettings {
     /// around, not the settings *and* the mode.
     pub fn glyph(&self, icon: Icon) -> &'static str {
         icon.get(self.mode)
+    }
+
+    /// The label in front of the footer's feed list path: the
+    /// [`Icon::FeedFile`] glyph in Nerd mode, and the words "Feed List:" in
+    /// Unicode and ASCII modes, where a one-character fallback symbol
+    /// wouldn't say what the path is.
+    ///
+    /// This lives outside the [`Icon::glyphs`] table on purpose. That table
+    /// promises every entry is exactly one terminal cell wide (a test
+    /// checks it), and "Feed List:" is ten.
+    pub fn feed_list_label(&self) -> &'static str {
+        match self.mode {
+            IconMode::Nerd => Icon::FeedFile.get(IconMode::Nerd),
+            IconMode::Unicode | IconMode::Ascii => "Feed List:",
+        }
+    }
+
+    /// The "something was cut off here" marker for truncated text: `…` (one
+    /// cell) in Nerd and Unicode modes, and `...` in ASCII mode, which
+    /// promises plain ASCII output.
+    pub fn ellipsis(&self) -> &'static str {
+        match self.mode {
+            IconMode::Nerd | IconMode::Unicode => "…",
+            IconMode::Ascii => "...",
+        }
     }
 
     /// The glyph for a sidebar topic (a feed category) in the active mode.
@@ -600,6 +632,20 @@ mod tests {
         assert_eq!(IconMode::Unicode.next(), IconMode::Ascii);
         assert_eq!(IconMode::Ascii.next(), IconMode::Nerd);
         assert_eq!(IconMode::default(), IconMode::Nerd);
+    }
+
+    /// The footer label is the file glyph in Nerd mode and the words
+    /// "Feed List:" otherwise, and the ellipsis is plain ASCII in ASCII mode.
+    #[test]
+    fn feed_list_label_and_ellipsis_per_mode() {
+        let mut settings = IconSettings::default();
+        assert_eq!(settings.feed_list_label(), "\u{f0f6}");
+        assert_eq!(settings.ellipsis(), "…");
+        settings.mode = IconMode::Unicode;
+        assert_eq!(settings.feed_list_label(), "Feed List:");
+        settings.mode = IconMode::Ascii;
+        assert_eq!(settings.feed_list_label(), "Feed List:");
+        assert_eq!(settings.ellipsis(), "...");
     }
 
     /// `IconSettings::glyph` follows the settings' current mode, including

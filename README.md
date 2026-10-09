@@ -73,6 +73,17 @@ you can see it, falling back to Unicode if not.
   <img src="docs/screenshots/sidebar.png" alt="Sidebar showing Topics / Keys / Colors sections" width="400">
 </p>
 
+### Multiple feed lists
+Keep more than one feed list, e.g. a **main** list you read daily and a
+**casual** list for lower-priority feeds, and switch between them with
+`f`. The picker shows each list's name, file, and unread count, and
+switching is instant (nothing is refetched until you press `r`). Read,
+saved, and note state are shared: an article read in one list is read
+everywhere. Saved, History, and search always cover every list. The
+footer shows the active list's file ("Feed List: ~/.config/tuxwire/…").
+With a single list, none of this shows up and tuxwire works as it
+always has.
+
 ### Saved view, History view, and search
 - `S` — every saved article across all topics, with source, save date,
   and a note preview.
@@ -276,6 +287,7 @@ tuxwire
 | `E` | Export all saved articles to Markdown |
 | `i` | Cycle the icon mode (Nerd Font → Unicode → ASCII) |
 | `t` | Open the theme picker (`j`/`k` preview, `Enter` keep, `Esc` cancel) |
+| `f` | Switch feed lists (`j`/`k` choose, `Enter` switch, `Esc` cancel); only with two or more lists in `lists.toml` |
 | `q` | Quit |
 
 ---
@@ -358,9 +370,41 @@ kernel = "\uF17C"        # ...or a single character / Nerd Font glyph
   news, sports, tech, gaming, blog, science, programming, music, rss),
   and a folder icon otherwise.
 - Icon names: `unread read starred skipped new refresh error offline
-  expanded collapsed theme swatch linux rust security news sports tech
+  expanded collapsed theme swatch file linux rust security news sports tech
   gaming blog science code music feed category`. See `icons.toml.example`
   for the full commented file.
+
+### `lists.toml` — feed lists (optional)
+
+```toml
+active = "main"                          # written for you by the `f` picker
+
+[[list]]
+name = "main"
+path = "~/.config/tuxwire/sources.toml"
+
+[[list]]
+name = "casual"
+path = "casual.toml"                     # relative = next to lists.toml
+```
+
+- Each list's file uses the normal `sources.toml` format. Paths can be
+  absolute, start with `~/`, or be relative to `~/.config/tuxwire/`.
+- **Adding a list:** add a `[[list]]` block, create its file, and restart.
+  Lists are defined only here; there's no in-app prompt for paths.
+- **No `lists.toml`, or only one list:** tuxwire uses `sources.toml`
+  exactly as before, and `f` just tells you about this file.
+- **Startup:** tuxwire opens the list named by `active`. If that list's file
+  is missing or broken, the footer says so and the next list that loads is
+  used instead. Only the active list is fetched.
+- **`a`** adds a source to the active list's file. **`r`** refreshes only
+  the active list.
+- All lists share one database. Read/saved/note state is shared, and Saved,
+  History, `/` search, and `E` export cover every list. Each article
+  remembers which feed it came from, which is how a list knows its own
+  articles. Articles stored before this existed are matched to lists by
+  source name, or the next time their feed is fetched.
+- See `lists.toml.example` for the full commented file.
 
 ---
 

@@ -29,7 +29,7 @@ mod migrations;
 use crate::models::Article;
 use anyhow::Context;
 use chrono::Utc;
-use rusqlite::{Connection, OptionalExtension, Row, params};
+use rusqlite::{Connection, OptionalExtension, Row, params, params_from_iter};
 use std::path::PathBuf;
 
 /// A handle to tuxwire's SQLite database.
@@ -73,6 +73,14 @@ impl Storage {
         Self::from_connection(conn)
     }
 
+    /// A fresh, fully migrated database that lives only in memory, for
+    /// tests in other modules (the UI's) that need a real `Storage` without
+    /// touching disk. `#[cfg(test)]` leaves it out of the real binary.
+    #[cfg(test)]
+    pub fn open_in_memory() -> anyhow::Result<Self> {
+        Self::from_connection(Connection::open_in_memory()?)
+    }
+
     /// Wraps an already-open `Connection` in a `Storage`, running
     /// migrations against it before handing it back.
     ///
@@ -94,12 +102,20 @@ impl Storage {
     /// Re-running the fetcher sees the same feed entries every time, so
     /// this has to be idempotent on `url`: if a row with this URL already
     /// exists, nothing is inserted and the *existing* row's ID is returned
-    /// instead of a fresh one. `ON CONFLICT(url) DO NOTHING` is what
+    /// instead of a fresh one. `ON CONFLICT(url) DO UPDATE` is what
     /// actually guarantees that at the database level (backed by the
     /// unique index migration 002 adds on `articles.url`) -- the same
     /// atomic insert-or-else pattern `increment_skip_weight` below uses for
-    /// `skip_weights`, just discarding the conflicting write instead of
-    /// updating it.
+    /// `skip_weights`.
+    ///
+    /// On a conflict the only thing touched is `feed_url`, and only if the
+    /// existing row doesn't have one yet: `COALESCE(a, b)` returns `a`
+    /// unless it's NULL, then `b`, and `excluded.feed_url` is the value
+    /// this insert *tried* to write. That quietly backfills articles stored
+    /// before migration 005 the next time their feed is fetched, while
+    /// leaving every other column (read/saved/note state included)
+    /// exactly as it was. An article that already has a `feed_url` keeps
+    /// the first one it got.
     ///
     /// `article: &Article` borrows rather than takes ownership: inserting
     /// a row only needs to *read* the article's fields, and a fetcher
@@ -117,9 +133,9 @@ impl Storage {
         // that looks like SQL (an apostrophe in an article title, say)
         // is never mistaken for part of the query itself.
         self.conn.execute(
-            "INSERT INTO articles (title, url, source, topic, timestamp, read, skipped, saved, note, saved_at, noted_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
-             ON CONFLICT(url) DO NOTHING",
+            "INSERT INTO articles (title, url, source, topic, timestamp, read, skipped, saved, note, saved_at, noted_at, feed_url)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+             ON CONFLICT(url) DO UPDATE SET feed_url = COALESCE(articles.feed_url, excluded.feed_url)",
             params![
                 article.title,
                 article.url,
@@ -132,14 +148,15 @@ impl Storage {
                 article.note,
                 article.saved_at,
                 article.noted_at,
+                article.feed_url,
             ],
         )?;
 
         // Looking the ID up by URL (rather than trusting
         // `last_insert_rowid`) is what makes this correct in both cases:
-        // `last_insert_rowid` doesn't advance when `DO NOTHING` discards a
-        // conflicting insert, so it would silently return some *other*
-        // row's ID instead of this article's.
+        // `last_insert_rowid` doesn't reliably point at this article when
+        // the insert hit a conflict (no new row was created), so it could
+        // return some *other* row's ID instead of this article's.
         self.conn
             .query_row(
                 "SELECT id FROM articles WHERE url = ?1",
@@ -147,6 +164,48 @@ impl Storage {
                 |row| row.get(0),
             )
             .map_err(Into::into)
+    }
+
+    /// Best-effort backfill of `feed_url` for articles stored before
+    /// migration 005, by matching each article's `source` *name* against
+    /// the configured sources in `sources` (`(name, feed_url)` pairs, e.g.
+    /// from every feed list). Returns how many rows were filled in.
+    ///
+    /// Only rows whose `feed_url` is still NULL are touched, so re-running
+    /// this every startup is harmless and cheap. A name that maps to more
+    /// than one feed URL (two lists each having a source called "News" with
+    /// different feeds) is skipped, because there's no way to know which
+    /// feed those old rows came from. Guessing could file articles under
+    /// the wrong list. Those rows stay NULL: still in Saved, History, and
+    /// search, just not in any list's topic view until re-fetched.
+    pub fn backfill_feed_urls(&self, sources: &[(String, String)]) -> anyhow::Result<usize> {
+        // Step 1: group the feed URLs by source name. A `BTreeSet` keeps
+        // each name's URLs unique (the same source listed twice is fine).
+        // `entry(...).or_default()` gets the set for a name, creating an
+        // empty one the first time.
+        let mut by_name: std::collections::BTreeMap<&str, std::collections::BTreeSet<&str>> =
+            std::collections::BTreeMap::new();
+        for (name, feed_url) in sources {
+            by_name.entry(name).or_default().insert(feed_url);
+        }
+
+        // Step 2: one UPDATE per unambiguous name. `execute` returns how
+        // many rows it changed, which is summed for the caller.
+        let mut filled = 0;
+        for (name, feed_urls) in by_name {
+            if feed_urls.len() != 1 {
+                continue;
+            }
+            // `.iter().next()` is the one URL in the set, and the `if let`
+            // just unwraps it.
+            if let Some(feed_url) = feed_urls.iter().next() {
+                filled += self.conn.execute(
+                    "UPDATE articles SET feed_url = ?1 WHERE feed_url IS NULL AND source = ?2",
+                    params![feed_url, name],
+                )?;
+            }
+        }
+        Ok(filled)
     }
 
     /// Total number of rows in `articles`, across every topic and source --
@@ -159,14 +218,20 @@ impl Storage {
             .map_err(Into::into)
     }
 
-    /// All articles filed under `topic`, most recent first -- the query
-    /// backing the TUI's right-hand article pane (ARCHITECTURE.md's "Right
-    /// pane: article list for the selected topic, sorted by recency").
-    pub fn articles_by_topic(&self, topic: &str) -> anyhow::Result<Vec<Article>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, title, url, source, topic, timestamp, read, skipped, saved, note, saved_at, noted_at
-             FROM articles WHERE topic = ?1 ORDER BY timestamp DESC",
-        )?;
+    /// All articles filed under `topic` within `scope`, most recent first
+    /// -- the query backing the TUI's right-hand article pane
+    /// (ARCHITECTURE.md's "Right pane: article list for the selected topic,
+    /// sorted by recency"). With several feed lists, `scope` limits it to
+    /// the active list's feeds (see `Scope`).
+    pub fn articles_by_topic(&self, scope: &Scope, topic: &str) -> anyhow::Result<Vec<Article>> {
+        // `scope.clause()` adds `AND feed_url IN (?, ?, ...)` for a list, or
+        // nothing for `Scope::All`. Every placeholder here is a plain `?`,
+        // filled in order: the topic first, then the scope's feed URLs.
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT id, title, url, source, topic, timestamp, read, skipped, saved, note, saved_at, noted_at, feed_url
+             FROM articles WHERE topic = ?{} ORDER BY timestamp DESC",
+            scope.clause()
+        ))?;
 
         // `query_map` runs the query and lazily applies `row_to_article`
         // to each row as it's read. It hands back an iterator, not a
@@ -174,7 +239,12 @@ impl Storage {
         // the caller wants every row materialized at once or would rather
         // stream through them -- `.collect()` below is what actually
         // decides "gather all of them into a `Vec`."
-        let rows = stmt.query_map(params![topic], row_to_article)?;
+        // `params_from_iter` binds every value an iterator yields, in order.
+        // `once(topic).chain(...)` is "the topic, followed by each feed URL".
+        let rows = stmt.query_map(
+            params_from_iter(std::iter::once(topic).chain(scope.feed_urls())),
+            row_to_article,
+        )?;
 
         // Each item out of `rows` is itself a `rusqlite::Result<Article>`
         // (decoding any single row can fail independently). Collecting
@@ -199,18 +269,25 @@ impl Storage {
     /// `AND source = ?2` clause, not a separate query path -- per
     /// ARCHITECTURE.md, "a source's topic is already fixed, so 'articles
     /// from source X' is just 'articles in X's topic, further filtered by
-    /// source name.'"
+    /// source name.'" `scope` works as in `articles_by_topic`.
     pub fn articles_by_topic_and_source(
         &self,
+        scope: &Scope,
         topic: &str,
         source: &str,
     ) -> anyhow::Result<Vec<Article>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, title, url, source, topic, timestamp, read, skipped, saved, note, saved_at, noted_at
-             FROM articles WHERE topic = ?1 AND source = ?2 ORDER BY timestamp DESC",
-        )?;
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT id, title, url, source, topic, timestamp, read, skipped, saved, note, saved_at, noted_at, feed_url
+             FROM articles WHERE topic = ? AND source = ?{} ORDER BY timestamp DESC",
+            scope.clause()
+        ))?;
 
-        let rows = stmt.query_map(params![topic, source], row_to_article)?;
+        // Topic, then source, then the scope's feed URLs: the same order as
+        // the `?`s in the SQL above.
+        let rows = stmt.query_map(
+            params_from_iter([topic, source].into_iter().chain(scope.feed_urls())),
+            row_to_article,
+        )?;
         rows.collect::<rusqlite::Result<Vec<Article>>>()
             .map_err(Into::into)
     }
@@ -220,7 +297,7 @@ impl Storage {
     /// explicitly independent of the topic sidebar.
     pub fn saved_articles(&self) -> anyhow::Result<Vec<Article>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, title, url, source, topic, timestamp, read, skipped, saved, note, saved_at, noted_at
+            "SELECT id, title, url, source, topic, timestamp, read, skipped, saved, note, saved_at, noted_at, feed_url
              FROM articles WHERE saved = 1 ORDER BY timestamp DESC",
         )?;
 
@@ -239,7 +316,7 @@ impl Storage {
     /// remembered to press `s` in the moment.
     pub fn all_articles(&self) -> anyhow::Result<Vec<Article>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, title, url, source, topic, timestamp, read, skipped, saved, note, saved_at, noted_at
+            "SELECT id, title, url, source, topic, timestamp, read, skipped, saved, note, saved_at, noted_at, feed_url
              FROM articles ORDER BY timestamp DESC",
         )?;
 
@@ -283,7 +360,7 @@ impl Storage {
     /// needed to satisfy "case-insensitive" here.
     pub fn search_articles(&self, query: &str) -> anyhow::Result<Vec<Article>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, title, url, source, topic, timestamp, read, skipped, saved, note, saved_at, noted_at
+            "SELECT id, title, url, source, topic, timestamp, read, skipped, saved, note, saved_at, noted_at, feed_url
              FROM articles WHERE title LIKE ?1 OR note LIKE ?1 ORDER BY timestamp DESC",
         )?;
 
@@ -293,15 +370,37 @@ impl Storage {
             .map_err(Into::into)
     }
 
-    /// Every distinct topic currently present in `articles`, alphabetical
-    /// -- feeds the TUI's topic sidebar.
-    pub fn topics(&self) -> anyhow::Result<Vec<String>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT DISTINCT topic FROM articles ORDER BY topic")?;
+    /// Every distinct topic among the articles in `scope`, alphabetical --
+    /// feeds the TUI's topic sidebar. With `Scope::All` that's every topic
+    /// in the database, exactly as before feed lists existed.
+    ///
+    /// `WHERE 1` is "always true", there so the scope's `AND ...` clause
+    /// always has a `WHERE` to attach to.
+    pub fn topics(&self, scope: &Scope) -> anyhow::Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT DISTINCT topic FROM articles WHERE 1{} ORDER BY topic",
+            scope.clause()
+        ))?;
 
-        let rows = stmt.query_map([], |row| row.get(0))?;
+        let rows = stmt.query_map(params_from_iter(scope.feed_urls()), |row| row.get(0))?;
         rows.collect::<rusqlite::Result<Vec<String>>>()
+            .map_err(Into::into)
+    }
+
+    /// How many articles in `scope` are unread: not read and not skipped.
+    /// Saving marks an article read, so saved ones don't count either. Used
+    /// for the feed list picker's per-list count, which comes straight from
+    /// the database without fetching anything.
+    pub fn unread_count(&self, scope: &Scope) -> anyhow::Result<i64> {
+        self.conn
+            .query_row(
+                &format!(
+                    "SELECT COUNT(*) FROM articles WHERE read = 0 AND skipped = 0{}",
+                    scope.clause()
+                ),
+                params_from_iter(scope.feed_urls()),
+                |row| row.get(0),
+            )
             .map_err(Into::into)
     }
 
@@ -448,8 +547,62 @@ impl Storage {
     }
 }
 
+/// Which articles a topic-view query covers: every article (`All`, used
+/// when there's only one feed list, so behavior matches the days before
+/// lists existed), or only those whose `feed_url` is one of the given feed
+/// URLs (`Feeds`, the active list's sources).
+///
+/// Only the topic sidebar, the per-topic article lists, and the picker's
+/// unread counts take a scope. Saved, History, and search deliberately stay
+/// global. Articles with no `feed_url` yet (stored before migration 005 and
+/// not backfilled) fall outside every `Feeds` scope but remain in those
+/// global views.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Scope {
+    /// No filtering.
+    All,
+    /// Only articles from these feeds (each a `[[source]]`'s `url`).
+    Feeds(Vec<String>),
+}
+
+impl Scope {
+    /// The SQL to append to a `WHERE`: nothing for `All`,
+    /// ` AND feed_url IN (?, ?, ...)` with one `?` per feed for `Feeds`,
+    /// and ` AND 0` (always false, so nothing matches) for an empty
+    /// `Feeds`, since `IN ()` isn't valid SQL.
+    ///
+    /// Only `?` placeholders are ever formatted into the SQL; the URLs
+    /// themselves are bound as parameters (see `feed_urls`), never pasted
+    /// into the string, so this can't be used for SQL injection.
+    fn clause(&self) -> String {
+        match self {
+            Scope::All => String::new(),
+            Scope::Feeds(urls) if urls.is_empty() => " AND 0".to_string(),
+            // `vec!["?"; n]` is a list of `n` question marks, joined with
+            // commas.
+            Scope::Feeds(urls) => {
+                format!(" AND feed_url IN ({})", vec!["?"; urls.len()].join(", "))
+            }
+        }
+    }
+
+    /// The values for `clause`'s placeholders, in order, as `&str`s
+    /// borrowed from the scope.
+    ///
+    /// `-> impl Iterator<Item = &str> + '_` means "some iterator of string
+    /// slices that borrows from `self`". The two arms return different
+    /// iterator types, so both are boxed into one type
+    /// (`Box<dyn Iterator>`), and `+ '_` ties the borrow to `self`.
+    fn feed_urls(&self) -> Box<dyn Iterator<Item = &str> + '_> {
+        match self {
+            Scope::All => Box::new(std::iter::empty()),
+            Scope::Feeds(urls) => Box::new(urls.iter().map(String::as_str)),
+        }
+    }
+}
+
 /// Maps one row from a `SELECT id, title, url, source, topic, timestamp,
-/// read, skipped, saved, note, saved_at, noted_at FROM articles ...` query
+/// read, skipped, saved, note, saved_at, noted_at, feed_url FROM articles ...` query
 /// into an `Article`.
 ///
 /// Every query in this module that reads from `articles` lists its
@@ -482,6 +635,7 @@ fn row_to_article(row: &Row) -> rusqlite::Result<Article> {
         note: row.get(9)?,
         saved_at: row.get(10)?,
         noted_at: row.get(11)?,
+        feed_url: row.get(12)?,
     })
 }
 
@@ -566,7 +720,9 @@ mod tests {
         let id = storage.insert_article(&article).unwrap();
         assert!(id > 0);
 
-        let fetched = storage.articles_by_topic("linux-news").unwrap();
+        let fetched = storage
+            .articles_by_topic(&Scope::All, "linux-news")
+            .unwrap();
         assert_eq!(fetched.len(), 1);
         assert_eq!(fetched[0].id, id);
         assert_eq!(fetched[0].title, "Btrfs send/receive got faster");
@@ -574,7 +730,12 @@ mod tests {
         // A different topic should see nothing -- the whole point of
         // filtering by topic in the query rather than fetching everything
         // and filtering in Rust.
-        assert!(storage.articles_by_topic("gaming").unwrap().is_empty());
+        assert!(
+            storage
+                .articles_by_topic(&Scope::All, "gaming")
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -598,7 +759,7 @@ mod tests {
         storage.insert_article(&phoronix).unwrap();
 
         let lwn_only = storage
-            .articles_by_topic_and_source("linux-news", "LWN.net")
+            .articles_by_topic_and_source(&Scope::All, "linux-news", "LWN.net")
             .unwrap();
         assert_eq!(lwn_only.len(), 1);
         assert_eq!(lwn_only[0].source, "LWN.net");
@@ -609,7 +770,7 @@ mod tests {
         // unknown source) comes back empty rather than erroring.
         assert!(
             storage
-                .articles_by_topic_and_source("linux-news", "unknown-source")
+                .articles_by_topic_and_source(&Scope::All, "linux-news", "unknown-source")
                 .unwrap()
                 .is_empty()
         );
@@ -640,7 +801,9 @@ mod tests {
             "re-inserting an existing URL must return its existing id"
         );
 
-        let articles = storage.articles_by_topic("linux-news").unwrap();
+        let articles = storage
+            .articles_by_topic(&Scope::All, "linux-news")
+            .unwrap();
         assert_eq!(
             articles.len(),
             1,
@@ -693,7 +856,7 @@ mod tests {
             .update_note(id, Some("revisit this".to_string()))
             .unwrap();
 
-        let fetched = &storage.articles_by_topic("topic").unwrap()[0];
+        let fetched = &storage.articles_by_topic(&Scope::All, "topic").unwrap()[0];
         assert!(fetched.read);
         assert!(fetched.skipped);
         assert_eq!(fetched.note.as_deref(), Some("revisit this"));
@@ -714,7 +877,7 @@ mod tests {
         );
         let id = storage.insert_article(&article).unwrap();
 
-        let fetched = &storage.articles_by_topic("topic").unwrap()[0];
+        let fetched = &storage.articles_by_topic(&Scope::All, "topic").unwrap()[0];
         assert_eq!(
             fetched.saved_at, None,
             "an article that was never saved has no saved_at"
@@ -749,7 +912,7 @@ mod tests {
         );
         let id = storage.insert_article(&article).unwrap();
 
-        let fetched = &storage.articles_by_topic("topic").unwrap()[0];
+        let fetched = &storage.articles_by_topic(&Scope::All, "topic").unwrap()[0];
         assert_eq!(
             fetched.noted_at, None,
             "an article with no note has no noted_at"
@@ -761,7 +924,7 @@ mod tests {
             .unwrap();
         let after = Utc::now();
 
-        let noted = &storage.articles_by_topic("topic").unwrap()[0];
+        let noted = &storage.articles_by_topic(&Scope::All, "topic").unwrap()[0];
         let noted_at = noted
             .noted_at
             .expect("a non-empty note must populate noted_at");
@@ -775,7 +938,7 @@ mod tests {
         // with it -- "no note" and "no note date" are never allowed to
         // disagree.
         storage.update_note(id, None).unwrap();
-        let cleared = &storage.articles_by_topic("topic").unwrap()[0];
+        let cleared = &storage.articles_by_topic(&Scope::All, "topic").unwrap()[0];
         assert_eq!(cleared.note, None);
         assert_eq!(
             cleared.noted_at, None,
@@ -908,6 +1071,217 @@ mod tests {
             storage.insert_article(&article).unwrap();
         }
 
-        assert_eq!(storage.topics().unwrap(), vec!["gaming", "linux-news"]);
+        assert_eq!(
+            storage.topics(&Scope::All).unwrap(),
+            vec!["gaming", "linux-news"]
+        );
+    }
+
+    /// A plain test article from source `source` with article URL `url`
+    /// and no `feed_url`, as if stored before migration 005.
+    fn old_article(url: &str, source: &str) -> Article {
+        Article::new(
+            "title".to_string(),
+            url.to_string(),
+            source.to_string(),
+            "linux".to_string(),
+            Utc::now(),
+        )
+    }
+
+    /// `feed_url` is stored and read back, and a fresh in-memory database
+    /// gets migration 005 (the column exists).
+    #[test]
+    fn feed_url_round_trips() {
+        let storage = test_storage();
+        let mut article = old_article("https://example.com/a", "LWN");
+        article.feed_url = Some("https://lwn.net/feed".to_string());
+        storage.insert_article(&article).unwrap();
+        let stored = &storage.articles_by_topic(&Scope::All, "linux").unwrap()[0];
+        assert_eq!(stored.feed_url.as_deref(), Some("https://lwn.net/feed"));
+    }
+
+    /// Re-inserting an article fills in a missing `feed_url`, never
+    /// replaces an existing one, and never touches read/saved state.
+    #[test]
+    fn insert_fills_missing_feed_url_only() {
+        let storage = test_storage();
+        let id = storage
+            .insert_article(&old_article("https://example.com/a", "LWN"))
+            .unwrap();
+        storage
+            .save_article(id, Some("keep me".to_string()))
+            .unwrap();
+
+        let mut again = old_article("https://example.com/a", "LWN");
+        again.feed_url = Some("https://lwn.net/feed".to_string());
+        assert_eq!(storage.insert_article(&again).unwrap(), id);
+
+        let mut other = old_article("https://example.com/a", "LWN");
+        other.feed_url = Some("https://elsewhere/feed".to_string());
+        storage.insert_article(&other).unwrap();
+
+        let stored = &storage.articles_by_topic(&Scope::All, "linux").unwrap()[0];
+        assert_eq!(stored.feed_url.as_deref(), Some("https://lwn.net/feed"));
+        assert!(stored.saved && stored.read);
+        assert_eq!(stored.note.as_deref(), Some("keep me"));
+        assert_eq!(storage.article_count().unwrap(), 1);
+    }
+
+    /// The backfill fills NULL `feed_url`s by unique source name, skips
+    /// names that map to more than one feed, leaves rows that already have
+    /// a `feed_url` alone, and is harmless to run twice.
+    #[test]
+    fn backfill_feed_urls_by_unambiguous_name() {
+        let storage = test_storage();
+        storage
+            .insert_article(&old_article("https://example.com/1", "LWN"))
+            .unwrap();
+        storage
+            .insert_article(&old_article("https://example.com/2", "LWN"))
+            .unwrap();
+        storage
+            .insert_article(&old_article("https://example.com/3", "News"))
+            .unwrap();
+        storage
+            .insert_article(&old_article("https://example.com/4", "Gone"))
+            .unwrap();
+        let mut known = old_article("https://example.com/5", "LWN");
+        known.feed_url = Some("https://old/feed".to_string());
+        storage.insert_article(&known).unwrap();
+
+        let sources = vec![
+            ("LWN".to_string(), "https://lwn.net/feed".to_string()),
+            ("LWN".to_string(), "https://lwn.net/feed".to_string()),
+            ("News".to_string(), "https://a.example/news".to_string()),
+            ("News".to_string(), "https://b.example/news".to_string()),
+        ];
+        assert_eq!(storage.backfill_feed_urls(&sources).unwrap(), 2);
+        assert_eq!(storage.backfill_feed_urls(&sources).unwrap(), 0);
+
+        let feed_of = |url: &str| {
+            storage
+                .all_articles()
+                .unwrap()
+                .into_iter()
+                .find(|a| a.url == url)
+                .unwrap()
+                .feed_url
+        };
+        assert_eq!(
+            feed_of("https://example.com/1").as_deref(),
+            Some("https://lwn.net/feed")
+        );
+        assert_eq!(
+            feed_of("https://example.com/2").as_deref(),
+            Some("https://lwn.net/feed")
+        );
+        assert_eq!(feed_of("https://example.com/3"), None, "ambiguous name");
+        assert_eq!(feed_of("https://example.com/4"), None, "not configured");
+        assert_eq!(
+            feed_of("https://example.com/5").as_deref(),
+            Some("https://old/feed")
+        );
+    }
+
+    /// A database that is already at `user_version = 4` (one that ever ran
+    /// the archived FreshRSS build, which used version 4) still gets
+    /// migration 005's `feed_url` column. This is why the migration is
+    /// numbered 5.
+    #[test]
+    fn migration_005_runs_on_a_version_4_database() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(include_str!("../../migrations/001_init.sql"))
+            .unwrap();
+        conn.execute_batch(include_str!("../../migrations/002_unique_article_url.sql"))
+            .unwrap();
+        conn.execute_batch(include_str!(
+            "../../migrations/003_add_saved_and_noted_at.sql"
+        ))
+        .unwrap();
+        conn.execute_batch("PRAGMA user_version = 4").unwrap();
+
+        let storage = Storage::from_connection(conn).unwrap();
+        let mut article = old_article("https://example.com/a", "LWN");
+        article.feed_url = Some("https://lwn.net/feed".to_string());
+        storage.insert_article(&article).unwrap();
+        assert_eq!(
+            storage.all_articles().unwrap()[0].feed_url.as_deref(),
+            Some("https://lwn.net/feed")
+        );
+        let version: u32 = storage
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 5);
+    }
+
+    /// An article in topic `topic` from feed `feed`, unread.
+    fn from_feed(url: &str, topic: &str, feed: &str) -> Article {
+        let mut article = Article::new(
+            "title".to_string(),
+            url.to_string(),
+            "source".to_string(),
+            topic.to_string(),
+            Utc::now(),
+        );
+        article.feed_url = Some(feed.to_string());
+        article
+    }
+
+    /// A `Feeds` scope limits topics, topic articles, and unread counts to
+    /// those feeds. `All` sees everything, including articles with no
+    /// `feed_url`, and an empty `Feeds` sees nothing.
+    #[test]
+    fn scope_limits_topic_views_to_a_lists_feeds() {
+        let storage = test_storage();
+        storage
+            .insert_article(&from_feed("https://e/1", "linux", "https://main/feed"))
+            .unwrap();
+        storage
+            .insert_article(&from_feed("https://e/2", "gaming", "https://casual/feed"))
+            .unwrap();
+        let read_id = storage
+            .insert_article(&from_feed("https://e/3", "linux", "https://casual/feed"))
+            .unwrap();
+        storage.mark_read(read_id).unwrap();
+        storage
+            .insert_article(&old_article("https://e/4", "Old"))
+            .unwrap();
+
+        let main = Scope::Feeds(vec!["https://main/feed".to_string()]);
+        let casual = Scope::Feeds(vec!["https://casual/feed".to_string()]);
+
+        assert_eq!(storage.topics(&main).unwrap(), ["linux"]);
+        assert_eq!(storage.topics(&casual).unwrap(), ["gaming", "linux"]);
+        assert_eq!(storage.topics(&Scope::All).unwrap(), ["gaming", "linux"]);
+
+        assert_eq!(storage.articles_by_topic(&main, "linux").unwrap().len(), 1);
+        assert_eq!(
+            storage.articles_by_topic(&casual, "linux").unwrap().len(),
+            1
+        );
+        assert_eq!(
+            storage
+                .articles_by_topic(&Scope::All, "linux")
+                .unwrap()
+                .len(),
+            3
+        );
+        assert_eq!(
+            storage
+                .articles_by_topic_and_source(&casual, "gaming", "source")
+                .unwrap()
+                .len(),
+            1
+        );
+
+        assert_eq!(storage.unread_count(&main).unwrap(), 1);
+        assert_eq!(storage.unread_count(&casual).unwrap(), 1);
+        assert_eq!(storage.unread_count(&Scope::All).unwrap(), 3);
+
+        let nothing = Scope::Feeds(Vec::new());
+        assert!(storage.topics(&nothing).unwrap().is_empty());
+        assert_eq!(storage.unread_count(&nothing).unwrap(), 0);
     }
 }

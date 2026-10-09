@@ -1,8 +1,9 @@
 //! tuxwire — a terminal-based Linux news aggregator.
 //!
-//! See `docs/ARCHITECTURE.md` for the full design. `main` loads
-//! `sources.toml` (see `fetchers::configured_sources`), fetches every
-//! configured source, inserts whatever comes back into the real on-disk
+//! See `docs/ARCHITECTURE.md` for the full design. `main` picks the active
+//! feed list (`lists.toml`, see `feedlists`; normally just `sources.toml`),
+//! loads its sources (see `fetchers::configured_sources_at`), fetches every
+//! one of them, inserts whatever comes back into the real on-disk
 //! database (creating and migrating it if necessary), and then hands off
 //! to the TUI (`ui::run`). The skip-weighting layer described in the
 //! architecture doc isn't wired up yet -- `scoring.rs` exists as a
@@ -20,10 +21,12 @@
 //! matter here — these declarations just make each corresponding
 //! file part of the compiled program.
 mod export;
+mod feedlists;
 mod fetch_report;
 mod fetchers;
 mod icons;
 mod models;
+mod paths;
 mod scoring;
 mod storage;
 mod theme;
@@ -57,15 +60,39 @@ use theme::ThemeSettings;
 /// and exits with a non-zero status instead of panicking.
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Loaded from `~/.config/tuxwire/sources.toml` (writing out a bundled
-    // default there first, if this is a first run) — see
-    // `fetchers::configured_sources` for the one place that config is
-    // read from, shared with the TUI's `r` refresh keybind. The `?` here
-    // is for the config file itself failing to load (malformed TOML, a
-    // source missing its required `topic`) — that's a real problem the
-    // user needs to see and fix, unlike a single source's fetch failing
-    // below, which shouldn't take down the other sources' fetches with it.
-    let sources = fetchers::configured_sources()?;
+    // Which feed lists exist: `~/.config/tuxwire/lists.toml`, or, without
+    // it, the single implicit list on `~/.config/tuxwire/sources.toml`.
+    // `?` because a malformed `lists.toml` is a real mistake to show, the
+    // same policy as every other config file.
+    let default_sources = fetchers::config::sources_path()?;
+    let feed_lists = feedlists::config::load(&default_sources)?;
+    let home = paths::home_dir();
+
+    // Pick the active list and load its sources (just the file; nothing is
+    // fetched yet). Two cases:
+    //
+    // - One list: exactly as before lists existed. `sources.toml` is
+    //   created from the bundled sample if missing, and a malformed file
+    //   is a clean startup error (`?`), since there's nothing to fall back
+    //   to.
+    // - Several lists: `feedlists::activate` tries the remembered list,
+    //   then the others in order. A broken file becomes a footer message
+    //   (`list_notice`) and another list is used. If none loads, the TUI
+    //   still opens, empty, with the message saying why.
+    //
+    // Only the active list's sources are fetched below; the other lists
+    // aren't refreshed until they're switched to and `r` is pressed.
+    let (active_list, sources, list_notice) = if feed_lists.is_single() {
+        let sources = fetchers::configured_sources_at(&feed_lists.lists()[0].path)?;
+        (0, sources, None)
+    } else {
+        match feedlists::activate(&feed_lists, home.as_deref(), |list| {
+            fetchers::configured_sources_at(&list.path)
+        }) {
+            Ok(chosen) => (chosen.index, chosen.loaded, chosen.notice),
+            Err(message) => (0, Vec::new(), Some(message)),
+        }
+    };
     let mut articles = Vec::new();
 
     // Tallies this startup fetch (sources tried/failed/unreachable, and
@@ -124,6 +151,43 @@ async fn main() -> anyhow::Result<()> {
     let storage = Storage::open()?;
     println!("Storage ready at ~/.local/share/tuxwire/tuxwire.db (migrations up to date).");
 
+    // Best-effort backfill of `feed_url` (migration 005) for articles
+    // stored before it existed, by matching their `source` name against
+    // every list's configured sources, so old articles land in the right
+    // list. Other lists' files are only *read* here (TOML parsing, no
+    // network), and ones that fail to load are skipped (they were already
+    // reported above if they matter). Rows that already have a `feed_url`
+    // are untouched, so this is a cheap no-op on every later startup.
+    //
+    // `flat_map` turns "each list → its sources" into one long list of
+    // sources. `.ok()` drops lists whose file can't be loaded, and
+    // `.unwrap_or_default()` makes that an empty `Vec`.
+    let source_feeds: Vec<(String, String)> = feed_lists
+        .lists()
+        .iter()
+        .enumerate()
+        .flat_map(|(index, list)| {
+            if index == active_list {
+                // Already loaded above; no need to read it again.
+                sources
+                    .iter()
+                    .map(|source| (source.name().to_string(), source.url().to_string()))
+                    .collect::<Vec<_>>()
+            } else {
+                fetchers::configured_sources_at(&list.path)
+                    .ok()
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|source| (source.name().to_string(), source.url().to_string()))
+                    .collect()
+            }
+        })
+        .collect();
+    let filled = storage.backfill_feed_urls(&source_feeds)?;
+    if filled > 0 {
+        println!("Recorded the feed for {filled} older article(s).");
+    }
+
     // `insert_article` is idempotent on `url` (see its doc comment in
     // `storage/mod.rs`), so running this binary again against the same
     // feed re-inserts nothing -- every article that was already on disk
@@ -164,6 +228,9 @@ async fn main() -> anyhow::Result<()> {
         icons: icons.settings,
         show_icon_check: icons.first_run,
         report,
+        feed_lists,
+        active_list,
+        list_notice,
     };
 
     ui::run(&storage, &sources, session)?;
