@@ -42,7 +42,7 @@ before the first run of the new build against it (nothing migrates, but it is yo
   (`[workspace.dependencies]`). `serde_json` is still listed but unused, as it was before.
 - The fetch-and-insert duplication noted here was removed on `feature/android-feeds`: both loops now use
   `fetchers::fetch_one` + `FetchReport::record_outcome` (see below).
-- Next migration number is **007** (004 was the FreshRSS one, never merged; 006 added `feeds` and `settings`).
+- Next migration number is **008** (004 was the FreshRSS one, never merged; 006 added `feeds` and `settings`, 007 added `summary`).
 
 ## Standalone UI: icons + themes on master (branch `feature/standalone-ui`, 2026-10-08)
 
@@ -333,3 +333,21 @@ tmux kill-session -t tuxwire-lists-test         # only this session
    Smoke test with a throwaway `HOME` and a dead feed: the TUI started and `skipped Dead: ...` was printed
    as before.
 - Tests: 110 pass (101 before, 9 new: 7 for feeds/settings, 2 for fetch outcomes); clippy and fmt clean.
+
+## Article summaries in core (branch `feature/article-summary`, 2026-10-09)
+
+1. **`core/src/text.rs`.** `html_to_text` (hand-written, no new dependency), `tidy_plain_text`, and
+   `limit_to_sentences`: cuts only at a sentence end (`.`/`!`/`?`, optionally followed by closing
+   quotes, then whitespace or the end), at most 2000 characters. A dot in `3.5` doesn't count;
+   "e.g." can end a sentence early (a shorter summary, never a broken one). One sentence longer than
+   the limit falls back to a word boundary plus `...`. A test caught list items getting blank lines
+   between them (opening `<li>` and closing `</li>` both broke the line), fixed.
+2. **Migration 007** (`articles.summary`, nullable) and `Storage::article_by_id`. `insert_article`
+   fills a missing summary on re-fetch like `feed_url`; read/saved/note state is untouched. A test
+   runs the migration on a version-6 database.
+3. **RSS mapping.** Prefers the entry's short description, falls back to its full content. Text typed
+   `plain` is only tidied. Tested with RSS (HTML, CDATA, `content:encoded`) and Atom (`type="text"`).
+4. **Checked:** export output can't change (it lists fields explicitly). Smoke test with a throwaway
+   `HOME` and a local feed: database at version 7, HTML description stored as clean plain text,
+   an item with no description stored as NULL.
+- Tests: 133 pass (110 before, 23 new); clippy and fmt clean; core still has no ratatui/crossterm.
