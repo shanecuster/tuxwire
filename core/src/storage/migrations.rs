@@ -68,6 +68,13 @@ const MIGRATIONS: &[Migration] = &[
         name: "005_add_feed_url",
         sql: include_str!("../../migrations/005_add_feed_url.sql"),
     },
+    // Feeds and settings tables, used by the Android app (the terminal app
+    // keeps its feeds in TOML files and ignores them).
+    Migration {
+        version: 6,
+        name: "006_add_feeds_and_settings",
+        sql: include_str!("../../migrations/006_add_feeds_and_settings.sql"),
+    },
 ];
 
 /// Brings `conn`'s schema up to date by running every migration whose

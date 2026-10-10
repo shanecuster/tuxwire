@@ -119,6 +119,35 @@ pub enum SourceType {
     Reddit,
 }
 
+impl SourceType {
+    /// The short name stored in the `feeds.source_type` database column:
+    /// `"rss"` or `"reddit"` (the same spellings `sources.toml` uses).
+    ///
+    /// Returns `&'static str`, a string baked into the program that lives for
+    /// its whole run, so the caller gets it with no allocation and no ownership
+    /// to think about.
+    pub fn as_str(self) -> &'static str {
+        // `match` must cover every variant, so adding a new `SourceType`
+        // without a name here is a compile error.
+        match self {
+            SourceType::Rss => "rss",
+            SourceType::Reddit => "reddit",
+        }
+    }
+
+    /// The reverse of [`SourceType::as_str`]: turns a stored name back into a
+    /// `SourceType`, or `None` if the text is not one we know (for example a
+    /// value written by a newer version of the app).
+    pub fn from_db_str(text: &str) -> Option<Self> {
+        match text {
+            "rss" => Some(SourceType::Rss),
+            "reddit" => Some(SourceType::Reddit),
+            // Anything else is unknown; the caller decides what to do.
+            _ => None,
+        }
+    }
+}
+
 /// One fully-validated source description: every field guaranteed present
 /// and non-empty by the time anything outside the code that built it sees it.
 ///

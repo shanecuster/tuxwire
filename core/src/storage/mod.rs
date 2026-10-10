@@ -26,6 +26,7 @@
 // not something any other part of the app should ever call directly.
 mod migrations;
 
+use crate::fetchers::{SourceConfig, SourceType};
 use crate::models::Article;
 use anyhow::Context;
 use chrono::Utc;
@@ -554,6 +555,182 @@ impl Storage {
         let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
         rows.collect::<rusqlite::Result<Vec<(String, i64)>>>()
             .map_err(Into::into)
+    }
+
+    // --- feeds and settings (used by the Android app) ----------------
+
+    /// Adds a feed to the `feeds` table and returns its new row ID.
+    ///
+    /// The terminal app never calls this (its feeds live in TOML files); the
+    /// Android app keeps its whole feed list here.
+    ///
+    /// Adding a feed whose `url` is already present is an error rather than a
+    /// silent no-op, so the person is told "already added" instead of seeing
+    /// nothing happen. `ON CONFLICT(url) DO NOTHING` makes SQLite skip the
+    /// insert (instead of failing with a database-level error), and
+    /// `execute` returns how many rows were changed, so `0` means it was
+    /// skipped.
+    pub fn add_feed(
+        &self,
+        name: &str,
+        url: &str,
+        topic: &str,
+        source_type: SourceType,
+    ) -> anyhow::Result<i64> {
+        // Step 1: try the insert. The values are bound with `params!` (never
+        // pasted into the SQL), as everywhere else in this module.
+        let changed = self.conn.execute(
+            "INSERT INTO feeds (name, url, topic, source_type) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(url) DO NOTHING",
+            params![name, url, topic, source_type.as_str()],
+        )?;
+
+        // Step 2: no row changed means the URL was already there.
+        if changed == 0 {
+            anyhow::bail!("this feed is already added: {url}");
+        }
+
+        // Step 3: hand back the new row's ID. `last_insert_rowid` is reliable
+        // here because we just confirmed a row really was inserted.
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Removes the feed with this `id` from the `feeds` table and returns
+    /// whether a feed was actually removed (`false` if no such ID existed).
+    ///
+    /// Only the feed's entry goes: articles already fetched from it stay in
+    /// the database. Saved articles and notes are permanent, and read history
+    /// should not vanish because a feed was unsubscribed. They remain in
+    /// Saved, History and search; they just no longer appear under any feed.
+    pub fn remove_feed(&self, id: i64) -> anyhow::Result<bool> {
+        let changed = self
+            .conn
+            .execute("DELETE FROM feeds WHERE id = ?1", params![id])?;
+        Ok(changed > 0)
+    }
+
+    /// Every feed, grouped by topic and then by name (both
+    /// case-insensitive), so a screen can list them in a stable order.
+    ///
+    /// A row whose `source_type` text isn't one we recognise (for example
+    /// written by a newer version of the app) is skipped rather than failing
+    /// the whole list: `filter_map` below drops the `None`s.
+    pub fn list_feeds(&self) -> anyhow::Result<Vec<Feed>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, name, url, topic, source_type FROM feeds
+             ORDER BY topic COLLATE NOCASE, name COLLATE NOCASE",
+        )?;
+
+        // Read each row as plain values first: `query_map` wants a closure
+        // returning `rusqlite::Result`, and turning the type text into a
+        // `SourceType` can fail in a way that is not a database error.
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+            ))
+        })?;
+
+        // Convert each row into a `Feed`, skipping unknown source types.
+        let mut feeds = Vec::new();
+        for row in rows {
+            let (id, name, url, topic, type_text) = row?;
+            if let Some(source_type) = SourceType::from_db_str(&type_text) {
+                feeds.push(Feed {
+                    id,
+                    name,
+                    url,
+                    topic,
+                    source_type,
+                });
+            }
+        }
+        Ok(feeds)
+    }
+
+    /// Every article fetched from the feed at `feed_url`, most recent first.
+    ///
+    /// This asks only "which feed did it come from", not "which topic is it
+    /// filed under": an article keeps the topic it had when it was fetched,
+    /// so filtering by the feed's *current* topic could hide older ones.
+    pub fn articles_by_feed(&self, feed_url: &str) -> anyhow::Result<Vec<Article>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, title, url, source, topic, timestamp, read, skipped, saved, note, saved_at, noted_at, feed_url
+             FROM articles WHERE feed_url = ?1 ORDER BY timestamp DESC",
+        )?;
+
+        let rows = stmt.query_map(params![feed_url], row_to_article)?;
+        rows.collect::<rusqlite::Result<Vec<Article>>>()
+            .map_err(Into::into)
+    }
+
+    /// Reads the setting called `key`, or `None` if it was never saved.
+    ///
+    /// `.optional()` (from `rusqlite`'s `OptionalExtension`) turns the
+    /// "no rows" error that `query_row` raises into `Ok(None)`, so a missing
+    /// setting is an ordinary answer rather than a failure.
+    pub fn get_setting(&self, key: &str) -> anyhow::Result<Option<String>> {
+        self.conn
+            .query_row(
+                "SELECT value FROM settings WHERE key = ?1",
+                params![key],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    /// Saves `value` under `key`, replacing any earlier value.
+    ///
+    /// `ON CONFLICT(key) DO UPDATE` is the same insert-or-update pattern
+    /// `increment_skip_weight` uses: one atomic statement that creates the row
+    /// the first time and updates it afterwards. `excluded.value` is the value
+    /// this statement tried to insert.
+    pub fn set_setting(&self, key: &str, value: &str) -> anyhow::Result<()> {
+        self.conn.execute(
+            "INSERT INTO settings (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![key, value],
+        )?;
+        Ok(())
+    }
+}
+
+/// One row of the `feeds` table: a feed the Android app fetches.
+///
+/// This is the stored form. [`Feed::to_source_config`] turns it into the
+/// [`SourceConfig`] the fetching code expects, the same type the terminal app
+/// builds from its TOML files.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Feed {
+    /// The database row ID, used to remove the feed.
+    pub id: i64,
+    /// Display name, shown in the UI and copied onto each article's `source`.
+    pub name: String,
+    /// The feed's address. Unique across feeds.
+    pub url: String,
+    /// The topic this feed's articles are filed under.
+    pub topic: String,
+    /// Which fetcher handles this feed.
+    pub source_type: SourceType,
+}
+
+impl Feed {
+    /// Converts this stored feed into a [`SourceConfig`], ready for
+    /// `fetchers::configured_sources`.
+    ///
+    /// Takes `&self` and clones the strings, so the `Feed` stays usable
+    /// afterwards (a screen may keep showing it while a refresh runs).
+    pub fn to_source_config(&self) -> SourceConfig {
+        SourceConfig {
+            name: self.name.clone(),
+            source_type: self.source_type,
+            url: self.url.clone(),
+            topic: self.topic.clone(),
+        }
     }
 }
 
@@ -1193,7 +1370,152 @@ mod tests {
             .conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 5);
+        // 005 ran, and then 006 after it, so the database ends at the latest
+        // version.
+        assert_eq!(version, 6);
+    }
+
+    /// A fresh database has the `feeds` and `settings` tables (migration 006).
+    #[test]
+    fn migration_006_creates_feeds_and_settings() {
+        let storage = test_storage();
+        let table_count: i64 = storage
+            .conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master
+                 WHERE type = 'table' AND name IN ('feeds', 'settings')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(table_count, 2);
+    }
+
+    /// Feeds can be added, listed in topic-then-name order, and removed.
+    #[test]
+    fn add_list_and_remove_feeds() {
+        let storage = test_storage();
+        assert!(storage.list_feeds().unwrap().is_empty());
+
+        let lwn = storage
+            .add_feed("LWN", "https://lwn.net/feed", "linux", SourceType::Rss)
+            .unwrap();
+        storage
+            .add_feed("Ars", "https://ars/feed", "tech", SourceType::Rss)
+            .unwrap();
+        storage
+            .add_feed("Arch", "https://arch/feed", "linux", SourceType::Rss)
+            .unwrap();
+
+        // Ordered by topic ("linux" before "tech"), then name ("Arch" before
+        // "LWN").
+        let names: Vec<String> = storage
+            .list_feeds()
+            .unwrap()
+            .into_iter()
+            .map(|feed| feed.name)
+            .collect();
+        assert_eq!(names, ["Arch", "LWN", "Ars"]);
+
+        assert!(storage.remove_feed(lwn).unwrap());
+        assert_eq!(storage.list_feeds().unwrap().len(), 2);
+        // Removing it again finds nothing to remove.
+        assert!(!storage.remove_feed(lwn).unwrap());
+    }
+
+    /// Adding the same URL twice fails with a clear message and does not
+    /// create a second row.
+    #[test]
+    fn adding_a_duplicate_feed_url_is_an_error() {
+        let storage = test_storage();
+        storage
+            .add_feed("LWN", "https://lwn.net/feed", "linux", SourceType::Rss)
+            .unwrap();
+        let err = storage
+            .add_feed(
+                "LWN again",
+                "https://lwn.net/feed",
+                "other",
+                SourceType::Rss,
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("already added"));
+        assert_eq!(storage.list_feeds().unwrap().len(), 1);
+    }
+
+    /// Removing a feed leaves its articles (and their saved state) in the
+    /// database.
+    #[test]
+    fn removing_a_feed_keeps_its_articles() {
+        let storage = test_storage();
+        let feed_id = storage
+            .add_feed("LWN", "https://lwn.net/feed", "linux", SourceType::Rss)
+            .unwrap();
+        let article_id = storage
+            .insert_article(&from_feed("https://e/1", "linux", "https://lwn.net/feed"))
+            .unwrap();
+        storage
+            .save_article(article_id, Some("keep".to_string()))
+            .unwrap();
+
+        storage.remove_feed(feed_id).unwrap();
+
+        assert_eq!(storage.article_count().unwrap(), 1);
+        assert_eq!(storage.saved_articles().unwrap().len(), 1);
+    }
+
+    /// `articles_by_feed` returns only that feed's articles, whatever topic
+    /// they were filed under.
+    #[test]
+    fn articles_by_feed_ignores_topic() {
+        let storage = test_storage();
+        storage
+            .insert_article(&from_feed("https://e/1", "linux", "https://a/feed"))
+            .unwrap();
+        storage
+            .insert_article(&from_feed("https://e/2", "old-topic", "https://a/feed"))
+            .unwrap();
+        storage
+            .insert_article(&from_feed("https://e/3", "linux", "https://b/feed"))
+            .unwrap();
+
+        assert_eq!(storage.articles_by_feed("https://a/feed").unwrap().len(), 2);
+        assert_eq!(storage.articles_by_feed("https://b/feed").unwrap().len(), 1);
+        assert!(storage.articles_by_feed("https://none").unwrap().is_empty());
+    }
+
+    /// A setting is absent until saved, reads back after saving, and saving
+    /// again replaces the value.
+    #[test]
+    fn settings_round_trip_and_overwrite() {
+        let storage = test_storage();
+        assert_eq!(storage.get_setting("theme").unwrap(), None);
+
+        storage.set_setting("theme", "Nord").unwrap();
+        assert_eq!(
+            storage.get_setting("theme").unwrap().as_deref(),
+            Some("Nord")
+        );
+
+        storage.set_setting("theme", "Gruvbox").unwrap();
+        assert_eq!(
+            storage.get_setting("theme").unwrap().as_deref(),
+            Some("Gruvbox")
+        );
+    }
+
+    /// A stored feed converts into the `SourceConfig` the fetchers expect.
+    #[test]
+    fn feed_converts_to_source_config() {
+        let storage = test_storage();
+        storage
+            .add_feed("LWN", "https://lwn.net/feed", "linux", SourceType::Rss)
+            .unwrap();
+        let config = storage.list_feeds().unwrap()[0].to_source_config();
+        assert_eq!(config.name, "LWN");
+        assert_eq!(config.url, "https://lwn.net/feed");
+        assert_eq!(config.topic, "linux");
+        assert_eq!(config.source_type, SourceType::Rss);
     }
 
     /// An article in topic `topic` from feed `feed`, unread.
