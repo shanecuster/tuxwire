@@ -10,11 +10,21 @@ use crate::text::{SUMMARY_MAX_CHARS, html_to_text, limit_to_sentences, tidy_plai
 use anyhow::Context;
 use chrono::Utc;
 use std::sync::LazyLock;
+use std::time::Duration;
+
+/// The longest one feed may take, from starting the request to having read the
+/// whole answer. A server that accepts a connection and then goes silent would
+/// otherwise stall a refresh forever; with this limit that one feed simply
+/// fails ("operation timed out") and the others carry on.
+pub const FETCH_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The `reqwest::Client` every fetch in this module shares, built once on
 /// first use (`LazyLock` runs its initializer exactly once, the first time
 /// `HTTP_CLIENT` is dereferenced, and caches the result for every call
-/// after that).
+/// after that). It uses [`FETCH_TIMEOUT`] as its time limit.
+static HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| build_client(FETCH_TIMEOUT));
+
+/// Builds an HTTP client whose requests fail after `timeout`.
 ///
 /// This is *not* `reqwest::Client::new()` -- see the `reqwest` comment in
 /// Cargo.toml. Explicitly handing the builder its own root certs (via
@@ -22,7 +32,11 @@ use std::sync::LazyLock;
 /// `.tls_certs_only(...)` keeps this client off the OS-backed
 /// `rustls-platform-verifier` codepath entirely, which is what avoids the
 /// Android/Termux panic that motivated this.
-static HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
+///
+/// It is a function (rather than only the `HTTP_CLIENT` value) so that a test
+/// can build a client with a very short time limit and check that a silent
+/// server really is cut off, without waiting 30 seconds.
+fn build_client(timeout: Duration) -> reqwest::Client {
     let root_certs = webpki_root_certs::TLS_SERVER_ROOT_CERTS
         .iter()
         .map(|der| {
@@ -33,9 +47,12 @@ static HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
 
     reqwest::Client::builder()
         .tls_certs_only(root_certs)
+        // The whole request, including reading the body, must finish within
+        // this time or it fails with a timeout error.
+        .timeout(timeout)
         .build()
         .expect("building the shared HTTP client with bundled root certs should never fail")
-});
+}
 
 /// One RSS/Atom source, built from a `[[source]]` block in `sources.toml`
 /// with `type = "rss"` (see `fetchers::config` and ARCHITECTURE.md's
@@ -92,11 +109,25 @@ pub struct RssFetcher {
 /// convert either of them into one common `anyhow::Error` without us
 /// writing any conversion code by hand.
 pub async fn fetch_feed(url: &str) -> anyhow::Result<feed_rs::model::Feed> {
-    // `HTTP_CLIENT.get(url).send()` is the explicit-`Client` equivalent of
+    // The everyday entry point: the shared client, with its 30-second limit.
+    fetch_feed_with(&HTTP_CLIENT, url).await
+}
+
+/// The same as [`fetch_feed`], but using the HTTP client it is given.
+///
+/// `client: &reqwest::Client` borrows a client, so many calls can share one
+/// (and its open connections) without copying it. The only reason this is a
+/// separate function is so tests can pass a client with a very short time
+/// limit.
+async fn fetch_feed_with(
+    client: &reqwest::Client,
+    url: &str,
+) -> anyhow::Result<feed_rs::model::Feed> {
+    // `client.get(url).send()` is the explicit-`Client` equivalent of
     // the `reqwest::get(url)` convenience function -- we can't use that
     // convenience function here because it always builds its *own*
     // internal client with no root certs of its own, which is exactly the
-    // codepath that hits the platform verifier (see `HTTP_CLIENT`'s doc
+    // codepath that hits the platform verifier (see `build_client`'s doc
     // comment above). Otherwise this behaves the same way: it's `async`,
     // so this line returns a `Future` immediately; `.await` is what
     // actually drives the request and suspends this function (without
@@ -107,7 +138,7 @@ pub async fn fetch_feed(url: &str) -> anyhow::Result<feed_rs::model::Feed> {
     // anything on the success path. The closure `|| format!(...)`
     // only actually runs when there's an error to attach it to — it's
     // not wasted work formatting a string on every successful fetch.
-    let response = HTTP_CLIENT
+    let response = client
         .get(url)
         .send()
         .await
@@ -264,6 +295,44 @@ impl Fetcher for RssFetcher {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A server that accepts the connection and then says nothing is cut off
+    /// at the time limit instead of hanging, and the error says why.
+    ///
+    /// Uses a client built with a 300 ms limit (not the real 30 seconds) and a
+    /// tiny server on `127.0.0.1` (this computer only) that sleeps for 3
+    /// seconds before answering. If a proxy is set in your environment, run
+    /// with `NO_PROXY=127.0.0.1`.
+    #[tokio::test]
+    async fn a_silent_server_times_out() {
+        use std::io::Read;
+        use std::net::TcpListener;
+
+        // Step 1: a listener on a free port the operating system picks (`:0`).
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            // Accept one connection, read the request, then say nothing.
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buffer = [0u8; 1024];
+                let _ = stream.read(&mut buffer);
+                std::thread::sleep(Duration::from_secs(3));
+            }
+        });
+
+        // Step 2: fetch with a short limit and time how long it takes.
+        let client = build_client(Duration::from_millis(300));
+        let started = std::time::Instant::now();
+        let result = fetch_feed_with(&client, &format!("http://127.0.0.1:{port}/feed")).await;
+
+        // Step 3: it failed, quickly, and not because of anything else.
+        assert!(result.is_err());
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "took {:?}",
+            started.elapsed()
+        );
+    }
 
     /// Parses `xml` as a feed and returns the summary of its first entry.
     fn first_summary(xml: &str) -> Option<String> {
