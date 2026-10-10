@@ -136,6 +136,16 @@ pub struct Article {
     /// re-fetched or backfilled yet (see `Storage::backfill_feed_urls`).
     /// The fetcher sets it on every freshly fetched article.
     pub feed_url: Option<String>,
+
+    /// A short plain-text summary of the article, taken from the feed's own
+    /// description (or the start of its full text), with the HTML removed and
+    /// cut at the end of a sentence (see `text::limit_to_sentences`).
+    ///
+    /// `None` when the feed sent no description, or for an article stored
+    /// before migration 007 that has not been fetched again since. It is filled
+    /// in on the next fetch (see `Storage::insert_article`). The terminal app
+    /// does not show it yet; the Android app's article screen does.
+    pub summary: Option<String>,
 }
 
 impl Article {
@@ -187,6 +197,8 @@ impl Article {
             // `RssFetcher::fetch`). `None` keeps `new`'s signature the same
             // for every caller that doesn't know the feed, like tests.
             feed_url: None,
+            // Like `feed_url`, the fetcher fills this in right after `new`.
+            summary: None,
         }
     }
 }
