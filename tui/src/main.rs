@@ -28,15 +28,6 @@ mod paths;
 mod theme;
 mod ui;
 
-// Bringing `Fetcher` into scope is what makes `.fetch()` callable below.
-// This is a Rust-specific quirk worth calling out: trait *methods* are
-// only usable on a value if the trait itself is `use`d somewhere in the
-// current file, even though the concrete type (`RssFetcher`, built inside
-// `fetchers::configured_sources`) is already imported via `fetchers`
-// itself. It's a deliberate design choice — it means a method call can
-// never silently come from some trait you didn't know was in play; every
-// trait providing methods you use has to be named explicitly.
-use fetchers::Fetcher;
 use theme::ThemeSettings;
 use tuxwire_core::fetch_report::FetchReport;
 
@@ -96,28 +87,30 @@ async fn main() -> anyhow::Result<()> {
     // the loops below update it.
     let mut report = FetchReport::default();
 
+    // The fetch results, kept whole so they can be stored (and counted) later
+    // by `FetchReport::record_outcome`, once the database is open. Each is a
+    // `FetchOutcome`: the source's name plus either its articles or the error.
+    let mut outcomes = Vec::new();
+
     for source in &sources {
         println!("Fetching {}...", source.name());
-        report.attempted += 1;
 
-        // Unlike the config-load `?` above, a single source failing to
-        // fetch (a dead network, a 404, or — for now — any `type =
-        // "reddit"` source, see `fetchers::reddit`) is *not* propagated
-        // with `?`. Per ARCHITECTURE.md, "one slow/dead source never
-        // blocks a refresh of everything else" — `match` on the
-        // `Result` here, instead of `?`, is what makes that true: a
-        // failure prints a message and this loop moves on to the next
-        // source rather than aborting the whole fetch.
-        match source.fetch().await {
-            Ok(fetched) => articles.extend(fetched),
-            Err(err) => {
-                eprintln!("  skipped {}: {err:#}", source.name());
-                // Counted too, so the TUI can say "offline" or
-                // "N sources failed" instead of the failure only
-                // appearing in output the alternate screen hides.
-                report.record_failure(&err);
-            }
+        // `fetch_one` (shared with the refresh keybind and the Android app)
+        // returns the failure *inside* the outcome rather than as an `Err` to
+        // propagate with `?`. Per ARCHITECTURE.md, "one slow/dead source never
+        // blocks a refresh of everything else" -- a dead network, a 404, or
+        // (for now) any `type = "reddit"` source, see `fetchers::reddit`,
+        // prints a message here and the loop moves on to the next source.
+        let outcome = fetchers::fetch_one(source).await;
+
+        // `&outcome.result` borrows the result so the outcome stays whole for
+        // storing afterwards. `fetched.iter().cloned()` copies the articles
+        // into `articles`, which is only used for the printout below.
+        match &outcome.result {
+            Ok(fetched) => articles.extend(fetched.iter().cloned()),
+            Err(err) => eprintln!("  skipped {}: {err:#}", outcome.name),
         }
+        outcomes.push(outcome);
     }
 
     println!("Got {} articles:\n", articles.len());
@@ -189,8 +182,12 @@ async fn main() -> anyhow::Result<()> {
     // just gets its existing row's ID handed back instead of a new row.
     // `record_insert` does that same insert and also notes which IDs were
     // genuinely new (see its doc comment for how).
-    for article in &articles {
-        report.record_insert(&storage, article)?;
+    //
+    // `record_outcome` also counts each source as attempted, and each failed
+    // one as failed, so the TUI can say "offline" or "N sources failed" inside
+    // the alternate screen where the `eprintln!` above is hidden.
+    for outcome in outcomes {
+        report.record_outcome(&storage, outcome)?;
     }
 
     println!(
