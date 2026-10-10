@@ -277,23 +277,39 @@ pub async fn fetch_one(source: &ConfiguredSource) -> FetchOutcome {
     }
 }
 
-/// Fetches every source in `sources`, one after another, and returns one
-/// [`FetchOutcome`] each, in the same order.
-///
-/// Sequential rather than all-at-once: it is the simplest thing that matches
-/// how the terminal app already behaved. Running several downloads at the same
-/// time would be faster for long feed lists and is a possible later change that
-/// would not alter this function's signature.
-pub async fn fetch_all(sources: &[ConfiguredSource]) -> Vec<FetchOutcome> {
-    // Collect the outcomes as we go. `Vec::with_capacity` reserves the right
-    // amount of space up front instead of growing it repeatedly.
-    let mut outcomes = Vec::with_capacity(sources.len());
+/// How many feeds [`fetch_all`] downloads at the same time. Enough that a
+/// long list refreshes in a fraction of the time, few enough not to open dozens
+/// of connections at once on a phone or hammer one server.
+pub const MAX_CONCURRENT_FETCHES: usize = 6;
 
-    // Fetch each source in turn, awaiting one before starting the next.
-    for source in sources {
-        outcomes.push(fetch_one(source).await);
-    }
-    outcomes
+/// Fetches every source in `sources`, several at the same time (at most
+/// [`MAX_CONCURRENT_FETCHES`]), and returns one [`FetchOutcome`] each, **in the
+/// same order as `sources`** whichever finishes first.
+///
+/// A source that fails or times out only affects its own outcome; the others
+/// carry on, so one dead feed never stops a refresh. Callers store the outcomes
+/// one after another afterwards, so the database is never written to from
+/// several places at once.
+pub async fn fetch_all(sources: &[ConfiguredSource]) -> Vec<FetchOutcome> {
+    // `StreamExt` adds the stream helpers used below (`map`, `buffered`,
+    // `collect`) to anything that is a stream.
+    use futures_util::stream::{self, StreamExt};
+
+    // A "stream" is like an iterator whose items arrive over time. This one
+    // reads as a pipeline:
+    //   1. `stream::iter(sources)` yields each source in turn.
+    //   2. `.map(fetch_one)` turns each source into a future (a download that
+    //      has not started yet).
+    //   3. `.buffered(N)` runs up to N of those futures at once, and hands the
+    //      finished results back in the original order, holding a quick one
+    //      back until the slower ones before it are done.
+    //   4. `.collect()` gathers the results into a `Vec`, and `.await` waits
+    //      for the whole thing.
+    stream::iter(sources)
+        .map(fetch_one)
+        .buffered(MAX_CONCURRENT_FETCHES)
+        .collect()
+        .await
 }
 
 /// Turns validated source descriptions into fetchers that are ready to
@@ -330,4 +346,135 @@ pub fn configured_sources(sources: Vec<SourceConfig>) -> Vec<ConfiguredSource> {
             }),
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::{Duration, Instant};
+
+    /// Starts a tiny server on `127.0.0.1` (this computer only; nothing leaves
+    /// the machine) that answers every request with a one-item RSS feed, but
+    /// only after waiting `delay`. It counts how many requests are in progress
+    /// at once and remembers the highest the count reached.
+    ///
+    /// Returns the port and that highest-count cell. Each connection runs on
+    /// its own thread, so slow answers do not hold each other up. If a proxy is
+    /// set in your environment, run the tests with `NO_PROXY=127.0.0.1`.
+    fn serve_slowly(delay: Duration) -> (u16, Arc<AtomicUsize>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let active = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let peak_for_caller = Arc::clone(&peak);
+
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let (active, peak) = (Arc::clone(&active), Arc::clone(&peak));
+                std::thread::spawn(move || {
+                    // One more request in progress; raise the peak if needed.
+                    let now = active.fetch_add(1, Ordering::SeqCst) + 1;
+                    peak.fetch_max(now, Ordering::SeqCst);
+
+                    // Read the request, wait, then answer.
+                    let mut buffer = [0u8; 2048];
+                    let _ = stream.read(&mut buffer);
+                    std::thread::sleep(delay);
+                    let body = r#"<?xml version="1.0"?><rss version="2.0"><channel><title>T</title><item><title>A</title><link>https://example.com/a</link></item></channel></rss>"#;
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/rss+xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = stream.write_all(response.as_bytes());
+
+                    // This request is finished.
+                    active.fetch_sub(1, Ordering::SeqCst);
+                });
+            }
+        });
+        (port, peak_for_caller)
+    }
+
+    /// Builds `count` sources named `f0`, `f1`, ... all pointing at `port`.
+    fn sources_on(port: u16, count: usize) -> Vec<ConfiguredSource> {
+        configured_sources(
+            (0..count)
+                .map(|n| SourceConfig {
+                    name: format!("f{n}"),
+                    source_type: SourceType::Rss,
+                    url: format!("http://127.0.0.1:{port}/{n}"),
+                    topic: "t".to_string(),
+                })
+                .collect(),
+        )
+    }
+
+    /// Six feeds that each take 300 ms finish in roughly one delay, not six,
+    /// and the outcomes still come back in the order the sources were given.
+    #[tokio::test]
+    async fn slow_feeds_download_at_the_same_time_and_stay_in_order() {
+        let (port, peak) = serve_slowly(Duration::from_millis(300));
+        let sources = sources_on(port, 6);
+
+        let started = Instant::now();
+        let outcomes = fetch_all(&sources).await;
+        let elapsed = started.elapsed();
+
+        // In order, all successful.
+        let names: Vec<&str> = outcomes.iter().map(|o| o.name.as_str()).collect();
+        assert_eq!(names, ["f0", "f1", "f2", "f3", "f4", "f5"]);
+        assert!(outcomes.iter().all(|o| o.result.is_ok()));
+        // One after another would take at least 6 x 300 ms = 1800 ms.
+        assert!(elapsed < Duration::from_millis(1200), "took {elapsed:?}");
+        assert!(peak.load(Ordering::SeqCst) >= 2);
+    }
+
+    /// With more feeds than the limit, no more than the limit are ever in
+    /// progress at once.
+    #[tokio::test]
+    async fn no_more_than_the_limit_run_at_once() {
+        let (port, peak) = serve_slowly(Duration::from_millis(150));
+        let sources = sources_on(port, MAX_CONCURRENT_FETCHES * 2 + 2);
+
+        let outcomes = fetch_all(&sources).await;
+
+        assert_eq!(outcomes.len(), sources.len());
+        let highest = peak.load(Ordering::SeqCst);
+        assert!(highest <= MAX_CONCURRENT_FETCHES, "peak was {highest}");
+        assert!(highest >= 2, "peak was {highest}");
+    }
+
+    /// One unreachable feed in the middle fails on its own; the ones around it
+    /// are fetched normally and the order is kept.
+    #[tokio::test]
+    async fn one_dead_feed_does_not_stop_the_others() {
+        let (port, _) = serve_slowly(Duration::from_millis(50));
+        // Find a port nothing is listening on, by binding and then dropping.
+        let dead_port = TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let mut configs = Vec::new();
+        for (name, p) in [("good1", port), ("dead", dead_port), ("good2", port)] {
+            configs.push(SourceConfig {
+                name: name.to_string(),
+                source_type: SourceType::Rss,
+                url: format!("http://127.0.0.1:{p}/x"),
+                topic: "t".to_string(),
+            });
+        }
+        let outcomes = fetch_all(&configured_sources(configs)).await;
+
+        let results: Vec<(&str, bool)> = outcomes
+            .iter()
+            .map(|o| (o.name.as_str(), o.result.is_ok()))
+            .collect();
+        assert_eq!(results, [("good1", true), ("dead", false), ("good2", true)]);
+    }
 }

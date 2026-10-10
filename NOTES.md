@@ -328,7 +328,8 @@ tmux kill-session -t tuxwire-lists-test         # only this session
    articles. `articles_by_feed` ignores topic, so older articles stay visible if a feed's topic changes.
 2. **`fetch_one` / `fetch_all` + `FetchReport::record_outcome`.** Fetching and storing are separate so
    a caller holding a database lock can release it during the network step. Core never prints; failure
-   lines go in `FetchReport::failure_messages`. `fetch_all` is sequential.
+   lines go in `FetchReport::failure_messages`. `fetch_all` was sequential here; it is parallel now (see
+   the parallel refresh section).
 3. **Desktop loops converted** (separate commit): `main.rs` and `ui::refresh_topic` use the shared step.
    Smoke test with a throwaway `HOME` and a dead feed: the TUI started and `skipped Dead: ...` was printed
    as before.
@@ -366,3 +367,19 @@ tmux kill-session -t tuxwire-lists-test         # only this session
    round-trips names with `&`, `<`, quotes. `text::decode_entities` became `pub(crate)` so the
    reader reuses it.
 - Tests: 149 pass (133 before, 16 new); clippy and fmt clean; core still has no ratatui/crossterm.
+
+## Parallel refresh in core (branch `feature/parallel-refresh`, 2026-10-10)
+
+1. **`fetch_all`** now runs up to 6 downloads at once (`MAX_CONCURRENT_FETCHES`) with `futures-util`'s
+   `stream::iter(..).map(fetch_one).buffered(6).collect()`. Same signature, results still in source
+   order, so the Android bridge and the terminal app both get it with no changes. `futures-util` was
+   already in the build through `reqwest`; it is now a direct dependency (`default-features = false`,
+   `alloc`), approved by Shane.
+2. **Timeout.** The shared HTTP client had none. `build_client(timeout)` now sets `FETCH_TIMEOUT`
+   (30 s) on the whole request; a silent server fails with a timeout. `fetch_feed_with(client, url)`
+   exists so a test can use a 300 ms limit.
+3. **Tests** use a tiny local server (threads, `127.0.0.1`): 6 feeds with a 300 ms delay finish in
+   about one delay and in order; 14 feeds never exceed the limit; a dead feed in the middle fails alone;
+   a silent server is cut off. Checked the tests can fail: with the limit forced to 1 the overlap test
+   took 1.8 s and failed. Run them with `NO_PROXY=127.0.0.1` if your environment sets a proxy.
+- Tests: 153 pass (149 before, 4 new); clippy and fmt clean; core still has no ratatui/crossterm.

@@ -53,8 +53,14 @@ implements a common `Fetcher` trait. Every fetcher normalizes whatever it
 pulls down into the same `Article` struct — the rest of the app never needs
 to know or care where an article came from.
 
-Fetches run concurrently via tokio, so one slow/dead source never blocks a
-refresh of everything else.
+Fetches run concurrently, so one slow/dead source never blocks a refresh of
+everything else. `fetch_all` (core) downloads up to six feeds at a time
+(`MAX_CONCURRENT_FETCHES`) using `futures-util`'s `buffered`, and still returns
+one outcome per source **in the order the sources were given**, so callers store
+the results one after another and the database is never written concurrently.
+Every request has a 30-second limit (`FETCH_TIMEOUT` in `fetchers/rss.rs`): a
+server that goes silent fails that one feed with a timeout instead of stalling
+the refresh.
 
 **Adding a new source should never require touching fetcher logic** unless
 the source has no RSS feed. See `docs/ADDING_A_SOURCE.md`.
