@@ -13,6 +13,7 @@
 // `core/src/icons/mod.rs`.
 #![warn(clippy::missing_docs_in_private_items)]
 
+use crate::fetchers::FetchOutcome;
 use crate::models::Article;
 use crate::storage::Storage;
 use std::collections::HashSet;
@@ -38,6 +39,10 @@ pub struct FetchReport {
     /// already in the database aren't counted, because
     /// `Storage::insert_article` skips duplicate URLs.
     pub new_article_ids: HashSet<i64>,
+    /// One readable line per failed source ("Name: why it failed"), in the
+    /// order they were recorded, for programs that want to show or log them.
+    /// This crate never prints; the caller decides.
+    pub failure_messages: Vec<String>,
 }
 
 impl FetchReport {
@@ -65,6 +70,44 @@ impl FetchReport {
         let id = storage.insert_article(article)?;
         if storage.article_count()? > before {
             self.new_article_ids.insert(id);
+        }
+        Ok(())
+    }
+
+    /// Records the result of fetching one source: counts it as attempted,
+    /// then either stores its articles (counting the new ones) or records the
+    /// failure and its message.
+    ///
+    /// This is the one shared place the "fetch outcome becomes stored articles
+    /// and a tally" step lives, so the startup fetch, the `r` refresh and the
+    /// Android refresh all behave the same way.
+    ///
+    /// `outcome` is taken by value because the articles inside it are only
+    /// needed once, and the error is formatted into a message here. A
+    /// database error while storing is returned (`?`) because that is a real
+    /// problem, unlike a dead feed, which is just counted.
+    pub fn record_outcome(
+        &mut self,
+        storage: &Storage,
+        outcome: FetchOutcome,
+    ) -> anyhow::Result<()> {
+        // Every outcome is one attempted source, successful or not.
+        self.attempted += 1;
+
+        // `match` on the result: store the articles, or note the failure.
+        match outcome.result {
+            Ok(articles) => {
+                for article in &articles {
+                    self.record_insert(storage, article)?;
+                }
+            }
+            Err(err) => {
+                // `{err:#}` prints the error and every cause beneath it on one
+                // line, so the message says *why*, not just "failed".
+                self.failure_messages
+                    .push(format!("{}: {err:#}", outcome.name));
+                self.record_failure(&err);
+            }
         }
         Ok(())
     }
@@ -140,6 +183,92 @@ mod tests {
         report.record_failure(&err);
         assert_eq!(report.unreachable, 1, "{err:#}");
         assert!(report.is_offline());
+    }
+
+    /// `record_outcome` stores a successful fetch's articles (counting only
+    /// the new ones) and counts a failed fetch with its message, so one dead
+    /// source does not stop the rest being recorded.
+    #[test]
+    fn record_outcome_stores_successes_and_counts_failures() {
+        let storage = Storage::open_in_memory().unwrap();
+        let article = Article::new(
+            "A title".to_string(),
+            "https://example.com/a".to_string(),
+            "Example".to_string(),
+            "tech".to_string(),
+            chrono::Utc::now(),
+        );
+
+        let mut report = FetchReport::default();
+        // A source that worked and returned one article.
+        report
+            .record_outcome(
+                &storage,
+                FetchOutcome {
+                    name: "Example".to_string(),
+                    result: Ok(vec![article.clone()]),
+                },
+            )
+            .unwrap();
+        // A source that failed.
+        report
+            .record_outcome(
+                &storage,
+                FetchOutcome {
+                    name: "Broken".to_string(),
+                    result: Err(anyhow::anyhow!("failed to parse feed XML")),
+                },
+            )
+            .unwrap();
+        // The same article again from a later fetch: stored once, not new.
+        report
+            .record_outcome(
+                &storage,
+                FetchOutcome {
+                    name: "Example".to_string(),
+                    result: Ok(vec![article]),
+                },
+            )
+            .unwrap();
+
+        assert_eq!(report.attempted, 3);
+        assert_eq!(report.failed, 1);
+        assert_eq!(report.new_article_ids.len(), 1);
+        assert_eq!(storage.article_count().unwrap(), 1);
+        assert_eq!(report.failure_messages.len(), 1);
+        assert!(report.failure_messages[0].starts_with("Broken: "));
+    }
+
+    /// `fetch_all` returns one outcome per source, in order, and a dead
+    /// source is an `Err` outcome rather than aborting the others. Port 1 on
+    /// loopback is refused immediately, so no real network is touched.
+    #[tokio::test]
+    async fn fetch_all_reports_every_source_even_when_all_fail() {
+        use crate::fetchers::{SourceConfig, SourceType, configured_sources, fetch_all};
+
+        // Two sources that both point at a port nothing listens on.
+        let sources = configured_sources(vec![
+            SourceConfig {
+                name: "First".to_string(),
+                source_type: SourceType::Rss,
+                url: "http://127.0.0.1:1/a".to_string(),
+                topic: "t".to_string(),
+            },
+            SourceConfig {
+                name: "Second".to_string(),
+                source_type: SourceType::Rss,
+                url: "http://127.0.0.1:1/b".to_string(),
+                topic: "t".to_string(),
+            },
+        ]);
+
+        let outcomes = fetch_all(&sources).await;
+
+        // Both are reported, in the order given, and both are failures.
+        assert_eq!(outcomes.len(), 2);
+        assert_eq!(outcomes[0].name, "First");
+        assert_eq!(outcomes[1].name, "Second");
+        assert!(outcomes.iter().all(|outcome| outcome.result.is_err()));
     }
 
     /// Offline means every attempted source was unreachable, and nothing

@@ -243,6 +243,59 @@ impl Fetcher for ConfiguredSource {
     }
 }
 
+/// The result of fetching one source: which source it was, and either its
+/// articles or the error that stopped it.
+///
+/// Fetching and storing are kept apart on purpose. `fetch_one` and
+/// `fetch_all` only talk to the network and never touch the database, so a
+/// caller that shares its `Storage` behind a lock (the Android app) can
+/// release that lock while the slow network work runs, and only take it again
+/// to store the results with `FetchReport::record_outcome`.
+pub struct FetchOutcome {
+    /// The source's display name, kept so a failure message can say which
+    /// feed it was.
+    pub name: String,
+    /// `Ok` with the fetched articles, or `Err` with why the fetch failed.
+    pub result: anyhow::Result<Vec<Article>>,
+}
+
+/// Fetches one source and packages the answer as a [`FetchOutcome`].
+///
+/// A failure is *returned inside* the outcome rather than propagated with `?`,
+/// because one dead feed must never stop the rest of a refresh ("one
+/// slow/dead source never blocks a refresh of everything else", per
+/// ARCHITECTURE.md).
+///
+/// `source: &ConfiguredSource` borrows the source: fetching only needs to
+/// read it, and the caller keeps it for the next refresh.
+pub async fn fetch_one(source: &ConfiguredSource) -> FetchOutcome {
+    // `.await` runs the request to completion without blocking the thread.
+    let result = source.fetch().await;
+    FetchOutcome {
+        name: source.name().to_string(),
+        result,
+    }
+}
+
+/// Fetches every source in `sources`, one after another, and returns one
+/// [`FetchOutcome`] each, in the same order.
+///
+/// Sequential rather than all-at-once: it is the simplest thing that matches
+/// how the terminal app already behaved. Running several downloads at the same
+/// time would be faster for long feed lists and is a possible later change that
+/// would not alter this function's signature.
+pub async fn fetch_all(sources: &[ConfiguredSource]) -> Vec<FetchOutcome> {
+    // Collect the outcomes as we go. `Vec::with_capacity` reserves the right
+    // amount of space up front instead of growing it repeatedly.
+    let mut outcomes = Vec::with_capacity(sources.len());
+
+    // Fetch each source in turn, awaiting one before starting the next.
+    for source in sources {
+        outcomes.push(fetch_one(source).await);
+    }
+    outcomes
+}
+
 /// Turns validated source descriptions into fetchers that are ready to
 /// `.fetch()`.
 ///
