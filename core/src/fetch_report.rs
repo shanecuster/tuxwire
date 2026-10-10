@@ -10,7 +10,7 @@
 //! adding it here leaves both of those modules unchanged.
 
 // Has clippy flag any undocumented item here, the same as in
-// `src/icons/mod.rs`.
+// `core/src/icons/mod.rs`.
 #![warn(clippy::missing_docs_in_private_items)]
 
 use crate::models::Article;

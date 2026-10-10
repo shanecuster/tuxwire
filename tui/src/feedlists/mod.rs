@@ -22,7 +22,7 @@
 //! `ratatui`, `crossterm`, or `ui`, so it can move into a future Android
 //! app unchanged.
 
-// Has clippy flag any undocumented item here, the same as in `src/icons/`.
+// Has clippy flag any undocumented item here, the same as in `core/src/icons/`.
 #![warn(clippy::missing_docs_in_private_items)]
 
 pub mod config;

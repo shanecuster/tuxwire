@@ -5,6 +5,46 @@ remembering.
 
 ---
 
+## Core split: `core/` + `tui/` workspace (branch `feature/core-split`, 2026-10-09)
+
+Groundwork for the native Android app. The repo is now a Cargo workspace with two crates, so
+the Android app (a separate private repo) can reuse tuxwire's logic instead of copying it.
+**Nothing changes for you as a user**: same commands, same config files, same database, same UI.
+
+### What moved where
+
+| Crate | Contains |
+|---|---|
+| `core/` (`tuxwire-core`) | `Article`, SQLite storage + migrations (`Storage::open_at(path)`), the `Fetcher` trait / RSS fetcher, `SourceConfig`, `FetchReport`, the icon table, and the eight built-in theme palettes as plain `Rgb`. **No ratatui, no `$HOME`.** |
+| `tui/` (`tuxwire`) | The ratatui UI, key handling, `sources.toml` / `lists.toml` / `theme.toml` / `icons.toml` / `export.toml` loading, w3m/browser launching, and `paths.rs` (where the database lives). |
+
+### Commits, in order
+1. Move the crate into `tui/` and make the repo a workspace (a pure file move).
+2. Extract `core/` (models, storage, fetchers, fetch report, icons).
+3. Move the theme palettes into `core/` as plain RGB (`Rgb`, `Palette`); `tui/` converts to ratatui colors.
+4. Docs (this entry, CLAUDE.md, ARCHITECTURE.md, CHANGELOG).
+
+### How to test
+```bash
+cargo test && cargo clippy --all-targets -- -D warnings && cargo fmt --check   # 101 tests: 62 tui + 39 core
+cargo tree -p tuxwire-core | grep -E 'ratatui|crossterm'                       # prints nothing
+cargo build && t=$(mktemp -d) && env -u XDG_CONFIG_HOME -u XDG_DATA_HOME HOME="$t" ./target/debug/tuxwire
+```
+Then try your usual: `t` themes, `i` icon modes, `f` lists, `r` refresh. Back up your real database
+before the first run of the new build against it (nothing migrates, but it is your data).
+
+### Worth knowing
+- `Storage::open()` became `Storage::open_at(&Path)`. The XDG lookup moved to `tui/src/paths.rs`.
+  `Storage::open_in_memory` and `IconMode::ALL` lost `#[cfg(test)]` so the other crate's tests can use them.
+- `#[allow(async_fn_in_trait)]` on `Fetcher`: a lint that appears now that the trait is `pub` in a library.
+  Harmless here; the comment in `core/src/fetchers/mod.rs` explains why.
+- Dependency versions and features are unchanged; they are now declared once in the root `Cargo.toml`
+  (`[workspace.dependencies]`). `serde_json` is still listed but unused, as it was before.
+- **Deliberately not done:** the fetch-and-insert loop is still written twice (`main.rs` and the `r` key).
+  They behave differently (fetch-all-then-insert vs. interleaved), so merging them would change behavior,
+  and the Android app's needs aren't known yet. Revisit when the Android refresh worker exists.
+- Next migration number is **006** (004 was the FreshRSS one, never merged).
+
 ## Standalone UI: icons + themes on master (branch `feature/standalone-ui`, 2026-10-08)
 
 tuxwire is a standalone RSS reader. The FreshRSS integration is dropped: `feature/freshrss` is

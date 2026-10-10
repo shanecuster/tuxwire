@@ -22,13 +22,9 @@
 //! file part of the compiled program.
 mod export;
 mod feedlists;
-mod fetch_report;
 mod fetchers;
 mod icons;
-mod models;
 mod paths;
-mod scoring;
-mod storage;
 mod theme;
 mod ui;
 
@@ -40,10 +36,9 @@ mod ui;
 // itself. It's a deliberate design choice — it means a method call can
 // never silently come from some trait you didn't know was in play; every
 // trait providing methods you use has to be named explicitly.
-use fetch_report::FetchReport;
 use fetchers::Fetcher;
-use storage::Storage;
 use theme::ThemeSettings;
+use tuxwire_core::fetch_report::FetchReport;
 
 /// `#[tokio::main]` is a *macro* that rewrites this function at compile
 /// time. Rust's real `fn main()` can't be `async` — something has to own
@@ -148,7 +143,7 @@ async fn main() -> anyhow::Result<()> {
     // either succeeds silently or returns an `Err` that the `?` below
     // propagates out of `main`, same as the fetch above.
     println!("\nOpening storage...");
-    let storage = Storage::open()?;
+    let storage = paths::open_storage()?;
     println!("Storage ready at ~/.local/share/tuxwire/tuxwire.db (migrations up to date).");
 
     // Best-effort backfill of `feed_url` (migration 005) for articles

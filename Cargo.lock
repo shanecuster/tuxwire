@@ -2672,13 +2672,25 @@ dependencies = [
  "crossterm",
  "feed-rs",
  "ratatui",
+ "serde",
+ "tokio",
+ "toml",
+ "toml_edit",
+ "tuxwire-core",
+]
+
+[[package]]
+name = "tuxwire-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "feed-rs",
  "reqwest",
  "rusqlite",
  "serde",
  "serde_json",
  "tokio",
- "toml",
- "toml_edit",
  "webpki-root-certs",
 ]
 

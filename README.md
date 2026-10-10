@@ -192,6 +192,10 @@ cargo build --release
 The first build compiles every dependency from scratch and may take a
 few minutes. The compiled binary lands at `target/release/tuxwire`.
 
+The repository is a Cargo workspace: `core/` is the terminal-free library
+(feeds, storage, themes, icons) and `tui/` is the program you run. Building
+from the repo root builds both; the binary path above is unchanged.
+
 ### 5. Make it runnable from anywhere
 
 ```bash

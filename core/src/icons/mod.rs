@@ -42,16 +42,16 @@
 //! `ui::Mode::IconCheck`) asks whether the test glyph actually shows up
 //! and falls back to Unicode if it doesn't.
 //!
-//! This module (and `config.rs` next to it) deliberately imports nothing
-//! from `ratatui`, `crossterm`, or `ui` outside of tests, so the icon table
-//! can move into a future Android app unchanged.
+//! This module deliberately imports nothing from `ratatui` or `crossterm`
+//! (not even in its tests), so the icon table is shared unchanged by the
+//! terminal app and the Android app. Reading and writing `icons.toml` is a
+//! desktop-only job, so it lives in the terminal crate (`tui/src/icons/`),
+//! not here.
 
 // Asks clippy to warn about any item in this module (or its children) that
 // is missing a `///` doc comment, including private ones, because the
 // project's documentation standard requires a doc comment on every item.
 #![warn(clippy::missing_docs_in_private_items)]
-
-pub mod config;
 
 use std::collections::HashMap;
 
@@ -76,10 +76,11 @@ pub enum IconMode {
 }
 
 impl IconMode {
-    /// Every mode, so tests can loop over all of them without listing them
-    /// by hand. `#[cfg(test)]` leaves it out of the real binary, where
-    /// nothing needs it (the `i` key uses [`IconMode::next`] instead).
-    #[cfg(test)]
+    /// Every mode, so code (and tests) can loop over all of them without
+    /// listing them by hand. This used to be `#[cfg(test)]`-only; it is an
+    /// ordinary public constant now because the terminal crate's tests need
+    /// it too, and `#[cfg(test)]` code in this crate is invisible to another
+    /// crate's tests.
     pub const ALL: [IconMode; 3] = [IconMode::Nerd, IconMode::Unicode, IconMode::Ascii];
 
     /// The text this mode is saved as in `icons.toml`. Returns
@@ -537,30 +538,6 @@ fn is_private_use(c: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    // Used only here, to measure glyphs the same way ratatui does when it
-    // lays out a line. The non-test code above stays ratatui-free.
-    use ratatui::text::Span;
-
-    /// Every glyph, in every mode, is exactly one character and one
-    /// terminal cell wide. This is the "single-cell" guarantee from the
-    /// module doc comment that keeps borders and columns aligned. If
-    /// someone adds a wide emoji or a multi-character ASCII fallback, this
-    /// fails and names the icon.
-    #[test]
-    fn every_glyph_is_one_char_and_one_cell_in_every_mode() {
-        for icon in Icon::ALL {
-            for mode in IconMode::ALL {
-                let glyph = icon.get(mode);
-                assert_eq!(glyph.chars().count(), 1, "{icon:?} in {mode:?}: {glyph:?}");
-                // `Span::width` is ratatui's own cell-width measurement.
-                assert_eq!(
-                    Span::raw(glyph).width(),
-                    1,
-                    "{icon:?} in {mode:?}: {glyph:?}"
-                );
-            }
-        }
-    }
 
     /// Every Nerd glyph is a Private Use Area character (where Nerd Font
     /// Mono puts its single-cell icons), and no fallback is. If a fallback

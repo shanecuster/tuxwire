@@ -1,0 +1,38 @@
+# Cargo.toml is Rust's project manifest — it plays the role that
+# package.json (Node), pyproject.toml (Python), or a Makefile + go.mod
+# combined would play elsewhere. It declares the package itself and every
+# external crate (Rust's word for "library" or "package") the project
+# depends on. `cargo build` reads this, resolves a compatible version of
+# each dependency, downloads them from crates.io (Rust's package registry,
+# analogous to npm/PyPI), and compiles everything together.
+
+[package]
+name = "tuxwire"
+version = "0.1.0"
+# The "edition" is Rust's mechanism for introducing breaking language
+# changes without breaking old code: every crate picks an edition, and the
+# compiler behaves accordingly, so crates on different editions can still
+# be compiled together in the same project. `cargo init` picked the newest
+# one available (2024) — there's no reason to use an older edition on a
+# brand new project.
+edition = "2024"
+
+# The terminal program. It depends on `tuxwire-core` (the shared logic) and
+# adds everything that only makes sense in a terminal: the ratatui UI, key
+# handling, TOML config files in ~/.config/tuxwire/, and launching w3m/browsers.
+[dependencies]
+# The shared logic crate in the sibling `core/` directory. `path = ...` tells
+# Cargo to use the local directory instead of downloading from crates.io.
+tuxwire-core = { path = "../core" }
+
+# Each line below says "use the version and features declared once in the
+# workspace root"; see the explanatory comments there.
+anyhow.workspace = true
+chrono.workspace = true
+crossterm.workspace = true
+feed-rs.workspace = true
+ratatui.workspace = true
+serde.workspace = true
+tokio.workspace = true
+toml.workspace = true
+toml_edit.workspace = true

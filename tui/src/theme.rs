@@ -1,34 +1,30 @@
-//! Themes: the built-in palettes, and loading/saving `theme.toml`
-//! (`docs/ARCHITECTURE.md` § Configuration).
+//! Themes in the terminal app: ratatui colours, and loading/saving
+//! `theme.toml` (`docs/ARCHITECTURE.md` § Configuration).
 //!
-//! Per ARCHITECTURE.md: "All colors are config-driven — never hardcoded in
-//! the UI code — so any shade can be tweaked without touching Rust." UI
-//! code only ever reads the named slots on a [`Theme`] (`theme.background`,
-//! `theme.accent_unread`, ...). Which actual colors fill those slots is
-//! decided here, in two layers:
+//! The built-in palettes themselves (names, RGB values, the picker order)
+//! live in the shared `tuxwire-core` crate so the Android app uses exactly the
+//! same ones; they are re-exported below. What stays here is terminal-only:
 //!
-//! 1. **A built-in theme** from [`BUILTIN_THEMES`] (Everforest by default),
-//!    chosen with the `t` theme picker and saved as `base = "..."` in
-//!    `theme.toml`.
-//! 2. **The user's own overrides**, the optional `[theme]` table in
-//!    `theme.toml`. Any slot set there replaces the built-in's color for
-//!    that slot, whichever built-in is selected. A pre-picker `theme.toml`
-//!    (one full `[theme]` table, no `base`) therefore still loads and looks
+//! 1. [`Theme`], the same slots as a core [`Palette`] but as ready-to-paint
+//!    `ratatui::style::Color` values, which the UI code reads
+//!    (`theme.background`, `theme.accent_unread`, ...).
+//! 2. [`ThemeSettings`], the user's choice read from `~/.config/tuxwire/
+//!    theme.toml`: which built-in to start from, plus optional `[theme]`
+//!    overrides. Any slot set there replaces the built-in's colour for that
+//!    slot, whichever built-in is selected. A pre-picker `theme.toml` (one
+//!    full `[theme]` table, no `base`) therefore still loads and looks
 //!    exactly as it did before, since every slot is overridden.
-//!
-//! **Adding a theme = adding ONE entry to [`BUILTIN_THEMES`].** The picker,
-//! the name lookup, and the contrast tests all read that list.
-//!
-//! Modeled on zerohour's `core/src/theme.rs`, but keeping tuxwire's own
-//! slot names, since the UI already uses them everywhere.
 
-// Has clippy flag any undocumented item here, the same as in `src/icons/`.
+// Has clippy flag any undocumented item here, the same as in `core/src/icons/`.
 #![warn(clippy::missing_docs_in_private_items)]
 
-use anyhow::{Context, anyhow, bail};
+use anyhow::{Context, anyhow};
 use ratatui::style::Color;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
+
+pub use tuxwire_core::theme::{BUILTIN_THEMES, Palette, Rgb};
+pub use tuxwire_core::theme::{builtin_index, default_index, picker_order};
 
 /// The colors the UI layer actually uses, one per role described in
 /// ARCHITECTURE.md's `theme.toml` section (backgrounds, borders, text by
@@ -37,6 +33,10 @@ use std::path::{Path, PathBuf};
 /// Every field is a ready-to-paint `ratatui::style::Color`, never a hex
 /// string. Hex parsing happens once, at load time (see `parse_slot`), so
 /// no draw call can fail on a bad color.
+///
+/// This is the terminal-side twin of the core crate's [`Palette`]: the same
+/// eleven slots, but as ratatui `Color`s instead of plain RGB bytes. Convert
+/// with `Theme::from(palette)`.
 ///
 /// `Clone, Copy` because the whole struct is 11 small `Color` values. The
 /// theme picker copies a built-in's colors and then applies overrides on
@@ -71,242 +71,34 @@ pub struct Theme {
     pub accent_selected: Color,
 }
 
-/// One entry in the built-in theme table: a display name plus a full set
-/// of colors.
-pub struct BuiltinTheme {
-    /// Shown in the picker and saved as `base = "..."` in `theme.toml`.
-    /// Matched case-insensitively when loading.
-    pub name: &'static str,
-    /// The theme's color for every slot.
-    pub colors: Theme,
+/// Converts a plain core [`Rgb`] into ratatui's 24-bit `Color::Rgb`.
+/// ratatui's `Color` enum also has named variants for the 16 basic terminal
+/// colours (`Color::Red`, ...), but theme palettes need exact values, which
+/// is what the `Rgb` variant is for.
+fn to_color(rgb: Rgb) -> Color {
+    Color::Rgb(rgb.r, rgb.g, rgb.b)
 }
 
-/// Builds a `Color` from a hex number like `0x2d353b` (the same digits as
-/// CSS `#2d353b`), so palettes can be copied straight from each theme's
-/// official docs.
-///
-/// `const fn` means the compiler can run it at compile time, which is what
-/// lets [`BUILTIN_THEMES`] be a `const` table. `>>` shifts the bits right
-/// and `& 0xff` keeps the lowest 8, pulling out the red, green, and blue
-/// bytes in turn. `as u8` then narrows each to a byte, which can't lose
-/// anything after the mask.
-const fn rgb(hex: u32) -> Color {
-    Color::Rgb(
-        ((hex >> 16) & 0xff) as u8,
-        ((hex >> 8) & 0xff) as u8,
-        (hex & 0xff) as u8,
-    )
-}
-
-/// The default theme, **by name**: what a `theme.toml` with no `base`
-/// line gets, and what `ThemeSettings::default()` starts with (see
-/// [`default_index`]).
-///
-/// Named on purpose rather than "whatever is first in [`BUILTIN_THEMES`]".
-/// The picker lists themes alphabetically ([`picker_order`]), and nothing
-/// about the table's order or the picker's order may change which theme
-/// is the default. The bundled `theme.toml.example` says
-/// `base = "Everforest"` too; a test keeps the two in agreement.
-pub const DEFAULT_THEME: &str = "Everforest";
-
-/// Every built-in theme. The order here doesn't matter: the picker sorts
-/// them by name ([`picker_order`]), and the default is chosen by name
-/// ([`DEFAULT_THEME`]), never by position.
-///
-/// **To add a theme, copy one block, rename it, and change the colors.**
-/// Nothing else needs touching. The tests in this file then check that the
-/// new theme's text, muted text, and accents contrast clearly with its
-/// background, and that its four article-state colors (plus `selected`)
-/// are easy to tell apart.
-///
-/// Slot conventions, so every theme reads the same way: unread = orange,
-/// read = teal/green, skipped = purple, saved = yellow, breaking = red,
-/// selected = blue (or the theme's signature accent).
-pub const BUILTIN_THEMES: &[BuiltinTheme] = &[
-    // https://github.com/sainnhe/everforest (dark, medium contrast)
-    BuiltinTheme {
-        name: "Everforest",
-        colors: Theme {
-            background: rgb(0x2d353b),
-            panel_border: rgb(0x475258),
-            text_primary: rgb(0xd3c6aa),
-            text_muted: rgb(0x859289),
-            text_dim: rgb(0x56635f),
-            accent_unread: rgb(0xe69875),
-            accent_read: rgb(0x83c092),
-            accent_skipped: rgb(0xd699b6),
-            accent_saved: rgb(0xdbbc7f),
-            accent_breaking: rgb(0xe67e80),
-            accent_selected: rgb(0x7fbbb3),
-        },
-    },
-    // https://draculatheme.com/contribute
-    BuiltinTheme {
-        name: "Dracula",
-        colors: Theme {
-            background: rgb(0x282a36),
-            panel_border: rgb(0x44475a),
-            text_primary: rgb(0xf8f8f2),
-            text_muted: rgb(0x6272a4),
-            text_dim: rgb(0x44475a),
-            accent_unread: rgb(0xffb86c),
-            accent_read: rgb(0x8be9fd),
-            accent_skipped: rgb(0xbd93f9),
-            accent_saved: rgb(0xf1fa8c),
-            accent_breaking: rgb(0xff5555),
-            accent_selected: rgb(0xff79c6),
-        },
-    },
-    // https://github.com/morhetz/gruvbox (dark, medium)
-    BuiltinTheme {
-        name: "Gruvbox",
-        colors: Theme {
-            background: rgb(0x282828),
-            panel_border: rgb(0x504945),
-            text_primary: rgb(0xebdbb2),
-            text_muted: rgb(0x928374),
-            text_dim: rgb(0x665c54),
-            accent_unread: rgb(0xfe8019),
-            accent_read: rgb(0x8ec07c),
-            accent_skipped: rgb(0xd3869b),
-            accent_saved: rgb(0xfabd2f),
-            accent_breaking: rgb(0xfb4934),
-            accent_selected: rgb(0x83a598),
-        },
-    },
-    // https://catppuccin.com/palette (Mocha flavor)
-    BuiltinTheme {
-        name: "Catppuccin Mocha",
-        colors: Theme {
-            background: rgb(0x1e1e2e),
-            panel_border: rgb(0x313244),
-            text_primary: rgb(0xcdd6f4),
-            text_muted: rgb(0x6c7086),
-            text_dim: rgb(0x45475a),
-            accent_unread: rgb(0xfab387),
-            accent_read: rgb(0x94e2d5),
-            accent_skipped: rgb(0xcba6f7),
-            accent_saved: rgb(0xf9e2af),
-            accent_breaking: rgb(0xf38ba8),
-            accent_selected: rgb(0x89b4fa),
-        },
-    },
-    // https://www.nordtheme.com/docs/colors-and-palettes
-    //
-    // `accent_read` is nord14 (green), not nord7 (`#8fbcbb`): nord7 is
-    // almost the same color as nord8, used for `accent_selected`, so read
-    // titles and key labels blurred together. This is the same kind of
-    // Nord near-match zerohour hit; `state_colors_are_distinct_in_every_theme`
-    // below catches it.
-    BuiltinTheme {
-        name: "Nord",
-        colors: Theme {
-            background: rgb(0x2e3440),
-            panel_border: rgb(0x434c5e),
-            text_primary: rgb(0xd8dee9),
-            text_muted: rgb(0x7b88a1),
-            text_dim: rgb(0x4c566a),
-            accent_unread: rgb(0xd08770),
-            accent_read: rgb(0xa3be8c),
-            accent_skipped: rgb(0xb48ead),
-            accent_saved: rgb(0xebcb8b),
-            accent_breaking: rgb(0xbf616a),
-            accent_selected: rgb(0x88c0d0),
-        },
-    },
-    // https://ethanschoonover.com/solarized/ (dark)
-    BuiltinTheme {
-        name: "Solarized Dark",
-        colors: Theme {
-            background: rgb(0x002b36),
-            panel_border: rgb(0x586e75),
-            text_primary: rgb(0x93a1a1),
-            text_muted: rgb(0x657b83),
-            text_dim: rgb(0x586e75),
-            accent_unread: rgb(0xcb4b16),
-            accent_read: rgb(0x2aa198),
-            accent_skipped: rgb(0x6c71c4),
-            accent_saved: rgb(0xb58900),
-            accent_breaking: rgb(0xdc322f),
-            accent_selected: rgb(0x268bd2),
-        },
-    },
-    // https://github.com/folke/tokyonight.nvim (night)
-    BuiltinTheme {
-        name: "Tokyo Night",
-        colors: Theme {
-            background: rgb(0x1a1b26),
-            panel_border: rgb(0x3b4261),
-            text_primary: rgb(0xc0caf5),
-            text_muted: rgb(0x737aa2),
-            text_dim: rgb(0x565f89),
-            accent_unread: rgb(0xff9e64),
-            accent_read: rgb(0x73daca),
-            accent_skipped: rgb(0xbb9af7),
-            accent_saved: rgb(0xe0af68),
-            accent_breaking: rgb(0xf7768e),
-            accent_selected: rgb(0x7aa2f7),
-        },
-    },
-    // https://catppuccin.com/palette (Macchiato flavor). tuxwire's original
-    // and only palette before built-in themes existed, with exactly the
-    // colors the old `theme.toml.example` shipped.
-    BuiltinTheme {
-        name: "Catppuccin Macchiato",
-        colors: Theme {
-            background: rgb(0x24273a),
-            panel_border: rgb(0x363a4f),
-            text_primary: rgb(0xcad3f5),
-            text_muted: rgb(0x6e738d),
-            text_dim: rgb(0x494d64),
-            accent_unread: rgb(0xf5a97f),
-            accent_read: rgb(0x8bd5ca),
-            accent_skipped: rgb(0xc6a0f6),
-            accent_saved: rgb(0xeed49f),
-            accent_breaking: rgb(0xed8796),
-            accent_selected: rgb(0x8aadf4),
-        },
-    },
-];
-
-/// The position of the built-in theme called `name` in [`BUILTIN_THEMES`],
-/// ignoring upper/lower case, or `None` if there's no such theme.
-///
-/// `.iter().position(...)` walks the table and returns the index of the
-/// first entry the closure says `true` for. `eq_ignore_ascii_case` compares
-/// two strings while treating `A` and `a` as equal.
-pub fn builtin_index(name: &str) -> Option<usize> {
-    BUILTIN_THEMES
-        .iter()
-        .position(|theme| theme.name.eq_ignore_ascii_case(name.trim()))
-}
-
-/// The index in [`BUILTIN_THEMES`] of the default theme, found by its name
-/// ([`DEFAULT_THEME`]) rather than assumed to be `0`.
-///
-/// `.expect(...)` unwraps the `Option`, and would panic with that message
-/// if `DEFAULT_THEME` named a theme that isn't in the table. That can only
-/// happen through a code edit, never through user config, and the test
-/// `default_is_everforest_by_name_not_by_position` fails first if it does.
-pub fn default_index() -> usize {
-    builtin_index(DEFAULT_THEME).expect("DEFAULT_THEME must name an entry in BUILTIN_THEMES")
-}
-
-/// The order the `t` picker lists the built-in themes in: indices into
-/// [`BUILTIN_THEMES`], sorted alphabetically by name, ignoring case.
-///
-/// Returning indices (not the themes themselves) lets the picker keep
-/// storing "which theme" as a `BUILTIN_THEMES` index, the same thing
-/// `ThemeSettings::base` holds, so the sort only affects display.
-///
-/// `(0..len).collect()` builds the list `[0, 1, 2, ...]`. Then
-/// `sort_by_key` reorders it by a key computed per element, here each
-/// theme's name in lowercase, so `"catppuccin"` and `"Catppuccin"` sort
-/// alike. Allocating a fresh 8-item `Vec` on every call is negligible.
-pub fn picker_order() -> Vec<usize> {
-    let mut order: Vec<usize> = (0..BUILTIN_THEMES.len()).collect();
-    order.sort_by_key(|&index| BUILTIN_THEMES[index].name.to_lowercase());
-    order
+/// `impl From<A> for B` teaches Rust how to turn an `A` into a `B`; after
+/// that, `Theme::from(palette)` or `palette.into()` both work. It is the
+/// idiomatic way to say "this conversion always succeeds".
+impl From<Palette> for Theme {
+    /// Converts every slot of a core palette to a ratatui colour.
+    fn from(p: Palette) -> Theme {
+        Theme {
+            background: to_color(p.background),
+            panel_border: to_color(p.panel_border),
+            text_primary: to_color(p.text_primary),
+            text_muted: to_color(p.text_muted),
+            text_dim: to_color(p.text_dim),
+            accent_unread: to_color(p.accent_unread),
+            accent_read: to_color(p.accent_read),
+            accent_skipped: to_color(p.accent_skipped),
+            accent_saved: to_color(p.accent_saved),
+            accent_breaking: to_color(p.accent_breaking),
+            accent_selected: to_color(p.accent_selected),
+        }
+    }
 }
 
 /// The user's theme choice, loaded from `theme.toml`: which built-in to
@@ -504,7 +296,7 @@ impl ThemeSettings {
     /// otherwise the built-in's color that was already there.
     pub fn resolve(&self) -> Theme {
         let o = &self.overrides;
-        let mut theme = BUILTIN_THEMES[self.base].colors;
+        let mut theme = Theme::from(BUILTIN_THEMES[self.base].colors);
         theme.background = o.background.unwrap_or(theme.background);
         theme.panel_border = o.panel_border.unwrap_or(theme.panel_border);
         theme.text_primary = o.text_primary.unwrap_or(theme.text_primary);
@@ -607,41 +399,18 @@ fn save_base_at(path: &Path, name: &str) -> anyhow::Result<()> {
 /// loading, and otherwise you get the `Option` back.
 fn parse_slot(value: Option<String>, key: &str) -> anyhow::Result<Option<Color>> {
     value
-        .map(|hex| hex_to_color(&hex).with_context(|| key.to_string()))
+        .map(|hex| {
+            Rgb::from_hex_str(&hex)
+                .map(to_color)
+                .with_context(|| key.to_string())
+        })
         .transpose()
-}
-
-/// Parses a `"#rrggbb"` string (the `"#"` is optional) into
-/// `Color::Rgb(r, g, b)`. ratatui's `Color` enum has named variants for
-/// basic terminal colors (`Color::Red`, etc.), but theme palettes need
-/// exact 24-bit values, which is what the `Rgb` variant is for.
-///
-/// `u8::from_str_radix(s, 16)` parses a string as a base-16 (hexadecimal)
-/// number into a `u8` — "radix" is the general term for a number base, and
-/// `16` is what makes this hex rather than the usual base-10 `str::parse`
-/// would assume.
-fn hex_to_color(hex: &str) -> anyhow::Result<Color> {
-    let hex = hex.strip_prefix('#').unwrap_or(hex);
-
-    // The `is_ascii` check matters for the byte slicing below: `&hex[0..2]`
-    // slices by *byte* position, and slicing through the middle of a
-    // multi-byte character (say, `"€€"`, which is also 6 bytes) panics.
-    // Requiring ASCII first means every byte is a whole character.
-    if hex.len() != 6 || !hex.is_ascii() {
-        bail!("expected a 6-digit hex color like \"#8aadf4\", got {hex:?}");
-    }
-
-    let r = u8::from_str_radix(&hex[0..2], 16).context("invalid red channel")?;
-    let g = u8::from_str_radix(&hex[2..4], 16).context("invalid green channel")?;
-    let b = u8::from_str_radix(&hex[4..6], 16).context("invalid blue channel")?;
-
-    Ok(Color::Rgb(r, g, b))
 }
 
 /// The full path to the user's theme config: `~/.config/tuxwire/theme.toml`,
 /// per ARCHITECTURE.md's "Config lives separately at `~/.config/tuxwire/`".
 ///
-/// This mirrors `storage::data_dir`'s reasoning almost exactly (see that
+/// This mirrors `paths::data_dir`'s reasoning almost exactly (see that
 /// function's doc comment for the full explanation of why no `dirs` crate
 /// is used) — same XDG-fallback pattern, just for `$XDG_CONFIG_HOME`
 /// instead of `$XDG_DATA_HOME`, since config and data are two different
@@ -662,6 +431,8 @@ fn theme_path() -> anyhow::Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Only the tests below need the default theme's name.
+    use tuxwire_core::theme::DEFAULT_THEME;
 
     /// The old bundled default (Catppuccin Macchiato, one full `[theme]`
     /// table and no `base`), exactly as `theme.toml.example` shipped before
@@ -680,76 +451,6 @@ accent_saved    = "#eed49f"
 accent_breaking = "#ed8796"
 accent_selected = "#8aadf4"
 "##;
-
-    /// The red, green, and blue bytes of a theme color. Every built-in uses
-    /// `Color::Rgb`, so anything else is a bug in the table.
-    fn channels(color: Color) -> (u8, u8, u8) {
-        match color {
-            Color::Rgb(r, g, b) => (r, g, b),
-            other => panic!("expected an Rgb color, got {other:?}"),
-        }
-    }
-
-    /// One sRGB channel (0–255) converted to linear light (0.0–1.0). This
-    /// is the standard sRGB "gamma" curve, needed because screen values
-    /// aren't proportional to actual brightness.
-    fn linear(channel: u8) -> f64 {
-        let c = channel as f64 / 255.0;
-        if c <= 0.04045 {
-            c / 12.92
-        } else {
-            ((c + 0.055) / 1.055).powf(2.4)
-        }
-    }
-
-    /// WCAG relative luminance: how bright a color looks, 0.0 (black) to
-    /// 1.0 (white). Green weighs most because eyes are most sensitive to it.
-    fn luminance(color: Color) -> f64 {
-        let (r, g, b) = channels(color);
-        0.2126 * linear(r) + 0.7152 * linear(g) + 0.0722 * linear(b)
-    }
-
-    /// WCAG contrast ratio between two colors: 1.0 (identical) to 21.0
-    /// (black on white). Text needs 4.5 to pass WCAG AA, and large text or
-    /// UI elements need 3.0.
-    fn contrast(a: Color, b: Color) -> f64 {
-        let (la, lb) = (luminance(a), luminance(b));
-        // `f64::max`/`min` pick the brighter and darker of the two, so the
-        // order the colors are passed in doesn't matter.
-        (la.max(lb) + 0.05) / (la.min(lb) + 0.05)
-    }
-
-    /// A color in CIE L*a*b*, a color space where straight-line distance
-    /// roughly matches how different two colors *look*. Raw RGB distance
-    /// doesn't: two blues can be far apart in RGB yet look nearly identical.
-    fn lab(color: Color) -> (f64, f64, f64) {
-        let (r, g, b) = channels(color);
-        let (r, g, b) = (linear(r), linear(g), linear(b));
-        // sRGB → CIE XYZ (D65 white point), each divided by the white
-        // point's own X/Y/Z so white comes out as (1, 1, 1).
-        let x = (0.4124 * r + 0.3576 * g + 0.1805 * b) / 0.95047;
-        let y = 0.2126 * r + 0.7152 * g + 0.0722 * b;
-        let z = (0.0193 * r + 0.1192 * g + 0.9505 * b) / 1.08883;
-        // The Lab curve: a cube root, with a straight-line piece near black.
-        let f = |t: f64| {
-            if t > 0.008856 {
-                t.cbrt()
-            } else {
-                7.787 * t + 16.0 / 116.0
-            }
-        };
-        let (fx, fy, fz) = (f(x), f(y), f(z));
-        (116.0 * fy - 16.0, 500.0 * (fx - fy), 200.0 * (fy - fz))
-    }
-
-    /// CIE76 ΔE: the Lab distance between two colors. Around 2.3 is the
-    /// smallest difference most people can see; 20+ is "clearly different
-    /// colors at a glance", which is the bar the tests below use.
-    fn delta_e(a: Color, b: Color) -> f64 {
-        let (l1, a1, b1) = lab(a);
-        let (l2, a2, b2) = lab(b);
-        ((l1 - l2).powi(2) + (a1 - a2).powi(2) + (b1 - b2).powi(2)).sqrt()
-    }
 
     /// The default is Everforest, found by name, and the alphabetical
     /// picker order has nothing to do with it. Every path that yields "the
@@ -784,162 +485,16 @@ accent_selected = "#8aadf4"
         );
     }
 
-    /// The picker lists every built-in exactly once, in case-insensitive
-    /// alphabetical order by name.
-    #[test]
-    fn picker_order_is_alphabetical() {
-        let order = picker_order();
-
-        // Every theme appears exactly once: same length as the table, and
-        // no index repeated (a `HashSet` drops duplicates).
-        assert_eq!(order.len(), BUILTIN_THEMES.len());
-        let unique: std::collections::HashSet<usize> = order.iter().copied().collect();
-        assert_eq!(unique.len(), order.len());
-
-        // Each name is <= the next one, compared in lowercase.
-        // `.windows(2)` walks overlapping pairs: (0,1), (1,2), ...
-        let names: Vec<String> = order
-            .iter()
-            .map(|&index| BUILTIN_THEMES[index].name.to_lowercase())
-            .collect();
-        for pair in names.windows(2) {
-            assert!(pair[0] <= pair[1], "{} sorts after {}", pair[0], pair[1]);
-        }
-
-        // Spelled out, so a reader sees the actual picker order.
-        let display: Vec<&str> = order
-            .iter()
-            .map(|&index| BUILTIN_THEMES[index].name)
-            .collect();
-        assert_eq!(
-            display,
-            [
-                "Catppuccin Macchiato",
-                "Catppuccin Mocha",
-                "Dracula",
-                "Everforest",
-                "Gruvbox",
-                "Nord",
-                "Solarized Dark",
-                "Tokyo Night",
-            ]
-        );
-    }
-
-    /// All eight built-in themes exist, with no duplicate names.
-    #[test]
-    fn all_eight_themes_exist_with_unique_names() {
-        for expected in [
-            "Everforest",
-            "Dracula",
-            "Gruvbox",
-            "Catppuccin Mocha",
-            "Nord",
-            "Solarized Dark",
-            "Tokyo Night",
-            "Catppuccin Macchiato",
-        ] {
-            assert!(
-                builtin_index(expected).is_some(),
-                "missing theme {expected}"
-            );
-        }
-        let mut names: Vec<String> = BUILTIN_THEMES
-            .iter()
-            .map(|t| t.name.to_lowercase())
-            .collect();
-        let total = names.len();
-        names.sort();
-        names.dedup();
-        assert_eq!(names.len(), total, "duplicate theme names");
-    }
-
-    /// Lookup ignores case and surrounding spaces, and unknown names give
-    /// `None`.
-    #[test]
-    fn builtin_lookup_is_case_insensitive() {
-        assert_eq!(builtin_index("nord"), builtin_index("Nord"));
-        assert_eq!(
-            builtin_index(" TOKYO NIGHT ").map(|i| BUILTIN_THEMES[i].name),
-            Some("Tokyo Night")
-        );
-        assert_eq!(builtin_index("Monokai"), None);
-    }
-
-    /// Text and every accent stand out from the background in every theme,
-    /// using WCAG contrast: primary text ≥ 4.5 (AA for body text); muted
-    /// text and accents ≥ 3.0 (AA for large text/UI, and accents are titles
-    /// and highlights). `accent_selected` also covers the highlighted row,
-    /// which draws `background`-colored text *on* `accent_selected`, the
-    /// same pair. Borders and dim text only need to be visible (≥ 1.25 and
-    /// ≥ 1.5), since they're meant to recede.
-    #[test]
-    fn text_and_accents_contrast_with_background_in_every_theme() {
-        for builtin in BUILTIN_THEMES {
-            let t = &builtin.colors;
-            let bg = t.background;
-            let checks = [
-                ("text_primary", t.text_primary, 4.5),
-                ("text_muted", t.text_muted, 3.0),
-                ("accent_unread", t.accent_unread, 3.0),
-                ("accent_read", t.accent_read, 3.0),
-                ("accent_skipped", t.accent_skipped, 3.0),
-                ("accent_saved", t.accent_saved, 3.0),
-                ("accent_breaking", t.accent_breaking, 3.0),
-                ("accent_selected", t.accent_selected, 3.0),
-                ("panel_border", t.panel_border, 1.25),
-                ("text_dim", t.text_dim, 1.5),
-            ];
-            for (slot, color, minimum) in checks {
-                let ratio = contrast(color, bg);
-                assert!(
-                    ratio >= minimum,
-                    "{}: {slot} vs background contrast {ratio:.2} < {minimum}",
-                    builtin.name
-                );
-            }
-        }
-    }
-
-    /// The four article-state colors (and `accent_selected`, which colors
-    /// key labels right next to them in the sidebar) are clearly different
-    /// from each other in every theme. Nord's nord7/nord8 pair (ΔE ≈ 10)
-    /// failed this before `accent_read` moved to nord14.
-    #[test]
-    fn state_colors_are_distinct_in_every_theme() {
-        for builtin in BUILTIN_THEMES {
-            let t = &builtin.colors;
-            let slots = [
-                ("unread", t.accent_unread),
-                ("read", t.accent_read),
-                ("skipped", t.accent_skipped),
-                ("saved", t.accent_saved),
-                ("selected", t.accent_selected),
-            ];
-            // Every pair once: `i` walks the list, `j` only the entries
-            // after it, so (a, b) is checked but (b, a) isn't repeated.
-            for i in 0..slots.len() {
-                for j in (i + 1)..slots.len() {
-                    let (name_a, a) = slots[i];
-                    let (name_b, b) = slots[j];
-                    let distance = delta_e(a, b);
-                    assert!(
-                        distance >= 20.0,
-                        "{}: {name_a} and {name_b} are too similar (ΔE {distance:.1})",
-                        builtin.name
-                    );
-                }
-            }
-        }
-    }
-
     /// The bundled example selects the default theme with no overrides.
     #[test]
     fn bundled_default_is_everforest_without_overrides() {
         let settings = ThemeSettings::parse(DEFAULT_THEME_TOML).unwrap();
         assert_eq!(settings.base_name(), DEFAULT_THEME);
         assert_eq!(settings.override_count(), 0);
-        assert_eq!(settings.resolve(), BUILTIN_THEMES[default_index()].colors);
+        assert_eq!(
+            settings.resolve(),
+            Theme::from(BUILTIN_THEMES[default_index()].colors)
+        );
     }
 
     /// `base` picks the built-in, case-insensitively.
@@ -947,7 +502,7 @@ accent_selected = "#8aadf4"
     fn base_selects_builtin() {
         let settings = ThemeSettings::parse(r#"base = "dracula""#).unwrap();
         assert_eq!(settings.base_name(), "Dracula");
-        assert_eq!(settings.resolve(), BUILTIN_THEMES[1].colors);
+        assert_eq!(settings.resolve(), Theme::from(BUILTIN_THEMES[1].colors));
     }
 
     /// A pre-picker `theme.toml` still loads, and looks exactly as before:
@@ -965,7 +520,7 @@ accent_selected = "#8aadf4"
         // user can delete their 11 override lines, pick Macchiato, and see
         // no difference at all.
         let macchiato = builtin_index("Catppuccin Macchiato").unwrap();
-        assert_eq!(theme, BUILTIN_THEMES[macchiato].colors);
+        assert_eq!(theme, Theme::from(BUILTIN_THEMES[macchiato].colors));
     }
 
     /// A partial `[theme]` table overrides only the slots it sets, and those
@@ -985,12 +540,18 @@ accent_selected = "#8aadf4"
 
         let gruvbox = settings.resolve();
         assert_eq!(gruvbox.accent_unread, Color::Rgb(0xff, 0, 0));
-        assert_eq!(gruvbox.background, BUILTIN_THEMES[2].colors.background);
+        assert_eq!(
+            gruvbox.background,
+            to_color(BUILTIN_THEMES[2].colors.background)
+        );
 
         settings.base = builtin_index("Nord").unwrap();
         let nord = settings.resolve();
         assert_eq!(nord.accent_unread, Color::Rgb(0xff, 0, 0));
-        assert_eq!(nord.background, BUILTIN_THEMES[4].colors.background);
+        assert_eq!(
+            nord.background,
+            to_color(BUILTIN_THEMES[4].colors.background)
+        );
     }
 
     /// An unknown `base` and a bad hex color are errors that name the
@@ -1006,23 +567,6 @@ accent_selected = "#8aadf4"
 
         let err = ThemeSettings::parse("[theme]\naccent_read = \"#12345\"").unwrap_err();
         assert!(format!("{err:#}").contains("theme.accent_read"), "{err:#}");
-    }
-
-    /// `hex_to_color` accepts with or without `#`, and rejects non-ASCII
-    /// input instead of panicking on a mid-character slice.
-    #[test]
-    fn hex_parsing() {
-        assert_eq!(
-            hex_to_color("#2d353b").unwrap(),
-            Color::Rgb(0x2d, 0x35, 0x3b)
-        );
-        assert_eq!(
-            hex_to_color("2d353b").unwrap(),
-            Color::Rgb(0x2d, 0x35, 0x3b)
-        );
-        assert!(hex_to_color("€€").is_err());
-        assert!(hex_to_color("#zzzzzz").is_err());
-        assert_eq!(rgb(0x2d353b), Color::Rgb(0x2d, 0x35, 0x3b));
     }
 
     /// A per-test temporary path, same hand-rolled approach as

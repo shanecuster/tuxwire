@@ -12,45 +12,14 @@ use anyhow::{Context, anyhow};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
-/// Which concrete fetcher a `[[source]]` entry's `type = "..."` names.
-///
-/// Per ARCHITECTURE.md's own `sources.toml` example, `"rss"` and
-/// `"reddit"` are both valid values a user can type today -- but only RSS
-/// actually fetches anything yet (see `fetchers::reddit`). Modeling this as
-/// an `enum` rather than leaving `source_type` a bare `String` means an
-/// entry like `type = "atom-ish-typo"` is caught right here, at config
-/// *parse* time, with serde's own "unknown variant" message naming the bad
-/// value -- instead of surviving as a `String` that every later piece of
-/// code would have to re-validate (or silently mishandle) on its own.
-///
-/// `#[serde(rename_all = "lowercase")]` is what makes `Rss`/`Reddit` (the
-/// idiomatic Rust `PascalCase` for enum variants) match the lowercase
-/// `"rss"`/`"reddit"` strings actually written in the TOML file, without
-/// needing a `#[serde(rename = "...")]` on each variant individually.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum SourceType {
-    Rss,
-    Reddit,
-}
-
-/// One fully-validated `[[source]]` entry: every field guaranteed present
-/// and non-empty by the time anything outside this module sees it.
-///
-/// This is a *different* type from `RawSource` below for the same reason
-/// `theme.rs`'s `Theme` is a different type from its `RawTheme` -- `serde`
-/// deserializes into a shape that can represent "this field was missing"
-/// (via `Option`), and `validate` below is what turns that into either a
-/// clear error or a type where every field is simply, unconditionally
-/// there, so no caller downstream ever has to think about a source with a
-/// missing `topic` again.
-#[derive(Debug, Clone)]
-pub struct SourceConfig {
-    pub name: String,
-    pub source_type: SourceType,
-    pub url: String,
-    pub topic: String,
-}
+// `SourceType` and `SourceConfig` now live in the shared `tuxwire-core` crate,
+// because the Android app needs to describe sources too (it just reads them
+// from a database instead of this TOML file). They are re-exported here with
+// `pub use` so the rest of the terminal app can keep saying
+// `fetchers::config::SourceType` exactly as before. This file is left with
+// the part that really is terminal-specific: finding, reading, validating and
+// editing `sources.toml` on disk.
+pub use tuxwire_core::fetchers::{SourceConfig, SourceType};
 
 /// The raw shape `sources.toml` deserializes into: one `Vec<RawSource>`
 /// per repeated `[[source]]` block -- TOML's syntax for "an array of
@@ -204,7 +173,7 @@ pub fn load_sources_at(path: &Path, create_if_missing: bool) -> anyhow::Result<V
 /// The full path to the user's sources config: `~/.config/tuxwire/sources.toml`,
 /// per ARCHITECTURE.md's "Config lives separately at `~/.config/tuxwire/`".
 ///
-/// Mirrors `theme::theme_path`/`storage::data_dir` exactly -- same
+/// Mirrors `theme::theme_path`/`paths::data_dir` exactly -- same
 /// XDG-fallback pattern (`$XDG_CONFIG_HOME`, falling back to
 /// `$HOME/.config`), just one more filename joined onto the same
 /// `tuxwire` config directory those two already agree on.

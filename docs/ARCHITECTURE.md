@@ -89,7 +89,7 @@ skip_weights
 
 #### Migrations
 
-Every schema change ships as a numbered SQL file in `migrations/`
+Every schema change ships as a numbered SQL file in `core/migrations/`
 (e.g. `002_add_priority.sql`). On startup, tuxwire checks how many
 migrations have already run (`PRAGMA user_version` or a small
 migrations-log table) and applies any new ones, in order, automatically.
@@ -261,8 +261,10 @@ dedicated CVE/security feed, KrebsOnSecurity).
 All colors are config-driven — never hardcoded in the UI code — so any
 shade can be tweaked without touching Rust.
 
-**Built-in themes + overrides (built).** `src/theme.rs` holds
-`BUILTIN_THEMES`, one table entry per theme: Everforest (default), then
+**Built-in themes + overrides (built).** `core/src/theme.rs` holds
+`BUILTIN_THEMES` (plain RGB values, shared with the Android app), one table
+entry per theme; `tui/src/theme.rs` turns them into ratatui colors and reads
+`theme.toml`. The themes: Everforest (default), then
 Dracula, Gruvbox, Catppuccin Mocha, Nord, Solarized Dark, Tokyo Night, and
 Catppuccin Macchiato. Each fills the same 11 slots below; no new slots were
 needed. `theme.toml` gains a root `base = "<name>"` (written by the `t`
@@ -318,9 +320,9 @@ the eight built-ins, and Everforest is the default. All built-ins are dark.
 ### `icons.toml` (built)
 
 Same idea as colors, applied to symbols: every icon is config-driven and
-never hard-coded in UI code. `src/icons/mod.rs` holds the one icon table,
+never hard-coded in UI code. `core/src/icons/mod.rs` holds the one icon table,
 `Icon` name → (Nerd Font glyph, Unicode fallback, ASCII fallback). The UI
-asks an `IconSettings` for an icon by name. `src/icons/config.rs` reads and
+asks an `IconSettings` for an icon by name. `tui/src/icons/config.rs` reads and
 writes `~/.config/tuxwire/icons.toml`. Modeled on zerohour's
 `core/src/icons.rs`.
 
@@ -341,7 +343,7 @@ writes `~/.config/tuxwire/icons.toml`. Modeled on zerohour's
   icon here?" `y` keeps Nerd, `n` switches to Unicode, and either answer
   writes the file. `Esc` defers the question to the next launch.
 - **"New" items:** an article inserted during this session (startup fetch
-  or `r`) that is still unread. Detected in `src/fetch_report.rs` by the
+  or `r`) that is still unread. Detected in `core/src/fetch_report.rs` by the
   `articles` row count growing across `insert_article`, so `storage` is
   unchanged.
 - **Status notices:** `r` and startup report new/failed/offline in a
@@ -350,7 +352,7 @@ writes `~/.config/tuxwire/icons.toml`. Modeled on zerohour's
 
 ### `lists.toml` — multiple feed lists (built)
 
-Optional `~/.config/tuxwire/lists.toml` (`src/feedlists/`, ratatui-free)
+Optional `~/.config/tuxwire/lists.toml` (`tui/src/feedlists/`, ratatui-free)
 defines named feed lists, each a file in the `sources.toml` format, with
 `active = "<name>"` remembering the last one picked (`f`), saved via
 `toml_edit`. Paths: absolute, `~/...`, or relative to the `lists.toml`
@@ -449,33 +451,54 @@ struct Article {
 
 ---
 
-## Project Layout (proposed)
+## Project Layout
+
+The repository is a Cargo **workspace** of two crates. `core/` is the shared
+engine with no terminal code in it; `tui/` is the terminal program. A native
+Android app (a separate, private repository, `tuxwire-android`) uses `core/`
+too, through a thin UniFFI wrapper, so fetching, parsing, storage, themes and
+icons are written once.
 
 ```
 tuxwire/
-├── src/
-│   ├── main.rs
-│   ├── fetchers/        # one module per source type
-│   ├── storage/         # SQLite access + migrations
-│   ├── scoring.rs        # reserved for v2 skip-weighting (unused in v1)
-│   ├── theme.rs           # built-in themes + theme.toml loading/saving
-│   ├── icons/             # the icon table + icons.toml loading
-│   ├── fetch_report.rs    # per-fetch new/failed/offline tally
-│   ├── feedlists/         # lists.toml + active-list choice/switching (ratatui-free)
-│   ├── paths.rs           # ~ abbreviation for displayed paths (ratatui-free)
-│   └── ui/                # ratatui views/widgets
-├── migrations/
-│   └── 001_init.sql
+├── Cargo.toml             # workspace root: members + shared dependency versions
+├── core/                  # crate `tuxwire-core` -- NO ratatui/crossterm, NO $HOME
+│   ├── Cargo.toml
+│   ├── migrations/        # numbered SQL files (next: 006)
+│   └── src/
+│       ├── lib.rs
+│       ├── models.rs      # Article
+│       ├── storage/       # SQLite access + migrations (Storage::open_at(path))
+│       ├── fetchers/      # Fetcher trait, RSS, Reddit stub, SourceConfig
+│       ├── fetch_report.rs# per-fetch new/failed/offline tally
+│       ├── icons/         # the icon table (Icon, IconMode, IconSettings)
+│       ├── theme.rs       # Rgb, Palette, the eight built-in palettes
+│       └── scoring.rs     # reserved for v2 skip-weighting (unused in v1)
+├── tui/                   # crate `tuxwire` -- the terminal program (binary)
+│   ├── Cargo.toml
+│   ├── *.toml.example     # bundled default configs
+│   └── src/
+│       ├── main.rs
+│       ├── ui/            # ratatui views/widgets
+│       ├── theme.rs       # Theme (ratatui Colors) + theme.toml loading/saving
+│       ├── fetchers/      # sources.toml loading/validation/editing
+│       ├── icons/         # icons.toml loading/saving
+│       ├── feedlists/     # lists.toml + active-list choice/switching
+│       ├── export.rs      # Markdown export of saved articles
+│       └── paths.rs       # where the database lives (XDG) + ~ abbreviation
 ├── docs/
-│   ├── ARCHITECTURE.md    # this file
-│   └── ADDING_A_SOURCE.md
-├── CHANGELOG.md            # git-commit / changelog style, matches blog aesthetic
-├── sources.toml.example
-├── theme.toml.example
-├── icons.toml.example
-├── lists.toml.example
-└── Cargo.toml
+│   └── ARCHITECTURE.md    # this file
+├── CHANGELOG.md           # git-commit / changelog style, matches blog aesthetic
+└── NOTES.md
 ```
+
+**The rule between the two crates:** `core/` never decides where a file lives
+and never touches a terminal. The program using it passes paths in
+(`Storage::open_at`), and turns core's plain data (`Rgb`, `SourceConfig`)
+into whatever its own toolkit needs (ratatui `Color`s here, Compose colors on
+Android). The terminal's file-based config (`sources.toml`, `lists.toml`,
+`theme.toml`, `icons.toml`, `export.toml`) stays in `tui/`; the Android app
+keeps its feeds and settings in the database instead.
 
 ---
 
@@ -770,7 +793,9 @@ not merged into master until it's genuinely liked:**
   shelling out to `$EDITOR` for real Vim; likely support both, config-toggled
 - Whether the "Saved" view is a pseudo-topic in the sidebar or a separate pane
 - Custom fetchers for any source without RSS
-- Possible future: syncing the SQLite db via rclone across machines
+- Optional sync of read state, saved articles and notes to a user's own CouchDB,
+  off by default and tucked away in settings (planned, built for the Android
+  app first; saved articles and notes are otherwise local-only)
 - Offline caching strategy: cache-on-fetch vs. cache-on-save/open
 - Export location/config for Markdown export — likely an `export.toml`
 - Duplicate article detection across sources (same story, multiple sites —

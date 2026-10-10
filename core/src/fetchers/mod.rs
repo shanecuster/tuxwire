@@ -7,6 +7,7 @@
 //! submodule (starting with `rss`) provides one implementation of it.
 
 use crate::models::Article;
+use serde::Deserialize;
 
 /// The one thing every source type has to be able to do: go fetch its
 /// articles and hand back a normalized `Vec<Article>`.
@@ -51,6 +52,16 @@ use crate::models::Article;
 /// together). We don't need that yet with a single fetcher implementation
 /// — it'll be revisited (likely by boxing the returned `Future`) once a
 /// second source type needs to run alongside this one.
+//
+// `#[allow(async_fn_in_trait)]` silences a compiler lint that appears because
+// this trait is now `pub` in a library crate. The lint's worry: code that is
+// *generic* over `Fetcher` cannot assume the returned `Future` is `Send`
+// (safe to move to another thread), because the trait does not promise it.
+// That does not affect us: every caller works with the concrete
+// `ConfiguredSource` type, where the compiler can see the real future and
+// knows it is `Send`. If we ever need generic, thread-moving code, the fix is
+// to rewrite `fetch` as a plain `fn` returning `impl Future + Send`.
+#[allow(async_fn_in_trait)]
 pub trait Fetcher {
     /// Fetch this source's current articles.
     ///
@@ -67,20 +78,75 @@ pub trait Fetcher {
 }
 
 // One submodule per source type, per the module layout in
-// ARCHITECTURE.md ("fetchers/ — one module per source type"). `rss`
+// ARCHITECTURE.md ("fetchers/ -- one module per source type"). `rss`
 // covers both RSS and Atom feeds, since `feed-rs` (see Cargo.toml) parses
-// both into one shape — from the app's perspective they're the same
-// source type. `reddit` is a placeholder (see its module doc comment) --
-// `config` is the `sources.toml` loader/validator, not a source type
-// itself, but lives here rather than as a top-level module since it only
-// exists to produce the values this module hands out.
-pub mod config;
+// both into one shape -- from the app's perspective they're the same
+// source type. `reddit` is a placeholder (see its module doc comment).
+//
+// Reading `sources.toml` from disk is NOT done here any more: that is a
+// terminal-app concern (an Android app keeps its feeds in the database), so
+// the TOML loader lives in the `tui` crate and hands this module plain
+// `SourceConfig` values.
 pub mod reddit;
 pub mod rss;
 
+/// Which concrete fetcher a source's `type` names.
+///
+/// `"rss"` and `"reddit"` are both valid values a user can type in
+/// `sources.toml` today -- but only RSS actually fetches anything yet (see
+/// `fetchers::reddit`). Modeling this as an `enum` rather than leaving
+/// `source_type` a bare `String` means an entry like `type =
+/// "atom-ish-typo"` is caught right at config *parse* time, with serde's own
+/// "unknown variant" message naming the bad value -- instead of surviving as
+/// a `String` that every later piece of code would have to re-validate (or
+/// silently mishandle) on its own.
+///
+/// `#[serde(rename_all = "lowercase")]` is what makes `Rss`/`Reddit` (the
+/// idiomatic Rust `PascalCase` for enum variants) match the lowercase
+/// `"rss"`/`"reddit"` strings actually written in the TOML file, without
+/// needing a `#[serde(rename = "...")]` on each variant individually.
+///
+/// This type lives in the shared core crate (rather than next to the TOML
+/// loader) because every program that fetches feeds -- the terminal app
+/// reading `sources.toml`, the Android app reading its database -- needs to
+/// describe "what kind of source is this".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SourceType {
+    /// An RSS or Atom feed, fetched over HTTP.
+    Rss,
+    /// A Reddit subreddit (not implemented yet; see `fetchers::reddit`).
+    Reddit,
+}
+
+/// One fully-validated source description: every field guaranteed present
+/// and non-empty by the time anything outside the code that built it sees it.
+///
+/// This is the plain-data hand-off between *where sources are stored*
+/// (a TOML file on the desktop, a database table on Android) and *how they
+/// are fetched* (`configured_sources` below turns these into fetchers). It
+/// is deliberately a different type from the TOML loader's private
+/// "raw" struct: serde deserializes into a shape that can represent "this
+/// field was missing" (via `Option`), and the loader's validation turns that
+/// into either a clear error or this type, where every field is simply,
+/// unconditionally there -- so no caller downstream ever has to think about
+/// a source with a missing `topic` again.
+#[derive(Debug, Clone)]
+pub struct SourceConfig {
+    /// Display name, e.g. "Ars Technica". Shown in the UI and stored on each
+    /// article as its `source`.
+    pub name: String,
+    /// Which fetcher implementation handles this source.
+    pub source_type: SourceType,
+    /// The feed URL (or, for Reddit, the subreddit name).
+    pub url: String,
+    /// The single topic this source's articles are filed under.
+    pub topic: String,
+}
+
 /// One configured source, already resolved into whichever concrete
 /// fetcher type its `sources.toml` entry's `type = "..."` named (see
-/// `config::SourceType`).
+/// `SourceType`).
 ///
 /// This exists instead of just returning `Vec<rss::RssFetcher>` (as this
 /// function did before config-file loading existed) because
@@ -148,44 +214,38 @@ impl Fetcher for ConfiguredSource {
     }
 }
 
-/// Loads and validates the sources file at `path` (via
-/// `config::load_sources_at`) and resolves every entry into a real
-/// `ConfiguredSource` ready to `.fetch()`. `path` is the active feed list's
-/// file: normally `sources.toml`, or any list from `lists.toml`. This is
-/// the single place the app's initial fetch (`main.rs`), the TUI's `r`
-/// refresh, and feed-list switching read sources from.
+/// Turns validated source descriptions into fetchers that are ready to
+/// `.fetch()`.
 ///
-/// Only the default `~/.config/tuxwire/sources.toml` is created from the
-/// bundled sample when it's missing, exactly as before lists existed. Any
-/// other missing list file is an error the caller reports (see
-/// `config::load_sources_at`). If `sources_path()` itself can't be worked
-/// out (no `$HOME`), nothing is treated as the default, so nothing is
-/// created.
+/// This is the file-free half of what the terminal app used to do in one
+/// step. The terminal app reads `sources.toml` into a `Vec<SourceConfig>`
+/// itself and then calls this; the Android app will build the same
+/// `Vec<SourceConfig>` from its database. Either way, everything from here
+/// on -- fetching, parsing, storing -- is identical.
 ///
-/// Returns `anyhow::Result` (unlike the hardcoded version this replaces,
-/// which couldn't fail) because loading a config file genuinely can:
-/// the file might not parse as TOML, or a source in it might be missing
-/// its required `topic`. Every caller already propagates this with `?`,
-/// same as any other fallible step.
-pub fn configured_sources_at(path: &std::path::Path) -> anyhow::Result<Vec<ConfiguredSource>> {
-    // `is_ok_and` is `true` only when `sources_path()` worked *and* the
-    // closure says it's the same path.
-    let is_default = config::sources_path().is_ok_and(|default| default == path);
-    let sources = config::load_sources_at(path, is_default)?;
-
-    Ok(sources
+/// `sources: Vec<SourceConfig>` takes the vector *by value* (ownership
+/// moves in) because each fetcher below needs to own its `name`, `url` and
+/// `topic` strings; consuming the vector lets us move the strings across
+/// instead of cloning every one of them.
+pub fn configured_sources(sources: Vec<SourceConfig>) -> Vec<ConfiguredSource> {
+    // `into_iter()` walks the vector by value, `map` converts each
+    // description into the matching fetcher variant, and `collect()` gathers
+    // the results back into a `Vec`. The `match` on `source_type` is
+    // exhaustive: adding a new `SourceType` without handling it here is a
+    // compile error, which is exactly the safety net we want.
+    sources
         .into_iter()
         .map(|source| match source.source_type {
-            config::SourceType::Rss => ConfiguredSource::Rss(rss::RssFetcher {
+            SourceType::Rss => ConfiguredSource::Rss(rss::RssFetcher {
                 name: source.name,
                 url: source.url,
                 topic: source.topic,
             }),
-            config::SourceType::Reddit => ConfiguredSource::Reddit(reddit::RedditFetcher {
+            SourceType::Reddit => ConfiguredSource::Reddit(reddit::RedditFetcher {
                 name: source.name,
                 url: source.url,
                 topic: source.topic,
             }),
         })
-        .collect())
+        .collect()
 }

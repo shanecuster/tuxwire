@@ -45,6 +45,16 @@ messages — what changed and why, not just what.
 
 ### Changed
 
+- **The repository is now a two-crate Cargo workspace.** The shared, terminal-free
+  logic (articles, SQLite storage and migrations, fetching, the fetch report, the
+  icon table, and the eight built-in theme palettes) moved into `core/`
+  (`tuxwire-core`); the terminal program stays in `tui/`. This is groundwork for a
+  native Android app that reuses `core/`. Nothing changes for users: same
+  commands (`cargo build`, `cargo run`), same config files, same database, same
+  UI. Under the hood, `Storage::open()` became `Storage::open_at(path)` (the
+  terminal app works out the XDG path itself) and theme palettes are plain RGB in
+  `core/`, converted to ratatui colors in `tui/`.
+
 - **Database migration 005** adds a `feed_url` column to articles (which
   feed each came from), filled in for older articles where possible.
   Nothing else in the database changes.

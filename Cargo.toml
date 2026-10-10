@@ -1,23 +1,36 @@
-# Cargo.toml is Rust's project manifest — it plays the role that
-# package.json (Node), pyproject.toml (Python), or a Makefile + go.mod
-# combined would play elsewhere. It declares the package itself and every
-# external crate (Rust's word for "library" or "package") the project
-# depends on. `cargo build` reads this, resolves a compatible version of
-# each dependency, downloads them from crates.io (Rust's package registry,
-# analogous to npm/PyPI), and compiles everything together.
+# Root Cargo.toml: this file no longer describes a package. It describes a
+# *workspace* -- a set of related crates (Rust's word for a package/library)
+# that are built together, share ONE Cargo.lock (so every crate resolves to the
+# same dependency versions) and ONE `target/` build directory (so a dependency
+# compiled for one crate is reused by the others instead of rebuilt).
+#
+# Why a workspace at all? The Android app (a separate repository) has to reuse
+# tuxwire's logic -- fetching, storage, themes, icons -- but it cannot import
+# code from inside a finished terminal program. Splitting the project into a
+# reusable library crate (`core/`) and the terminal program (`tui/`) lets both
+# apps share one copy of that logic, so a bug fixed once is fixed everywhere.
+#
+# `core/` is the shared library (no terminal code); `tui/` is the terminal
+# program that uses it.
+[workspace]
+# `members` lists the crates (directories containing a Cargo.toml) in the
+# workspace. Paths are relative to this file.
+members = ["core", "tui"]
 
-[package]
-name = "tuxwire"
-version = "0.1.0"
-# The "edition" is Rust's mechanism for introducing breaking language
-# changes without breaking old code: every crate picks an edition, and the
-# compiler behaves accordingly, so crates on different editions can still
-# be compiled together in the same project. `cargo init` picked the newest
-# one available (2024) — there's no reason to use an older edition on a
-# brand new project.
-edition = "2024"
+# The "resolver" decides how Cargo picks dependency versions and features.
+# Version "3" is the one that goes with Rust edition 2024 (which the crate
+# already uses), and it prefers dependency versions compatible with the
+# crate's declared minimum Rust version. A workspace root has no edition of its
+# own to infer this from, so it has to be stated explicitly.
+resolver = "3"
 
-[dependencies]
+# --- Shared dependency versions ---------------------------------------------
+# `[workspace.dependencies]` is the ONE place each external crate's version and
+# features are declared. Member crates (core/, tui/) then say
+# `some-crate.workspace = true` instead of repeating the version, so the two
+# can never drift apart. The comments below are the ones that used to sit in
+# the single crate's manifest, kept because they explain why each crate is here.
+[workspace.dependencies]
 # --- Error handling --------------------------------------------------
 # `anyhow` gives us a single catch-all error type (`anyhow::Error`, often
 # used via the `anyhow::Result<T>` alias) for application-level code. Rust

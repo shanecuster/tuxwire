@@ -76,11 +76,8 @@
 
 use crate::export::{self, ExportConfig};
 use crate::feedlists::{self, FeedLists, Switch};
-use crate::fetch_report::FetchReport;
 use crate::fetchers::{self, ConfiguredSource, Fetcher};
 use crate::icons::{self, Icon, IconMode, IconSettings};
-use crate::models::Article;
-use crate::storage::{Scope, Storage};
 use crate::theme::{self, BUILTIN_THEMES, Theme, ThemeSettings, picker_order};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use ratatui::Frame;
@@ -90,6 +87,9 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use tuxwire_core::fetch_report::FetchReport;
+use tuxwire_core::models::Article;
+use tuxwire_core::storage::{Scope, Storage};
 
 /// Everything else `main.rs` hands `ui::run` from startup: the theme and
 /// icon settings, whether to open with the first-run icon check, and what
@@ -3781,7 +3781,9 @@ fn render_theme_picker_popup(
             Span::styled(format!("{:<22}", builtin.name), name_style),
         ];
         // The swatches. `c` is that theme's palette, not the current one.
-        let c = &builtin.colors;
+        // The built-in table holds plain core RGB values, so convert it to
+        // the ratatui-coloured `Theme` first (`Theme::from`, see theme.rs).
+        let c = Theme::from(builtin.colors);
         for color in [
             c.background,
             c.text_primary,

@@ -91,7 +91,7 @@ const MIGRATIONS: &[Migration] = &[
 /// always applied top-to-bottom, in full, every startup.
 ///
 /// Called once, right after opening the connection, before any other
-/// query touches the database -- see `Storage::open` in `storage/mod.rs`.
+/// query touches the database -- see `Storage::open_at` in `storage/mod.rs`.
 pub fn run(conn: &Connection) -> anyhow::Result<()> {
     // `query_row` runs a query expected to return exactly one row and
     // hands it to the closure to decode. `PRAGMA` statements always
