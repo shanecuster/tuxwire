@@ -183,6 +183,14 @@ pub fn html_to_text(html: &str) -> String {
     tidy_whitespace(&decode_entities(&out))
 }
 
+/// Tidies text that is already plain (not HTML): collapses spaces and keeps at
+/// most one blank line between paragraphs. Unlike [`html_to_text`], it does not
+/// look for tags or entities, so a literal `<` or `&` in plain text stays as it
+/// is.
+pub fn tidy_plain_text(text: &str) -> String {
+    tidy_whitespace(text)
+}
+
 /// Replaces entities such as `&amp;`, `&#8217;` and `&#x2019;` with the
 /// characters they stand for. An entity it does not know is left exactly as
 /// written, so nothing is lost.
@@ -428,6 +436,15 @@ mod tests {
     fn whitespace_is_tidied() {
         assert_eq!(tidy_whitespace("  a   b \n\n\n\n c  \n"), "a b\n\nc");
         assert_eq!(html_to_text("   "), "");
+    }
+
+    /// Plain text keeps its angle brackets and ampersands, and is only tidied.
+    #[test]
+    fn plain_text_is_only_tidied() {
+        assert_eq!(
+            tidy_plain_text("a  <b>  &amp;  c\n\n\nd"),
+            "a <b> &amp; c\n\nd"
+        );
     }
 
     /// Text that fits is returned unchanged.
