@@ -87,6 +87,36 @@ skip_weights
   weight        INTEGER DEFAULT 0
 ```
 
+**Later additions** (each its own migration, additive only):
+- Migration 003 adds `articles.saved_at` and `articles.noted_at`.
+- Migration 005 adds `articles.feed_url` (which feed an article came from).
+- Migration 006 adds two tables the **Android app** uses and the terminal app
+  ignores (the terminal keeps its feeds in TOML files):
+
+```
+feeds
+  id            INTEGER PRIMARY KEY
+  name          TEXT NOT NULL
+  url           TEXT NOT NULL UNIQUE      -- matches articles.feed_url
+  topic         TEXT NOT NULL
+  source_type   TEXT NOT NULL DEFAULT 'rss'
+
+settings
+  key           TEXT PRIMARY KEY          -- e.g. 'theme'
+  value         TEXT NOT NULL
+```
+
+Removing a feed (`Storage::remove_feed`) deletes only its `feeds` row.
+Articles already fetched from it stay, in keeping with "saved articles and
+notes are permanent". Version 4 stays unused (see 005).
+
+**Fetching is two steps.** `fetchers::fetch_one` / `fetch_all` only talk to
+the network and return `FetchOutcome`s (an article list or an error each);
+`FetchReport::record_outcome` stores them and updates the tally. They are
+separate so a program that shares its `Storage` behind a lock (the Android
+app) can release it during the slow network step. The startup fetch, the `r`
+refresh and the Android refresh all use these two steps.
+
 #### Migrations
 
 Every schema change ships as a numbered SQL file in `core/migrations/`
@@ -464,7 +494,7 @@ tuxwire/
 ├── Cargo.toml             # workspace root: members + shared dependency versions
 ├── core/                  # crate `tuxwire-core` -- NO ratatui/crossterm, NO $HOME
 │   ├── Cargo.toml
-│   ├── migrations/        # numbered SQL files (next: 006)
+│   ├── migrations/        # numbered SQL files (next: 007)
 │   └── src/
 │       ├── lib.rs
 │       ├── models.rs      # Article

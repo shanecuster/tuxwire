@@ -45,6 +45,12 @@ messages — what changed and why, not just what.
 
 ### Changed
 
+- **One shared fetch step.** The startup fetch and the `r` refresh used to each
+  handle fetch results themselves. Both now use `fetchers::fetch_one` and
+  `FetchReport::record_outcome` from `tuxwire-core`, which the Android app uses
+  too. Nothing changes for users: same messages, same counts.
+- **Database migration 006** adds two new tables, `feeds` and `settings`, for
+  the Android app (the terminal app doesn't read them). Nothing existing changes.
 - **The repository is now a two-crate Cargo workspace.** The shared, terminal-free
   logic (articles, SQLite storage and migrations, fetching, the fetch report, the
   icon table, and the eight built-in theme palettes) moved into `core/`

@@ -40,10 +40,9 @@ before the first run of the new build against it (nothing migrates, but it is yo
   Harmless here; the comment in `core/src/fetchers/mod.rs` explains why.
 - Dependency versions and features are unchanged; they are now declared once in the root `Cargo.toml`
   (`[workspace.dependencies]`). `serde_json` is still listed but unused, as it was before.
-- **Deliberately not done:** the fetch-and-insert loop is still written twice (`main.rs` and the `r` key).
-  They behave differently (fetch-all-then-insert vs. interleaved), so merging them would change behavior,
-  and the Android app's needs aren't known yet. Revisit when the Android refresh worker exists.
-- Next migration number is **006** (004 was the FreshRSS one, never merged).
+- The fetch-and-insert duplication noted here was removed on `feature/android-feeds`: both loops now use
+  `fetchers::fetch_one` + `FetchReport::record_outcome` (see below).
+- Next migration number is **007** (004 was the FreshRSS one, never merged; 006 added `feeds` and `settings`).
 
 ## Standalone UI: icons + themes on master (branch `feature/standalone-ui`, 2026-10-08)
 
@@ -321,3 +320,16 @@ tmux kill-session -t tuxwire-lists-test         # only this session
 - **Not updated: CLAUDE.md's "Environment notes".** They still list the config files without
   `lists.toml`. Not in this task's doc list.
 
+## Android groundwork in core (branch `feature/android-feeds`, 2026-10-09)
+
+1. **Migration 006: `feeds` + `settings`.** For the Android app; the terminal app ignores both.
+   `Storage::{add_feed, remove_feed, list_feeds, articles_by_feed, get_setting, set_setting}`.
+   Adding a URL that is already there is an error ("already added"). Removing a feed keeps its
+   articles. `articles_by_feed` ignores topic, so older articles stay visible if a feed's topic changes.
+2. **`fetch_one` / `fetch_all` + `FetchReport::record_outcome`.** Fetching and storing are separate so
+   a caller holding a database lock can release it during the network step. Core never prints; failure
+   lines go in `FetchReport::failure_messages`. `fetch_all` is sequential.
+3. **Desktop loops converted** (separate commit): `main.rs` and `ui::refresh_topic` use the shared step.
+   Smoke test with a throwaway `HOME` and a dead feed: the TUI started and `skipped Dead: ...` was printed
+   as before.
+- Tests: 110 pass (101 before, 9 new: 7 for feeds/settings, 2 for fetch outcomes); clippy and fmt clean.
