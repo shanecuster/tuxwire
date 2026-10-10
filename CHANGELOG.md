@@ -7,6 +7,11 @@ messages — what changed and why, not just what.
 
 ### Added
 
+- **OPML reader and writer in core** (`core/src/opml.rs`, used by the Android
+  app's import/export; the terminal commands come later). Folders become
+  topics, loose feeds go under "Uncategorized", Reddit sources export as their
+  `.rss` address. Files are treated as untrusted: 2 MiB, 5000 feeds, 32 folder
+  levels, `http`/`https` addresses only. No new dependency.
 - **Multiple feed lists.** An optional `~/.config/tuxwire/lists.toml`
   defines named lists (e.g. "main" and "casual"), each a file in the
   `sources.toml` format. `f` opens a picker showing each list's name,

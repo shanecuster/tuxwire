@@ -351,3 +351,18 @@ tmux kill-session -t tuxwire-lists-test         # only this session
    `HOME` and a local feed: database at version 7, HTML description stored as clean plain text,
    an item with no description stored as NULL.
 - Tests: 133 pass (110 before, 23 new); clippy and fmt clean; core still has no ratatui/crossterm.
+
+## OPML in core (branch `feature/opml`, 2026-10-10)
+
+1. **`core/src/opml.rs`.** `parse_opml(text) -> OpmlImport { feeds, ignored, repeated }` and
+   `write_opml(&[SourceConfig]) -> String`. Hand-written; no new dependency. Limits: 2 MiB, 5000
+   feeds, 32 folder levels, `http`/`https` only. A file that is not OPML, or is damaged, is an
+   error with a message; unusable entries are counted, not fatal.
+2. **Decisions (Shane):** loose feeds go under "Uncategorized"; innermost folder is the topic;
+   Reddit exports as `https://www.reddit.com/r/NAME/.rss` (comes back as plain RSS); the terminal
+   app keeps `sources.toml` and gets `import-opml FILE` / `export-opml FILE` commands later
+   (active list, optional `--list NAME`). The saved plan is `tuxwire-opml-plan.md`.
+3. **Checked:** a test feeds 5000 random garbled strings to the reader (no panics); write-then-read
+   round-trips names with `&`, `<`, quotes. `text::decode_entities` became `pub(crate)` so the
+   reader reuses it.
+- Tests: 149 pass (133 before, 16 new); clippy and fmt clean; core still has no ratatui/crossterm.
