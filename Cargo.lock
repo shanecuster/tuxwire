@@ -2686,6 +2686,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "feed-rs",
+ "futures-util",
  "reqwest",
  "rusqlite",
  "serde",

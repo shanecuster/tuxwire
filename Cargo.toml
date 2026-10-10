@@ -132,6 +132,15 @@ serde_json = "1.0.151"
 # more restraint is generally used in a library.
 tokio = { version = "1.53.1", features = ["full"] }
 
+# --- Running several downloads at once ------------------------------------
+# `futures-util` provides `Stream` helpers on top of async code. `fetch_all`
+# uses one of them, `buffered(n)`, to download up to `n` feeds at the same time
+# while still handing the results back in the original order. It was already
+# compiled into the build (reqwest depends on it); this makes it a direct
+# dependency. `default-features = false` plus `alloc` keeps it to just what
+# `buffered` needs.
+futures-util = { version = "0.3.34", default-features = false, features = ["alloc"] }
+
 # --- Config file format -----------------------------------------------
 # `toml` reads/writes `sources.toml` and `theme.toml`. Note:
 # ARCHITECTURE.md specifically calls for `toml_edit` (not plain `toml`)
