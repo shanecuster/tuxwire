@@ -383,3 +383,15 @@ tmux kill-session -t tuxwire-lists-test         # only this session
    a silent server is cut off. Checked the tests can fail: with the limit forced to 1 the overlap test
    took 1.8 s and failed. Run them with `NO_PROXY=127.0.0.1` if your environment sets a proxy.
 - Tests: 153 pass (149 before, 4 new); clippy and fmt clean; core still has no ratatui/crossterm.
+
+## User-Agent and honest fetch errors (branch `feature/fetch-user-agent`, 2026-10-10)
+
+1. **Why.** A feed (`https://system76.com/blog/rss.xml`) failed in both apps with "no root element":
+   the body that arrived was empty. The shared client sent no `User-Agent`. Now `build_client` sets
+   `tuxwire/<core version>` (`USER_AGENT` in `fetchers/rss.rs`).
+2. **Errors.** `fetch_feed_with` checks the status first (`answered HTTP 403`) and an empty body
+   (`sent an empty reply`) before parsing. Redirects are still followed by reqwest.
+3. **Tests** (local server, `serve_once`): header sent, 403 named, empty 200 named.
+4. **Not confirmed from here:** the sandbox cannot reach system76.com, so whether the header alone fixes
+   that feed must be tested on a real device. If it still fails, the new message will now say why.
+- Tests: 156 pass (153 before, 3 new); clippy and fmt clean; core still has no ratatui/crossterm.

@@ -18,6 +18,13 @@ use std::time::Duration;
 /// fails ("operation timed out") and the others carry on.
 pub const FETCH_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// The `User-Agent` header sent with every request: the program's name and
+/// the version of this crate. `env!("CARGO_PKG_VERSION")` is filled in by
+/// Cargo while compiling (it reads `version` from `core/Cargo.toml`), and
+/// `concat!` joins the pieces into one string at compile time, so there is no
+/// work to do while the program runs.
+const USER_AGENT: &str = concat!("tuxwire/", env!("CARGO_PKG_VERSION"));
+
 /// The `reqwest::Client` every fetch in this module shares, built once on
 /// first use (`LazyLock` runs its initializer exactly once, the first time
 /// `HTTP_CLIENT` is dereferenced, and caches the result for every call
@@ -47,6 +54,10 @@ fn build_client(timeout: Duration) -> reqwest::Client {
 
     reqwest::Client::builder()
         .tls_certs_only(root_certs)
+        // Say who is asking. A request with no `User-Agent` header looks like
+        // a bot or a broken script, and some sites (or the content networks in
+        // front of them) answer it with an empty page instead of the feed.
+        .user_agent(USER_AGENT)
         // The whole request, including reading the body, must finish within
         // this time or it fails with a timeout error.
         .timeout(timeout)
@@ -144,6 +155,17 @@ async fn fetch_feed_with(
         .await
         .with_context(|| format!("failed to fetch feed at {url}"))?;
 
+    // Check the HTTP status before reading anything. A refusal (403, 429,
+    // 500...) usually comes with a web page or nothing at all, and handing
+    // that to the XML parser produces a confusing "failed to parse" message
+    // that blames the feed. `is_success()` is true only for 200-299.
+    // `bail!` returns an `Err` from this function right away, like `?` does.
+    // Redirects (301, 302...) never reach this line: reqwest follows them.
+    let status = response.status();
+    if !status.is_success() {
+        anyhow::bail!("{url} answered HTTP {status}");
+    }
+
     // Read the whole response body into a `String`. RSS/Atom feeds
     // are XML text, so `.text()` (rather than `.bytes()`) is the
     // natural fit here — it also handles the response's declared
@@ -152,6 +174,13 @@ async fn fetch_feed_with(
         .text()
         .await
         .with_context(|| format!("failed to read response body from {url}"))?;
+
+    // A successful status with nothing in it is also not a feed. Say so
+    // plainly, instead of letting the parser report "no root element".
+    // `trim()` ignores blank space, so a body of only newlines counts as empty.
+    if body.trim().is_empty() {
+        anyhow::bail!("{url} sent an empty reply (no feed in it)");
+    }
 
     // `feed_rs::parser::parse` accepts anything implementing
     // `std::io::Read`; `&str` doesn't implement `Read` directly, but
@@ -332,6 +361,71 @@ mod tests {
             "took {:?}",
             started.elapsed()
         );
+    }
+
+    /// Starts a one-shot server on `127.0.0.1` that answers the first request
+    /// with `reply` (a complete HTTP response) and returns the address to
+    /// fetch plus a channel that delivers the request text the server saw.
+    fn serve_once(reply: &'static str) -> (String, std::sync::mpsc::Receiver<String>) {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        // Step 1: listen on a free port the operating system picks (`:0`).
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (sender, receiver) = std::sync::mpsc::channel();
+
+        // Step 2: in the background, accept one connection, pass the request
+        // text back through the channel, and write the canned reply.
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buffer = [0u8; 4096];
+                let read = stream.read(&mut buffer).unwrap_or(0);
+                let _ = sender.send(String::from_utf8_lossy(&buffer[..read]).into_owned());
+                let _ = stream.write_all(reply.as_bytes());
+            }
+        });
+
+        (format!("http://127.0.0.1:{port}/feed"), receiver)
+    }
+
+    /// Every request says who is asking: `User-Agent: tuxwire/<version>`.
+    /// (Header names are case-insensitive, so the check lowercases the text.)
+    #[tokio::test]
+    async fn requests_send_a_user_agent() {
+        let (url, seen) =
+            serve_once("HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        // The empty reply makes the fetch fail, which is fine: only the
+        // request that was sent matters here.
+        let _ = fetch_feed_with(&build_client(Duration::from_secs(5)), &url).await;
+        let request = seen.recv().unwrap().to_lowercase();
+        let expected = format!("user-agent: tuxwire/{}", env!("CARGO_PKG_VERSION"));
+        assert!(request.contains(&expected), "request was: {request}");
+    }
+
+    /// A refusal says which status the server sent, not "failed to parse".
+    #[tokio::test]
+    async fn an_http_error_is_named() {
+        let (url, _seen) =
+            serve_once("HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        let error = fetch_feed_with(&build_client(Duration::from_secs(5)), &url)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("403"), "error was: {error}");
+        assert!(!error.contains("parse"), "error was: {error}");
+    }
+
+    /// A "200 OK" with nothing in it says the reply was empty.
+    #[tokio::test]
+    async fn an_empty_reply_is_named() {
+        let (url, _seen) =
+            serve_once("HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        let error = fetch_feed_with(&build_client(Duration::from_secs(5)), &url)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("empty reply"), "error was: {error}");
     }
 
     /// Parses `xml` as a feed and returns the summary of its first entry.

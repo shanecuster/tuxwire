@@ -60,7 +60,10 @@ one outcome per source **in the order the sources were given**, so callers store
 the results one after another and the database is never written concurrently.
 Every request has a 30-second limit (`FETCH_TIMEOUT` in `fetchers/rss.rs`): a
 server that goes silent fails that one feed with a timeout instead of stalling
-the refresh.
+the refresh. Every request also sends `User-Agent: tuxwire/<version>` (some sites
+answer a request with none by sending an empty page), and a non-2xx status or an
+empty body is reported as such ("answered HTTP 403", "sent an empty reply")
+rather than as an XML parse error.
 
 **Adding a new source should never require touching fetcher logic** unless
 the source has no RSS feed. See `docs/ADDING_A_SOURCE.md`.

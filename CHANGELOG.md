@@ -5,6 +5,14 @@ messages — what changed and why, not just what.
 
 ## Unreleased
 
+### Fixed
+
+- **Feeds that sent an empty page to tuxwire** (System76's blog, for one)
+  failed with "unable to parse feed: no root element". Requests now send a
+  `User-Agent: tuxwire/<version>` header, which such sites expect. Failures are
+  also reported honestly: "answered HTTP 403" or "sent an empty reply" instead
+  of an XML parse error. Applies to the terminal app and the Android app alike.
+
 ### Added
 
 - **Faster refresh, and a time limit per feed.** Refreshing now downloads up to
