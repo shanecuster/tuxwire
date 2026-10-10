@@ -119,6 +119,35 @@ pub enum SourceType {
     Reddit,
 }
 
+impl SourceType {
+    /// The short name stored in the `feeds.source_type` database column:
+    /// `"rss"` or `"reddit"` (the same spellings `sources.toml` uses).
+    ///
+    /// Returns `&'static str`, a string baked into the program that lives for
+    /// its whole run, so the caller gets it with no allocation and no ownership
+    /// to think about.
+    pub fn as_str(self) -> &'static str {
+        // `match` must cover every variant, so adding a new `SourceType`
+        // without a name here is a compile error.
+        match self {
+            SourceType::Rss => "rss",
+            SourceType::Reddit => "reddit",
+        }
+    }
+
+    /// The reverse of [`SourceType::as_str`]: turns a stored name back into a
+    /// `SourceType`, or `None` if the text is not one we know (for example a
+    /// value written by a newer version of the app).
+    pub fn from_db_str(text: &str) -> Option<Self> {
+        match text {
+            "rss" => Some(SourceType::Rss),
+            "reddit" => Some(SourceType::Reddit),
+            // Anything else is unknown; the caller decides what to do.
+            _ => None,
+        }
+    }
+}
+
 /// One fully-validated source description: every field guaranteed present
 /// and non-empty by the time anything outside the code that built it sees it.
 ///
@@ -212,6 +241,59 @@ impl Fetcher for ConfiguredSource {
             ConfiguredSource::Reddit(fetcher) => fetcher.fetch().await,
         }
     }
+}
+
+/// The result of fetching one source: which source it was, and either its
+/// articles or the error that stopped it.
+///
+/// Fetching and storing are kept apart on purpose. `fetch_one` and
+/// `fetch_all` only talk to the network and never touch the database, so a
+/// caller that shares its `Storage` behind a lock (the Android app) can
+/// release that lock while the slow network work runs, and only take it again
+/// to store the results with `FetchReport::record_outcome`.
+pub struct FetchOutcome {
+    /// The source's display name, kept so a failure message can say which
+    /// feed it was.
+    pub name: String,
+    /// `Ok` with the fetched articles, or `Err` with why the fetch failed.
+    pub result: anyhow::Result<Vec<Article>>,
+}
+
+/// Fetches one source and packages the answer as a [`FetchOutcome`].
+///
+/// A failure is *returned inside* the outcome rather than propagated with `?`,
+/// because one dead feed must never stop the rest of a refresh ("one
+/// slow/dead source never blocks a refresh of everything else", per
+/// ARCHITECTURE.md).
+///
+/// `source: &ConfiguredSource` borrows the source: fetching only needs to
+/// read it, and the caller keeps it for the next refresh.
+pub async fn fetch_one(source: &ConfiguredSource) -> FetchOutcome {
+    // `.await` runs the request to completion without blocking the thread.
+    let result = source.fetch().await;
+    FetchOutcome {
+        name: source.name().to_string(),
+        result,
+    }
+}
+
+/// Fetches every source in `sources`, one after another, and returns one
+/// [`FetchOutcome`] each, in the same order.
+///
+/// Sequential rather than all-at-once: it is the simplest thing that matches
+/// how the terminal app already behaved. Running several downloads at the same
+/// time would be faster for long feed lists and is a possible later change that
+/// would not alter this function's signature.
+pub async fn fetch_all(sources: &[ConfiguredSource]) -> Vec<FetchOutcome> {
+    // Collect the outcomes as we go. `Vec::with_capacity` reserves the right
+    // amount of space up front instead of growing it repeatedly.
+    let mut outcomes = Vec::with_capacity(sources.len());
+
+    // Fetch each source in turn, awaiting one before starting the next.
+    for source in sources {
+        outcomes.push(fetch_one(source).await);
+    }
+    outcomes
 }
 
 /// Turns validated source descriptions into fetchers that are ready to

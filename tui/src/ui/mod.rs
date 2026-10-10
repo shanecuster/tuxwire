@@ -76,7 +76,7 @@
 
 use crate::export::{self, ExportConfig};
 use crate::feedlists::{self, FeedLists, Switch};
-use crate::fetchers::{self, ConfiguredSource, Fetcher};
+use crate::fetchers::{self, ConfiguredSource};
 use crate::icons::{self, Icon, IconMode, IconSettings};
 use crate::theme::{self, BUILTIN_THEMES, Theme, ThemeSettings, picker_order};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
@@ -1862,32 +1862,24 @@ fn refresh_topic(
         .into_iter()
         .filter(|source| source.topic() == topic)
     {
-        report.attempted += 1;
-        let fetch_result = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(configured_source.fetch())
+        // `fetch_one` (shared with the startup fetch and the Android app)
+        // does the network call and returns the answer as a `FetchOutcome`.
+        let outcome = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(fetchers::fetch_one(&configured_source))
         });
 
-        // Same reasoning as `main.rs`'s initial fetch loop: one source
-        // failing (a dead feed, or a `type = "reddit"` source that isn't
-        // implemented yet) must not make `r` fail to refresh every *other*
-        // source filed under this topic. `eprintln!` rather than `?`
-        // records the failure without aborting this loop. The full error
-        // text is only visible if stderr is redirected somewhere, but
-        // `report.record_failure` also counts it, so the footer can say
-        // "N of M sources failed" (or "offline") inside the TUI.
-        let fetched = match fetch_result {
-            Ok(fetched) => fetched,
-            Err(err) => {
-                eprintln!("skipped {}: {err:#}", configured_source.name());
-                report.record_failure(&err);
-                continue;
-            }
-        };
-
-        // Same insert as before, now also noting which articles were new.
-        for article in &fetched {
-            report.record_insert(storage, article)?;
+        // One source failing (a dead feed, or a `type = "reddit"` source that
+        // isn't implemented yet) must not make `r` fail to refresh every
+        // *other* source filed under this topic, so a failure is only printed
+        // here, not propagated. The full error text is only visible if stderr
+        // is redirected somewhere, but `record_outcome` also counts it, so the
+        // footer can say "N of M sources failed" (or "offline") inside the TUI.
+        if let Err(err) = &outcome.result {
+            eprintln!("skipped {}: {err:#}", outcome.name);
         }
+
+        // Stores the articles (noting which were new) or counts the failure.
+        report.record_outcome(storage, outcome)?;
     }
 
     Ok((
