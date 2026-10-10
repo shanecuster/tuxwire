@@ -7,6 +7,11 @@ messages — what changed and why, not just what.
 
 ### Added
 
+- **Faster refresh, and a time limit per feed.** Refreshing now downloads up to
+  six feeds at the same time instead of one after another (results are still
+  stored in order), and each feed has a 30-second limit, so a server that goes
+  silent fails that one feed instead of stalling the whole refresh. Applies to
+  the terminal app and the Android app alike.
 - **OPML reader and writer in core** (`core/src/opml.rs`, used by the Android
   app's import/export; the terminal commands come later). Folders become
   topics, loose feeds go under "Uncategorized", Reddit sources export as their
