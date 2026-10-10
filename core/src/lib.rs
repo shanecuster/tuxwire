@@ -31,4 +31,5 @@ pub mod icons;
 pub mod models;
 pub mod scoring;
 pub mod storage;
+pub mod text;
 pub mod theme;

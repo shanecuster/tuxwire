@@ -119,14 +119,14 @@ impl Storage {
     /// atomic insert-or-else pattern `increment_skip_weight` below uses for
     /// `skip_weights`.
     ///
-    /// On a conflict the only thing touched is `feed_url`, and only if the
-    /// existing row doesn't have one yet: `COALESCE(a, b)` returns `a`
-    /// unless it's NULL, then `b`, and `excluded.feed_url` is the value
-    /// this insert *tried* to write. That quietly backfills articles stored
-    /// before migration 005 the next time their feed is fetched, while
-    /// leaving every other column (read/saved/note state included)
-    /// exactly as it was. An article that already has a `feed_url` keeps
-    /// the first one it got.
+    /// On a conflict the only things touched are `feed_url` and `summary`,
+    /// and only if the existing row doesn't have one yet: `COALESCE(a, b)`
+    /// returns `a` unless it's NULL, then `b`, and `excluded.feed_url` is the
+    /// value this insert *tried* to write. That quietly backfills articles
+    /// stored before migration 005 (`feed_url`) or 007 (`summary`) the next
+    /// time their feed is fetched, while leaving every other column
+    /// (read/saved/note state included) exactly as it was. An article that
+    /// already has a `feed_url` or `summary` keeps the first one it got.
     ///
     /// `article: &Article` borrows rather than takes ownership: inserting
     /// a row only needs to *read* the article's fields, and a fetcher
@@ -144,9 +144,11 @@ impl Storage {
         // that looks like SQL (an apostrophe in an article title, say)
         // is never mistaken for part of the query itself.
         self.conn.execute(
-            "INSERT INTO articles (title, url, source, topic, timestamp, read, skipped, saved, note, saved_at, noted_at, feed_url)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
-             ON CONFLICT(url) DO UPDATE SET feed_url = COALESCE(articles.feed_url, excluded.feed_url)",
+            "INSERT INTO articles (title, url, source, topic, timestamp, read, skipped, saved, note, saved_at, noted_at, feed_url, summary)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+             ON CONFLICT(url) DO UPDATE SET
+                 feed_url = COALESCE(articles.feed_url, excluded.feed_url),
+                 summary = COALESCE(articles.summary, excluded.summary)",
             params![
                 article.title,
                 article.url,
@@ -160,6 +162,7 @@ impl Storage {
                 article.saved_at,
                 article.noted_at,
                 article.feed_url,
+                article.summary,
             ],
         )?;
 
@@ -239,7 +242,7 @@ impl Storage {
         // nothing for `Scope::All`. Every placeholder here is a plain `?`,
         // filled in order: the topic first, then the scope's feed URLs.
         let mut stmt = self.conn.prepare(&format!(
-            "SELECT id, title, url, source, topic, timestamp, read, skipped, saved, note, saved_at, noted_at, feed_url
+            "SELECT id, title, url, source, topic, timestamp, read, skipped, saved, note, saved_at, noted_at, feed_url, summary
              FROM articles WHERE topic = ?{} ORDER BY timestamp DESC",
             scope.clause()
         ))?;
@@ -288,7 +291,7 @@ impl Storage {
         source: &str,
     ) -> anyhow::Result<Vec<Article>> {
         let mut stmt = self.conn.prepare(&format!(
-            "SELECT id, title, url, source, topic, timestamp, read, skipped, saved, note, saved_at, noted_at, feed_url
+            "SELECT id, title, url, source, topic, timestamp, read, skipped, saved, note, saved_at, noted_at, feed_url, summary
              FROM articles WHERE topic = ? AND source = ?{} ORDER BY timestamp DESC",
             scope.clause()
         ))?;
@@ -308,7 +311,7 @@ impl Storage {
     /// explicitly independent of the topic sidebar.
     pub fn saved_articles(&self) -> anyhow::Result<Vec<Article>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, title, url, source, topic, timestamp, read, skipped, saved, note, saved_at, noted_at, feed_url
+            "SELECT id, title, url, source, topic, timestamp, read, skipped, saved, note, saved_at, noted_at, feed_url, summary
              FROM articles WHERE saved = 1 ORDER BY timestamp DESC",
         )?;
 
@@ -327,7 +330,7 @@ impl Storage {
     /// remembered to press `s` in the moment.
     pub fn all_articles(&self) -> anyhow::Result<Vec<Article>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, title, url, source, topic, timestamp, read, skipped, saved, note, saved_at, noted_at, feed_url
+            "SELECT id, title, url, source, topic, timestamp, read, skipped, saved, note, saved_at, noted_at, feed_url, summary
              FROM articles ORDER BY timestamp DESC",
         )?;
 
@@ -371,7 +374,7 @@ impl Storage {
     /// needed to satisfy "case-insensitive" here.
     pub fn search_articles(&self, query: &str) -> anyhow::Result<Vec<Article>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, title, url, source, topic, timestamp, read, skipped, saved, note, saved_at, noted_at, feed_url
+            "SELECT id, title, url, source, topic, timestamp, read, skipped, saved, note, saved_at, noted_at, feed_url, summary
              FROM articles WHERE title LIKE ?1 OR note LIKE ?1 ORDER BY timestamp DESC",
         )?;
 
@@ -651,6 +654,24 @@ impl Storage {
         Ok(feeds)
     }
 
+    /// The article with this `id`, or `None` if there is no such article.
+    ///
+    /// Used when a screen needs one article's details (such as its summary)
+    /// and the list that showed it only carried the basics.
+    pub fn article_by_id(&self, id: i64) -> anyhow::Result<Option<Article>> {
+        // `.optional()` turns "no rows" into `Ok(None)` instead of an error, so
+        // a missing article is an ordinary answer.
+        self.conn
+            .query_row(
+                "SELECT id, title, url, source, topic, timestamp, read, skipped, saved, note, saved_at, noted_at, feed_url, summary
+                 FROM articles WHERE id = ?1",
+                params![id],
+                row_to_article,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
     /// Every article fetched from the feed at `feed_url`, most recent first.
     ///
     /// This asks only "which feed did it come from", not "which topic is it
@@ -658,7 +679,7 @@ impl Storage {
     /// so filtering by the feed's *current* topic could hide older ones.
     pub fn articles_by_feed(&self, feed_url: &str) -> anyhow::Result<Vec<Article>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, title, url, source, topic, timestamp, read, skipped, saved, note, saved_at, noted_at, feed_url
+            "SELECT id, title, url, source, topic, timestamp, read, skipped, saved, note, saved_at, noted_at, feed_url, summary
              FROM articles WHERE feed_url = ?1 ORDER BY timestamp DESC",
         )?;
 
@@ -789,7 +810,7 @@ impl Scope {
 }
 
 /// Maps one row from a `SELECT id, title, url, source, topic, timestamp,
-/// read, skipped, saved, note, saved_at, noted_at, feed_url FROM articles ...` query
+/// read, skipped, saved, note, saved_at, noted_at, feed_url, summary FROM articles ...` query
 /// into an `Article`.
 ///
 /// Every query in this module that reads from `articles` lists its
@@ -823,6 +844,7 @@ fn row_to_article(row: &Row) -> rusqlite::Result<Article> {
         saved_at: row.get(10)?,
         noted_at: row.get(11)?,
         feed_url: row.get(12)?,
+        summary: row.get(13)?,
     })
 }
 
@@ -1370,9 +1392,9 @@ mod tests {
             .conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        // 005 ran, and then 006 after it, so the database ends at the latest
-        // version.
-        assert_eq!(version, 6);
+        // 005 ran, and then 006 and 007 after it, so the database ends at the
+        // latest version.
+        assert_eq!(version, 7);
     }
 
     /// A fresh database has the `feeds` and `settings` tables (migration 006).
@@ -1585,5 +1607,94 @@ mod tests {
         let nothing = Scope::Feeds(Vec::new());
         assert!(storage.topics(&nothing).unwrap().is_empty());
         assert_eq!(storage.unread_count(&nothing).unwrap(), 0);
+    }
+
+    /// A fresh database has the `summary` column (migration 007), and a
+    /// summary is stored and read back.
+    #[test]
+    fn summary_round_trips() {
+        let storage = test_storage();
+        let mut article = old_article("https://example.com/a", "LWN");
+        article.summary = Some("A short summary.".to_string());
+        let id = storage.insert_article(&article).unwrap();
+
+        let stored = storage.article_by_id(id).unwrap().unwrap();
+        assert_eq!(stored.summary.as_deref(), Some("A short summary."));
+        // Every list query returns it too.
+        let listed = &storage.all_articles().unwrap()[0];
+        assert_eq!(listed.summary.as_deref(), Some("A short summary."));
+    }
+
+    /// Re-fetching an article fills in a missing summary, keeps an existing
+    /// one, and never touches read/saved/note state.
+    #[test]
+    fn insert_fills_missing_summary_only() {
+        let storage = test_storage();
+        // First fetch: the feed had no description.
+        let id = storage
+            .insert_article(&old_article("https://example.com/a", "LWN"))
+            .unwrap();
+        storage
+            .save_article(id, Some("keep me".to_string()))
+            .unwrap();
+        assert_eq!(storage.article_by_id(id).unwrap().unwrap().summary, None);
+
+        // Second fetch: now it has one. It is filled in.
+        let mut again = old_article("https://example.com/a", "LWN");
+        again.summary = Some("First summary.".to_string());
+        assert_eq!(storage.insert_article(&again).unwrap(), id);
+
+        // Third fetch with different text: the first one is kept.
+        let mut other = old_article("https://example.com/a", "LWN");
+        other.summary = Some("Changed later.".to_string());
+        storage.insert_article(&other).unwrap();
+
+        let stored = storage.article_by_id(id).unwrap().unwrap();
+        assert_eq!(stored.summary.as_deref(), Some("First summary."));
+        assert!(stored.saved && stored.read);
+        assert_eq!(stored.note.as_deref(), Some("keep me"));
+        assert_eq!(storage.article_count().unwrap(), 1);
+    }
+
+    /// Looking up an article that does not exist is `None`, not an error.
+    #[test]
+    fn article_by_id_of_a_missing_article_is_none() {
+        let storage = test_storage();
+        assert!(storage.article_by_id(12345).unwrap().is_none());
+    }
+
+    /// A database already at version 6 (everything before this migration) gets
+    /// the `summary` column when it is next opened, and its old articles read
+    /// back with no summary.
+    #[test]
+    fn migration_007_runs_on_a_version_6_database() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(include_str!("../../migrations/001_init.sql"))
+            .unwrap();
+        conn.execute_batch(include_str!("../../migrations/002_unique_article_url.sql"))
+            .unwrap();
+        conn.execute_batch(include_str!(
+            "../../migrations/003_add_saved_and_noted_at.sql"
+        ))
+        .unwrap();
+        conn.execute_batch(include_str!("../../migrations/005_add_feed_url.sql"))
+            .unwrap();
+        conn.execute_batch(include_str!(
+            "../../migrations/006_add_feeds_and_settings.sql"
+        ))
+        .unwrap();
+        // An article that was stored before the summary column existed.
+        conn.execute(
+            "INSERT INTO articles (title, url, source, topic, timestamp)
+             VALUES ('Old', 'https://example.com/old', 'LWN', 'linux', '2026-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        conn.execute_batch("PRAGMA user_version = 6").unwrap();
+
+        let storage = Storage::from_connection(conn).unwrap();
+        let old = &storage.all_articles().unwrap()[0];
+        assert_eq!(old.title, "Old");
+        assert_eq!(old.summary, None);
     }
 }

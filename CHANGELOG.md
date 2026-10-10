@@ -45,6 +45,10 @@ messages — what changed and why, not just what.
 
 ### Changed
 
+- **Database migration 007** adds a `summary` column to articles: a short plain-text
+  summary taken from each feed entry (HTML removed, cut at the end of a sentence).
+  Older articles get theirs the next time their feed is fetched. The terminal app
+  stores it but does not show it yet; the Android app's article screen does.
 - **One shared fetch step.** The startup fetch and the `r` refresh used to each
   handle fetch results themselves. Both now use `fetchers::fetch_one` and
   `FetchReport::record_outcome` from `tuxwire-core`, which the Android app uses

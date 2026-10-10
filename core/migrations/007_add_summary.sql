@@ -1,0 +1,14 @@
+-- Migration 007: a short plain-text summary for each article.
+--
+-- Feeds usually include a short description (or the article's opening text)
+-- with each entry. The apps show it on an article screen, so a reader can
+-- decide whether to open the whole article in the browser. It is stored as
+-- plain text: the fetcher strips the HTML and cuts it at the end of a sentence
+-- (see `core/src/text.rs`).
+--
+-- Additive only, like 003 and 005: one new nullable column, so no existing
+-- column or row changes. Articles stored before this migration start with NULL.
+-- `Storage::insert_article` fills the summary in the next time the same article
+-- is fetched, without touching read, saved or note state. NULL is also the
+-- honest answer for a feed that sends no description at all.
+ALTER TABLE articles ADD COLUMN summary TEXT;

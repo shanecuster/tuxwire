@@ -75,6 +75,12 @@ const MIGRATIONS: &[Migration] = &[
         name: "006_add_feeds_and_settings",
         sql: include_str!("../../migrations/006_add_feeds_and_settings.sql"),
     },
+    // A short plain-text summary on each article.
+    Migration {
+        version: 7,
+        name: "007_add_summary",
+        sql: include_str!("../../migrations/007_add_summary.sql"),
+    },
 ];
 
 /// Brings `conn`'s schema up to date by running every migration whose

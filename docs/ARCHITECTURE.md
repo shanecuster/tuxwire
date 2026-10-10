@@ -90,6 +90,7 @@ skip_weights
 **Later additions** (each its own migration, additive only):
 - Migration 003 adds `articles.saved_at` and `articles.noted_at`.
 - Migration 005 adds `articles.feed_url` (which feed an article came from).
+- Migration 007 adds `articles.summary` (see "Article summaries" below).
 - Migration 006 adds two tables the **Android app** uses and the terminal app
   ignores (the terminal keeps its feeds in TOML files):
 
@@ -109,6 +110,18 @@ settings
 Removing a feed (`Storage::remove_feed`) deletes only its `feeds` row.
 Articles already fetched from it stay, in keeping with "saved articles and
 notes are permanent". Version 4 stays unused (see 005).
+
+**Article summaries.** Migration 007 adds a nullable `articles.summary`: the
+feed entry's short description (RSS `<description>` / Atom `<summary>`), or the
+start of its full content as a fallback, as **plain text**. `core/src/text.rs`
+removes the HTML (hand-written, no dependency: drops tags, scripts, styles and
+comments, turns block tags into line breaks, decodes entities, tidies
+whitespace) and then `limit_to_sentences` cuts it at the end of a sentence
+within 2000 characters (word boundary plus `...` only if one sentence alone is
+too long). Text a feed declares as `text/plain` is only tidied. Re-fetching
+fills in a missing summary (`COALESCE`, like `feed_url`) and never touches
+read/saved/note state. `Storage::article_by_id` fetches one article. The
+terminal app stores the summary but does not show it yet.
 
 **Fetching is two steps.** `fetchers::fetch_one` / `fetch_all` only talk to
 the network and return `FetchOutcome`s (an article list or an error each);
@@ -476,6 +489,7 @@ struct Article {
     saved_at: Option<DateTime<Utc>>,
     noted_at: Option<DateTime<Utc>>,
     feed_url: Option<String>, // the feed (source url) it came from; migration 005
+    summary: Option<String>,  // short plain-text summary; migration 007
 }
 ```
 
@@ -494,10 +508,11 @@ tuxwire/
 ├── Cargo.toml             # workspace root: members + shared dependency versions
 ├── core/                  # crate `tuxwire-core` -- NO ratatui/crossterm, NO $HOME
 │   ├── Cargo.toml
-│   ├── migrations/        # numbered SQL files (next: 007)
+│   ├── migrations/        # numbered SQL files (next: 008)
 │   └── src/
 │       ├── lib.rs
 │       ├── models.rs      # Article
+│       ├── text.rs        # HTML -> plain text, sentence-aware length cap
 │       ├── storage/       # SQLite access + migrations (Storage::open_at(path))
 │       ├── fetchers/      # Fetcher trait, RSS, Reddit stub, SourceConfig
 │       ├── fetch_report.rs# per-fetch new/failed/offline tally

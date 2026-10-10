@@ -6,6 +6,7 @@
 
 use crate::fetchers::Fetcher;
 use crate::models::Article;
+use crate::text::{SUMMARY_MAX_CHARS, html_to_text, limit_to_sentences, tidy_plain_text};
 use anyhow::Context;
 use chrono::Utc;
 use std::sync::LazyLock;
@@ -131,6 +132,57 @@ pub async fn fetch_feed(url: &str) -> anyhow::Result<feed_rs::model::Feed> {
         .with_context(|| format!("failed to parse feed XML from {url}"))
 }
 
+/// Works out the plain-text summary for one feed entry, or `None` if the entry
+/// has no usable text.
+///
+/// Feeds put the text in one of two places: a short `summary` (RSS
+/// `<description>`, Atom `<summary>`) or the full `content` (RSS
+/// `<content:encoded>`, Atom `<content>`). The short one is preferred because
+/// it is written to be a summary; the full content is the fallback, and is cut
+/// down by the same sentence-aware limit.
+///
+/// `entry: &Entry` borrows the entry, so the caller can keep using it.
+fn entry_summary(entry: &feed_rs::model::Entry) -> Option<String> {
+    // Step 1: the entry's short summary, cleaned up. `as_ref()` turns
+    // `&Option<Text>` into `Option<&Text>` so we can look inside without
+    // taking it out of the entry. `subty()` is the second half of the media
+    // type, e.g. `html` in `text/html` or `plain` in `text/plain`.
+    let from_summary = entry
+        .summary
+        .as_ref()
+        .map(|text| clean_feed_text(&text.content, text.content_type.subty().as_str()));
+
+    // Step 2: the full content, cleaned up the same way. `as_deref()` turns
+    // `Option<String>` into `Option<&str>` (a borrow, no copy).
+    let from_body = entry.content.as_ref().and_then(|content| {
+        content
+            .body
+            .as_deref()
+            .map(|body| clean_feed_text(body, content.content_type.subty().as_str()))
+    });
+
+    // Step 3: use the summary if it has any words in it, otherwise the body.
+    // The `?` returns `None` from this function if neither has any text.
+    let text = from_summary
+        .filter(|text| !text.is_empty())
+        .or_else(|| from_body.filter(|text| !text.is_empty()))?;
+
+    // Step 4: cut it at the end of a sentence if it is too long.
+    Some(limit_to_sentences(&text, SUMMARY_MAX_CHARS))
+}
+
+/// Turns the text of one feed element into plain text, depending on its
+/// declared type: text that says it is plain is only tidied (so a `<` in it is
+/// a real less-than sign), and anything else (HTML, XHTML) has its markup
+/// removed.
+fn clean_feed_text(raw: &str, subtype: &str) -> String {
+    if subtype == "plain" {
+        tidy_plain_text(raw)
+    } else {
+        html_to_text(raw)
+    }
+}
+
 impl Fetcher for RssFetcher {
     /// Fetches and parses `self.url` (via `fetch_feed` above) and maps
     /// every entry in the result into an `Article`.
@@ -153,6 +205,11 @@ impl Fetcher for RssFetcher {
             .entries
             .into_iter()
             .map(|entry| {
+                // The summary is worked out first, because it only *borrows*
+                // the entry (`&entry`); the lines below move pieces out of
+                // `entry`, after which it could no longer be borrowed whole.
+                let summary = entry_summary(&entry);
+
                 // `entry.title` is `Option<feed_rs::model::Text>` — a
                 // feed entry isn't guaranteed to have a title. `.map(...)`
                 // on an `Option` transforms the value *if present*
@@ -195,10 +252,89 @@ impl Fetcher for RssFetcher {
                 let mut article =
                     Article::new(title, url, self.name.clone(), self.topic.clone(), timestamp);
                 article.feed_url = Some(self.url.clone());
+                article.summary = summary;
                 article
             })
             .collect();
 
         Ok(articles)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Parses `xml` as a feed and returns the summary of its first entry.
+    fn first_summary(xml: &str) -> Option<String> {
+        let feed = feed_rs::parser::parse(xml.as_bytes()).expect("test feed should parse");
+        entry_summary(&feed.entries[0])
+    }
+
+    /// A wrapper around one RSS item, so each test only writes the part that
+    /// differs.
+    fn rss(item_body: &str) -> String {
+        format!(
+            r#"<?xml version="1.0"?>
+<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/">
+<channel><title>T</title><item><title>A</title><link>https://example.com/a</link>{item_body}</item></channel></rss>"#
+        )
+    }
+
+    /// An HTML description becomes plain text.
+    #[test]
+    fn html_description_becomes_plain_text() {
+        let xml =
+            rss("<description><![CDATA[<p>Hello &amp; welcome.</p><p>Second.</p>]]></description>");
+        assert_eq!(
+            first_summary(&xml).as_deref(),
+            Some("Hello & welcome.\n\nSecond.")
+        );
+    }
+
+    /// An entry with no description and no content has no summary.
+    #[test]
+    fn entry_without_text_has_no_summary() {
+        assert_eq!(first_summary(&rss("")), None);
+        // A description that is only markup also counts as nothing.
+        assert_eq!(
+            first_summary(&rss("<description><![CDATA[<br/> ]]></description>")),
+            None
+        );
+    }
+
+    /// With no description, the full content is used instead.
+    #[test]
+    fn full_content_is_the_fallback() {
+        let xml = rss("<content:encoded><![CDATA[<p>Body text here.</p>]]></content:encoded>");
+        assert_eq!(first_summary(&xml).as_deref(), Some("Body text here."));
+    }
+
+    /// When both exist, the short description wins.
+    #[test]
+    fn description_is_preferred_over_content() {
+        let xml = rss("<description>Short one.</description>\
+             <content:encoded><![CDATA[<p>Much longer body.</p>]]></content:encoded>");
+        assert_eq!(first_summary(&xml).as_deref(), Some("Short one."));
+    }
+
+    /// Atom text declared as plain keeps a literal `<`.
+    #[test]
+    fn plain_atom_summary_keeps_angle_brackets() {
+        let xml = r#"<?xml version="1.0"?>
+<feed xmlns="http://www.w3.org/2005/Atom"><title>T</title><id>x</id><updated>2026-01-01T00:00:00Z</updated>
+<entry><title>A</title><id>y</id><updated>2026-01-01T00:00:00Z</updated>
+<link href="https://example.com/a"/><summary type="text">1 &lt; 2 is true.</summary></entry></feed>"#;
+        assert_eq!(first_summary(xml).as_deref(), Some("1 < 2 is true."));
+    }
+
+    /// A very long description is cut at a sentence end within the limit.
+    #[test]
+    fn long_description_is_cut_at_a_sentence() {
+        let long = "This is a sentence about something. ".repeat(200);
+        let xml = rss(&format!("<description>{long}</description>"));
+        let summary = first_summary(&xml).unwrap();
+        assert!(summary.chars().count() <= SUMMARY_MAX_CHARS);
+        assert!(summary.ends_with('.'));
     }
 }
