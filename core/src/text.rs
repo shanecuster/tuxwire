@@ -194,7 +194,10 @@ pub fn tidy_plain_text(text: &str) -> String {
 /// Replaces entities such as `&amp;`, `&#8217;` and `&#x2019;` with the
 /// characters they stand for. An entity it does not know is left exactly as
 /// written, so nothing is lost.
-fn decode_entities(text: &str) -> String {
+///
+/// `pub(crate)` means other modules of this crate (the OPML reader uses it for
+/// feed names) may call it, but code outside the crate cannot.
+pub(crate) fn decode_entities(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
 

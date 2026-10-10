@@ -29,6 +29,7 @@ pub mod fetch_report;
 pub mod fetchers;
 pub mod icons;
 pub mod models;
+pub mod opml;
 pub mod scoring;
 pub mod storage;
 pub mod text;
