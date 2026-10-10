@@ -123,6 +123,21 @@ fills in a missing summary (`COALESCE`, like `feed_url`) and never touches
 read/saved/note state. `Storage::article_by_id` fetches one article. The
 terminal app stores the summary but does not show it yet.
 
+**OPML (feed-list import/export).** `core/src/opml.rs` has two pure functions
+with no file or path handling: `parse_opml(text)` and `write_opml(&[SourceConfig])`.
+Hand-written, no dependency (`quick-xml` is only a transitive dependency of
+`feed-rs`). Folders become topics (innermost folder wins); a feed outside any
+folder is filed under **"Uncategorized"**. Reddit sources are exported as
+`https://www.reddit.com/r/NAME/.rss` and come back as plain RSS feeds. The
+reader treats the file as untrusted: at most 2 MiB, 5000 feeds and 32 levels of
+folders; only `http`/`https` addresses (anything else is counted as ignored);
+custom entities are never expanded; repeats within the file are kept once and
+counted. `sources.toml` stays the terminal app's stored format: it is
+hand-edited, keeps comments, supports Reddit sources and `lists.toml`, none of
+which OPML can express. OPML is only an import/export bridge. The Android app
+uses it today; the terminal commands (`import-opml` / `export-opml`, importing
+into the active list with an optional `--list NAME`) are planned but not built.
+
 **Fetching is two steps.** `fetchers::fetch_one` / `fetch_all` only talk to
 the network and return `FetchOutcome`s (an article list or an error each);
 `FetchReport::record_outcome` stores them and updates the tally. They are
@@ -513,6 +528,7 @@ tuxwire/
 │       ├── lib.rs
 │       ├── models.rs      # Article
 │       ├── text.rs        # HTML -> plain text, sentence-aware length cap
+│       ├── opml.rs        # OPML feed-list reader and writer (no file access)
 │       ├── storage/       # SQLite access + migrations (Storage::open_at(path))
 │       ├── fetchers/      # Fetcher trait, RSS, Reddit stub, SourceConfig
 │       ├── fetch_report.rs# per-fetch new/failed/offline tally
