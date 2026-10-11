@@ -25,6 +25,7 @@
 //! `name.rs` (or `name/mod.rs`) and makes it reachable by other crates as
 //! `tuxwire_core::name` -- `pub` is what exposes it outside this crate.
 
+pub mod export;
 pub mod fetch_report;
 pub mod fetchers;
 pub mod icons;

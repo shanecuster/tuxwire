@@ -15,5 +15,11 @@
 # `~` is expanded to $HOME; the directory is created automatically if it
 # doesn't exist yet.
 
+# The file has two sections: saved articles that have no note (a short list)
+# first, then the articles that have notes, each with its note in full.
+# Set include_unnoted = false to export only the notes. (If you leave the line
+# out, everything saved is exported.)
+
 [export]
 path = "~/tuxwire-notes/"
+include_unnoted = true

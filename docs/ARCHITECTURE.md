@@ -252,7 +252,7 @@ underneath.
 | `y`       | view history (every article ever fetched) |
 | `/`       | search titles/notes across the current view |
 | `a`       | add a new source                  |
-| `E`       | export every saved article into one combined Markdown file (Saved view only; regenerates the file fresh each press) |
+| `E`       | export every saved article into one combined Markdown file (Saved view only -- pressing it elsewhere shows a hint; regenerates the file fresh each press) |
 | `q`       | quit                             |
 
 ---
@@ -583,6 +583,7 @@ tuxwire/
 │       ├── models.rs      # Article
 │       ├── text.rs        # HTML -> plain text, sentence-aware length cap
 │       ├── opml.rs        # OPML feed-list reader and writer (no file access)
+│       ├── export.rs      # Markdown text of the saved-articles/notes export (no paths)
 │       ├── storage/       # SQLite access + migrations (Storage::open_at(path))
 │       ├── fetchers/      # Fetcher trait, RSS, feed discovery, Reddit stub, SourceConfig
 │       ├── fetch_report.rs# per-fetch new/failed/offline tally
@@ -599,7 +600,7 @@ tuxwire/
 │       ├── fetchers/      # sources.toml loading/validation/editing
 │       ├── icons/         # icons.toml loading/saving
 │       ├── feedlists/     # lists.toml + active-list choice/switching
-│       ├── export.rs      # Markdown export of saved articles
+│       ├── export.rs      # where the export file goes (export.toml); calls core's export
 │       ├── opml_cli.rs    # import-opml / export-opml commands
 │       └── paths.rs       # where the database lives (XDG) + ~ abbreviation
 ├── docs/
@@ -679,27 +680,39 @@ ready-made post skeleton.
   article being un-saved, re-noted, or removed since the last export —
   there's no "what's new since last time" delta to track, just "write
   what's saved right now."
+- **Two sections in the one file (decided 2026-10-11).** Saved articles
+  *without* a note come first, as a short list; the articles *with* notes
+  follow under "Notes", each with its note in full. Within each section the
+  newest comes first (by when the note was written, else when it was saved),
+  and each heading shows a count. The formatting lives in the shared core
+  crate (`core/src/export.rs`: `render_saved_markdown` and
+  `format_article_markdown`) so the terminal app and the Android app write
+  exactly the same file; each app only decides where the file goes. Exporting
+  never changes or deletes anything. `include_unnoted` (in `export.toml`; a
+  switch on Android) chooses whether the first section is written; it
+  defaults to on, so everything saved is exported.
 - **Must include a link back to the original article** — the note is
   context, not a replacement for the source. Uses the real `saved_at`
   (and `noted_at`, if the note was added/edited after saving) timestamps
   — not the article's publish date:
 
 ```markdown
-## Btrfs send/receive got noticeably faster in 6.18
+# Saved articles and notes
+
+## Saved articles (1)
+
+- [Another saved article](https://phoronix.com/...) — Phoronix, saved 2026-08-10
+
+## Notes (1)
+
+### Btrfs send/receive got noticeably faster in 6.18
 Source: [r/linux](https://reddit.com/r/linux/...) — saved 2026-08-12, noted 2026-08-14
 
 > your note goes here, verbatim from the `note` column
-
----
-
-## Another saved article
-Source: [Phoronix](https://phoronix.com/...) — saved 2026-08-10
 ```
 
-  (A saved article with no note simply has no `>` line at all — nothing
-  to quote.) Every subsequent article's block is separated from the one
-  before it by a `---` on its own line, so the combined file still reads
-  as a sequence of distinct entries rather than one run-on document.
+  Several notes are separated by a `---` on its own line. A title is kept on
+  one line and its square brackets are escaped so it cannot break its link.
 
 - **Output location: config-driven, no per-export prompt.** Consistent
   with the rest of the app (`sources.toml`, `theme.toml` — nothing else
@@ -709,6 +722,7 @@ Source: [Phoronix](https://phoronix.com/...) — saved 2026-08-10
 ```toml
 [export]
 path = "~/tuxwire-notes/"
+include_unnoted = true
 ```
 
   `~/tuxwire-notes/` (i.e. inside the person's own home directory, not
