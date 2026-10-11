@@ -144,8 +144,21 @@ custom entities are never expanded; repeats within the file are kept once and
 counted. `sources.toml` stays the terminal app's stored format: it is
 hand-edited, keeps comments, supports Reddit sources and `lists.toml`, none of
 which OPML can express. OPML is only an import/export bridge. The Android app
-uses it today; the terminal commands (`import-opml` / `export-opml`, importing
-into the active list with an optional `--list NAME`) are planned but not built.
+has an import/export screen; the terminal app has two commands (decided
+2026-10-11): `tuxwire import-opml FILE [--list NAME]` and
+`tuxwire export-opml FILE [--list NAME]`, in `tui/src/opml_cli.rs`. They run
+instead of the full-screen app, never touch the database and never download
+anything (the next start fetches the new feeds). Without `--list` they use the
+list remembered in `lists.toml`, else the first; a wrong `--list` name is an
+error listing the real names, never a silent fallback. Import appends only
+feeds whose address is not in the list yet (compared ignoring capitals, and a
+Reddit source counts as its `.rss` address), in one write that keeps the
+comments in `sources.toml` (`append_sources_at`, which writes a `.tmp` file and
+renames it so a failure cannot leave a half-written config). A file that is not
+OPML changes nothing. Export refuses to overwrite an existing file; `-` prints
+to the screen. The apply step (which file to edit, comment-keeping) is
+terminal-only because the two apps store feeds differently (`sources.toml`
+against the database); only parsing and writing are shared.
 
 **Fetching is two steps.** `fetchers::fetch_one` / `fetch_all` only talk to
 the network and return `FetchOutcome`s (an article list or an error each);
@@ -587,6 +600,7 @@ tuxwire/
 │       ├── icons/         # icons.toml loading/saving
 │       ├── feedlists/     # lists.toml + active-list choice/switching
 │       ├── export.rs      # Markdown export of saved articles
+│       ├── opml_cli.rs    # import-opml / export-opml commands
 │       └── paths.rs       # where the database lives (XDG) + ~ abbreviation
 ├── docs/
 │   └── ARCHITECTURE.md    # this file

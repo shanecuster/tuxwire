@@ -23,6 +23,15 @@ messages — what changed and why, not just what.
 
 ### Added
 
+- **`tuxwire import-opml FILE` and `tuxwire export-opml FILE`.** Bring a feed
+  list in from another reader, or save yours, from the terminal. `--list NAME`
+  picks one of your feed lists; otherwise the list you used last. Import adds
+  only feeds you do not have yet and keeps the comments in `sources.toml`;
+  export never overwrites an existing file (`-` prints to the screen). Nothing
+  is downloaded: the new feeds' articles arrive the next time you open tuxwire.
+- **Android: importing an OPML file now downloads the new feeds' articles** once
+  at the end, so imported feeds do not look empty.
+
 - **Paste a web page, get its feed.** Adding a source (`a` in the terminal app)
   now accepts a blog's address, not only its feed address. tuxwire reads the
   feed link the page advertises, or, if there is none, tries the usual
