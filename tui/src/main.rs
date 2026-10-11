@@ -24,6 +24,7 @@ mod export;
 mod feedlists;
 mod fetchers;
 mod icons;
+mod opml_cli;
 mod paths;
 mod theme;
 mod ui;
@@ -52,6 +53,19 @@ async fn main() -> anyhow::Result<()> {
     // same policy as every other config file.
     let default_sources = fetchers::config::sources_path()?;
     let feed_lists = feedlists::config::load(&default_sources)?;
+
+    // Command-line words after `tuxwire` (`import-opml`, `export-opml`,
+    // `--help`) run one small job and exit *instead of* opening the reader.
+    // `skip(1)` drops the program's own name, which is always the first
+    // item. With no words, `parse_args` says `None` and the reader starts as
+    // usual. A mistake is turned into an error here (`anyhow::bail!` returns
+    // early with a message) so a typo never silently opens the full-screen app.
+    let words: Vec<String> = std::env::args().skip(1).collect();
+    match opml_cli::parse_args(&words) {
+        Ok(Some(command)) => return opml_cli::run(command, &feed_lists),
+        Ok(None) => {}
+        Err(message) => anyhow::bail!("{message}\n\n{}", opml_cli::USAGE),
+    }
     let home = paths::home_dir();
 
     // Pick the active list and load its sources (just the file; nothing is
