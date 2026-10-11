@@ -200,7 +200,7 @@ const EDITING_NOTE_HINTS: &str = "Enter save note · Esc cancel";
 /// The footer hint line shown while the add-source popup is open and on
 /// its first step -- prompting for the feed URL itself (see
 /// `AddSourceStep::Url`).
-const ADD_SOURCE_URL_HINTS: &str = "Enter fetch & validate · Esc cancel";
+const ADD_SOURCE_URL_HINTS: &str = "Enter find the feed & validate · Esc cancel";
 
 /// The footer hint line shown on the add-source popup's second step -- the
 /// name/topic confirm screen (see `AddSourceStep::Confirm`).
@@ -463,6 +463,11 @@ enum AddSourceStep {
         topic: String,
         field: ConfirmField,
         topic_options: Vec<String>,
+        /// A short line saying how the feed was found when the address the
+        /// person typed was not itself the feed (`fetchers::discover`), shown
+        /// in the muted colour under the URL. `None` when they typed the feed
+        /// address directly, so nothing needs explaining.
+        note: Option<String>,
         error: Option<String>,
     },
 }
@@ -2190,34 +2195,39 @@ fn handle_add_source_key(
                 if trimmed.is_empty() {
                     return Ok(Mode::AddSource(AddSourceStep::Url {
                         text,
-                        error: Some("enter a feed URL first".to_string()),
+                        error: Some("enter a feed or page address first".to_string()),
                     }));
                 }
 
+                // `discover_feed` accepts a feed address (used as it is) or a
+                // web page (its feed is looked up), see `fetchers::discover`.
+                // It is `async`, so it is driven the same way as before.
                 let fetch_result = tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current().block_on(fetchers::rss::fetch_feed(trimmed))
+                    tokio::runtime::Handle::current()
+                        .block_on(fetchers::discover::discover_feed(trimmed))
                 });
 
                 match fetch_result {
-                    Ok(feed) => Ok(Mode::AddSource(AddSourceStep::Confirm {
-                        name: guess_source_name(&feed, trimmed),
-                        url: trimmed.to_string(),
+                    // `found.url` is the address of the feed itself, which may
+                    // differ from what was typed: that is the address saved.
+                    Ok(found) => Ok(Mode::AddSource(AddSourceStep::Confirm {
+                        name: guess_source_name(&found.feed, &found.url),
+                        note: found_note(found.found_by),
+                        url: found.url,
                         topic: String::new(),
                         field: ConfirmField::Name,
                         topic_options: topics.clone(),
                         error: None,
                     })),
-                    // Per ARCHITECTURE.md: "show a clear error ('couldn't
-                    // parse this as a feed -- check the URL') and let the
-                    // user retry or cancel." `text` (not `trimmed`) is
-                    // kept so the popup still shows exactly what they
-                    // typed, whitespace included, ready to edit rather
-                    // than retype from scratch.
+                    // The messages from discovery already say what went wrong
+                    // ("answered HTTP 404", "no feed found at ...", "only
+                    // offers a comments feed"), so they are shown as they
+                    // are. `text` (not `trimmed`) is kept so the popup still
+                    // shows exactly what they typed, ready to edit rather
+                    // than retype.
                     Err(err) => Ok(Mode::AddSource(AddSourceStep::Url {
                         text,
-                        error: Some(format!(
-                            "couldn't parse this as a feed -- check the URL ({err:#})"
-                        )),
+                        error: Some(format!("{err:#}")),
                     })),
                 }
             }
@@ -2231,6 +2241,7 @@ fn handle_add_source_key(
             mut topic,
             mut field,
             topic_options,
+            note,
             error,
         } => match key {
             KeyCode::Esc => Ok(Mode::Normal),
@@ -2246,6 +2257,7 @@ fn handle_add_source_key(
                     topic,
                     field,
                     topic_options,
+                    note,
                     error: None,
                 }))
             }
@@ -2264,6 +2276,7 @@ fn handle_add_source_key(
                     topic,
                     field,
                     topic_options,
+                    note,
                     error: None,
                 }))
             }
@@ -2275,6 +2288,7 @@ fn handle_add_source_key(
                     topic,
                     field,
                     topic_options,
+                    note,
                     error: None,
                 }))
             }
@@ -2294,6 +2308,7 @@ fn handle_add_source_key(
                     topic,
                     field,
                     topic_options,
+                    note,
                     error: None,
                 }))
             }
@@ -2315,6 +2330,7 @@ fn handle_add_source_key(
                     topic,
                     field,
                     topic_options,
+                    note,
                     error: None,
                 }))
             }
@@ -2337,6 +2353,7 @@ fn handle_add_source_key(
                         topic,
                         field,
                         topic_options,
+                        note,
                         error: Some("name can't be empty".to_string()),
                     }));
                 }
@@ -2347,6 +2364,7 @@ fn handle_add_source_key(
                         topic,
                         field,
                         topic_options,
+                        note,
                         error: Some("every source needs a topic".to_string()),
                     }));
                 }
@@ -2371,6 +2389,7 @@ fn handle_add_source_key(
                         topic,
                         field,
                         topic_options,
+                        note,
                         error: Some(format!("failed to save source: {err:#}")),
                     })),
                 }
@@ -2382,6 +2401,7 @@ fn handle_add_source_key(
                 topic,
                 field,
                 topic_options,
+                note,
                 error,
             })),
         },
@@ -2417,6 +2437,23 @@ fn guess_source_name(feed: &feed_rs::model::Feed, url: &str) -> String {
         .map(|title| title.content.trim().to_string())
         .filter(|content| !content.is_empty())
         .unwrap_or_else(|| url.to_string())
+}
+
+/// The line the confirm screen shows when the feed was *found* rather than
+/// typed: `None` when the person gave the feed's own address (nothing to
+/// explain), otherwise a short sentence on how discovery got there, so a
+/// changed address is never a surprise.
+///
+/// `FoundBy` is `Copy`, so it is passed by value (no `&`).
+fn found_note(found_by: fetchers::discover::FoundBy) -> Option<String> {
+    use fetchers::discover::FoundBy;
+    match found_by {
+        FoundBy::Direct => None,
+        FoundBy::Advertised => Some("found through the page's own feed link".to_string()),
+        FoundBy::Guessed => {
+            Some("the page lists no feed; found one at a common address".to_string())
+        }
+    }
 }
 
 /// Draws one frame: the topic sidebar + article list side by side, with
@@ -3512,7 +3549,7 @@ fn render_add_source_popup(frame: &mut Frame, theme: &Theme, area: Rect, step: &
             frame.render_widget(Clear, popup_area);
 
             let block = Block::new()
-                .title(" Add Source — Feed URL ")
+                .title(" Add Source — Feed or page address ")
                 .borders(Borders::ALL)
                 .style(Style::new().bg(theme.background).fg(theme.text_primary))
                 .border_style(Style::new().fg(theme.accent_selected));
@@ -3541,13 +3578,15 @@ fn render_add_source_popup(frame: &mut Frame, theme: &Theme, area: Rect, step: &
             topic,
             field,
             topic_options,
+            note,
             error,
         } => {
             // Four content lines (URL, Name, Topic, the "existing topics"
             // hint) always show; a fifth appears only when there's a
             // validation/write error to surface. `+ 2` for the border,
             // same as the `Url` branch above.
-            let height = if error.is_some() { 7 } else { 6 };
+            // `+ 1` more when a note about how the feed was found is shown.
+            let height = 6 + u16::from(error.is_some()) + u16::from(note.is_some());
             let popup_area = centered_rect(area, 70, height);
 
             frame.render_widget(Clear, popup_area);
@@ -3588,6 +3627,18 @@ fn render_add_source_popup(frame: &mut Frame, theme: &Theme, area: Rect, step: &
                     Style::new().fg(theme.text_muted),
                 )),
             ];
+            // When the feed was found rather than typed, say how, in the muted
+            // colour, on its own line right under the URL (`insert(1, ..)`
+            // puts it at position 1, pushing Name and Topic down one row).
+            if let Some(text) = note {
+                lines.insert(
+                    1,
+                    Line::from(Span::styled(
+                        format!("       {text}"),
+                        Style::new().fg(theme.text_muted),
+                    )),
+                );
+            }
             if let Some(message) = error {
                 lines.push(Line::from(Span::styled(
                     message.as_str(),
@@ -3605,9 +3656,11 @@ fn render_add_source_popup(frame: &mut Frame, theme: &Theme, area: Rect, step: &
             // positions the cursor correctly after either label -- the
             // cursor's *row* is what actually depends on `field`.
             let label_width: u16 = 7;
+            // The note line, when shown, pushes both fields down one row.
+            let shift = u16::from(note.is_some());
             let (field_text, row) = match field {
-                ConfirmField::Name => (name.as_str(), 2),
-                ConfirmField::Topic => (topic.as_str(), 3),
+                ConfirmField::Name => (name.as_str(), 2 + shift),
+                ConfirmField::Topic => (topic.as_str(), 3 + shift),
             };
             let cursor_x = popup_area.x + 1 + label_width + field_text.chars().count() as u16;
             let cursor_y = popup_area.y + row;

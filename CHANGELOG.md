@@ -12,8 +12,19 @@ messages — what changed and why, not just what.
   `User-Agent: tuxwire/<version>` header, which such sites expect. Failures are
   also reported honestly: "answered HTTP 403" or "sent an empty reply" instead
   of an XML parse error. Applies to the terminal app and the Android app alike.
+- **Feeds in older encodings** (declared as ISO-8859-1 in the feed's XML line)
+  keep their accents: the parser now gets the raw bytes. Downloads also have
+  size limits (20 MiB per feed, 2 MiB of a page searched for feed links).
 
 ### Added
+
+- **Paste a web page, get its feed.** Adding a source (`a` in the terminal app)
+  now accepts a blog's address, not only its feed address. tuxwire reads the
+  feed link the page advertises, or, if there is none, tries the usual
+  addresses (`/feed`, `/rss.xml`, `/index.xml` and so on, at most 12 guesses).
+  Comment feeds are skipped, and the confirm screen shows which address was
+  found and how. Lives in `tuxwire-core` (`discover_feed`), so the Android
+  app gets it too.
 
 - **Faster refresh, and a time limit per feed.** Refreshing now downloads up to
   six feeds at the same time instead of one after another (results are still

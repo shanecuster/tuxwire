@@ -395,3 +395,28 @@ tmux kill-session -t tuxwire-lists-test         # only this session
 4. **Not confirmed from here:** the sandbox cannot reach system76.com, so whether the header alone fixes
    that feed must be tested on a real device. If it still fails, the new message will now say why.
 - Tests: 156 pass (153 before, 3 new); clippy and fmt clean; core still has no ratatui/crossterm.
+
+## Feed discovery (branch `feature/feed-discovery`, 2026-10-10)
+
+1. **What.** `core/src/fetchers/discover.rs`, `discover_feed(input) -> Result<Discovered { url, feed, found_by }>`.
+   Order: the address is a feed -> the page's `<link rel=alternate>` lines (first real feed, skipping comment
+   feeds, up to 5 tried) -> up to 12 guessed addresses (`/feed /rss /rss.xml /atom.xml /feed.xml /index.xml`,
+   page path first, then site root, 10 s each). Needs no new dependency: the HTML is scanned by hand with the
+   tag helpers from `opml.rs` (now `pub(crate)`), and `reqwest::Url` resolves relative links.
+2. **Shared download.** `fetchers/rss.rs::fetch_bytes` (status check, size cap, empty reply) now backs both
+   refresh and discovery. Feeds are parsed from raw bytes, so ISO-8859-1 feeds work (test
+   `a_latin_1_feed_is_read_correctly`). `FEED_MAX_BYTES` 20 MiB; a page is searched for links in its first 2 MiB.
+3. **Comment feeds.** Link label / path+query contains the *word* "comments", or the feed's own title starts
+   with "comments" / ends with "comments feed". Rule of thumb, tested with look-alikes ("Commentary").
+   A feed typed directly is never rejected.
+4. **Terminal.** `tui/src/ui/mod.rs`: `a` calls `discover_feed`; the confirm screen has a new `note` field
+   ("found through the page's own feed link") under the URL, and saves the discovered address. Prompt reads
+   "Feed or page address". Note: the call blocks the UI while it runs (same as the old fetch); the worst case
+   (page advertises nothing, slow site) is bounded by 12 x 10 s.
+5. **Tested.** 20 unit tests (local `127.0.0.1` server; run with `NO_PROXY=127.0.0.1`), and by hand in tmux
+   with a throwaway `HOME` against a local test blog that listed a comments feed first: it chose the posts feed,
+   showed the note, and wrote the posts address to `sources.toml`. Mutation check: disabling the comment filter
+   fails 4 tests.
+6. **Typing `example.com/blog`** (no scheme) assumes `https://`. A site that only speaks plain `http` must be
+   typed with `http://`.
+- Tests: 178 pass (156 before, 22 new); clippy and fmt clean; core still has no ratatui/crossterm.

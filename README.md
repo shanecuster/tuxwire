@@ -29,8 +29,8 @@ post" — and actually find that note again days or weeks later.
 ### Multi-source aggregation, fully editable
 Pull from as many RSS/Atom feeds as you want, grouped into topics you
 define yourself — not a fixed category list. Add a source by pressing `a`
-inside the app (paste a feed URL, tuxwire validates it, pick or type a
-topic), or edit `~/.config/tuxwire/sources.toml` directly in a text
+inside the app (paste a feed URL or just a blog's address, tuxwire finds
+and validates the feed, pick or type a topic), or edit `~/.config/tuxwire/sources.toml` directly in a text
 editor. Either way, the file is yours to read and change at any time.
 
 ### Expandable topic tree
@@ -314,7 +314,9 @@ topic = "linux"
 - `topic` is required on every source, and each source belongs to
   **exactly one** topic — keeps the sidebar unambiguous.
 - Add sources by editing this file directly, or press `a` in-app to add
-  one interactively (it validates the feed URL before saving).
+  one interactively. Paste a feed address, or a web page's address: tuxwire
+  looks for the page's feed (skipping comment feeds) and validates it before
+  saving.
 
 ### `theme.toml` — colors
 
