@@ -261,6 +261,14 @@ fn read_opml_file(path: &Path) -> anyhow::Result<String> {
 /// Unlike the reader, this does not create a missing file: exporting a list
 /// that does not exist is a mistake worth telling the person about.
 fn export_from(path: &Path) -> anyhow::Result<String> {
+    // Say plainly what is wrong when the list has no file yet, instead of
+    // showing the operating system's bare "No such file or directory".
+    if !path.exists() {
+        bail!(
+            "there is nothing to export: {} does not exist yet (open tuxwire once, or import a file, to create it)",
+            path.display()
+        );
+    }
     let sources = load_sources_at(path, false)?;
     Ok(write_opml(&sources))
 }
@@ -559,6 +567,13 @@ mod tests {
                 .collect()
         };
         assert_eq!(urls(&first), urls(&second));
+    }
+
+    /// Exporting a list whose sources file does not exist says so plainly.
+    #[test]
+    fn exporting_a_missing_list_is_explained() {
+        let err = export_from(&temp_dir().join("nope.toml")).unwrap_err();
+        assert!(err.to_string().contains("nothing to export"));
     }
 
     /// Exporting never overwrites a file that is already there.
