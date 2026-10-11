@@ -7,6 +7,11 @@ messages — what changed and why, not just what.
 
 ### Fixed
 
+- **A newly added feed showed no articles until the next refresh**, which made
+  the app look broken. Adding a source (terminal `a`, Android "save") now
+  fetches that one feed straight away. If the download fails the feed is still
+  saved, and the message says why.
+
 - **Feeds that sent an empty page to tuxwire** (System76's blog, for one)
   failed with "unable to parse feed: no root element". Requests now send a
   `User-Agent: tuxwire/<version>` header, which such sites expect. Failures are
