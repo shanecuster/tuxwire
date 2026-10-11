@@ -107,10 +107,12 @@ your regular default browser instead. Nothing breaks either way.
 </p>
 
 ### Export your saved articles to Markdown
-Press `E` from the Saved view to export everything you've saved — title,
-source link, save/note dates, and your note — into a single Markdown
-file. Configurable output location, useful for feeding notes straight
-into a blog post or personal wiki.
+Press `E` from the Saved view to export everything you've saved into a
+single Markdown file: saved articles without a note first, as a short list,
+then your notes, each with its title, source link, dates and the note in full.
+Set `include_unnoted = false` in `export.toml` to export only the notes.
+Configurable output location, useful for feeding notes straight into a blog
+post or personal wiki.
 
 ### Move your feeds in and out (OPML)
 Other feed readers use OPML files to move a feed list around. From the

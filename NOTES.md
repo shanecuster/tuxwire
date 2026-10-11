@@ -452,3 +452,18 @@ tmux kill-session -t tuxwire-lists-test         # only this session
    ./target/debug/tuxwire import-opml file.opml` (build first; do not put the fake HOME before `cargo`).
 5. **Tests:** 11 in `opml_cli.rs` (argument reading, list choice, comment keeping, duplicates, bad file
    changes nothing, missing file created, round trip, no overwrite, size limit, Reddit address).
+
+## Shared notes export (branch `feature/notes-export-core`, 2026-10-11)
+
+1. **`core/src/export.rs`.** `render_saved_markdown(&[Article], &ExportOptions) -> String` and
+   `format_article_markdown(&Article)`. Pure text; no paths. Two sections (no-note list first, then
+   notes), newest first, counts in the headings, `---` between notes. Empty string when nothing to write.
+2. **`ExportOptions { include_unnoted }`**, default true. TUI reads it from `export.toml`
+   (`include_unnoted`, optional, so old files still load).
+3. **TUI `export.rs`** now only decides the file location and calls core. Its formatting tests moved to
+   core (10 tests there); 5 file-writing tests stay.
+4. **Changes the look of the `E` file** (headings are now `###` under `##` sections). Documented in the
+   changelog.
+5. **Next:** step 2 (the Android bridge: save, unsave, edit note, list saved, export) and step 3 (the
+   Android screens). Neither is started.
+

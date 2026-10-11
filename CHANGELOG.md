@@ -21,6 +21,14 @@ messages — what changed and why, not just what.
   keep their accents: the parser now gets the raw bytes. Downloads also have
   size limits (20 MiB per feed, 2 MiB of a page searched for feed links).
 
+### Changed
+
+- **The saved-articles export (`E`) now has two sections**: saved articles
+  without a note, as a short list, then the notes in full, newest first, with
+  counts. A new `include_unnoted` setting in `export.toml` (default on) leaves
+  the first section out when you only want your notes. The text is now built by
+  the shared core crate, ready for the Android app to write the same file.
+
 ### Added
 
 - **`tuxwire import-opml FILE` and `tuxwire export-opml FILE`.** Bring a feed
