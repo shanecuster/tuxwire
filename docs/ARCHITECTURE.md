@@ -252,7 +252,7 @@ underneath.
 | `y`       | view history (every article ever fetched) |
 | `/`       | search titles/notes across the current view |
 | `a`       | add a new source                  |
-| `E`       | export every saved article into one combined Markdown file (Saved view only; regenerates the file fresh each press) |
+| `E`       | export every saved article into one combined Markdown file (Saved view only -- pressing it elsewhere shows a hint; regenerates the file fresh each press) |
 | `q`       | quit                             |
 
 ---

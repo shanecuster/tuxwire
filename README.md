@@ -107,7 +107,7 @@ your regular default browser instead. Nothing breaks either way.
 </p>
 
 ### Export your saved articles to Markdown
-Press `E` from the Saved view to export everything you've saved into a
+Press `S` to open the Saved view, then `E` to export everything you've saved into a
 single Markdown file: saved articles without a note first, as a short list,
 then your notes, each with its title, source link, dates and the note in full.
 Set `include_unnoted = false` in `export.toml` to export only the notes.
@@ -305,7 +305,7 @@ tuxwire
 | `y` | View history (every article ever fetched) |
 | `/` | Search titles and notes in the current view |
 | `a` | Add a new source |
-| `E` | Export all saved articles to Markdown |
+| `E` | Export all saved articles to Markdown (works from the Saved view, `S`) |
 | `i` | Cycle the icon mode (Nerd Font → Unicode → ASCII) |
 | `t` | Open the theme picker (`j`/`k` preview, `Enter` keep, `Esc` cancel) |
 | `f` | Switch feed lists (`j`/`k` choose, `Enter` switch, `Esc` cancel); only with two or more lists in `lists.toml` |

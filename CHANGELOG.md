@@ -23,6 +23,10 @@ messages — what changed and why, not just what.
 
 ### Changed
 
+- **`E` now tells you when you are in the wrong view.** Export only works from
+  the Saved view (`S`); pressing `E` anywhere else used to do nothing, which
+  looked like a broken key. It now shows "Export works from the Saved view:
+  press S, then E". The sidebar legend reads "export (S view)".
 - **The saved-articles export (`E`) now has two sections**: saved articles
   without a note, as a short list, then the notes in full, newest first, with
   counts. A new `include_unnoted` setting in `export.toml` (default on) leaves

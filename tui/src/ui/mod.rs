@@ -274,7 +274,7 @@ const KEY_HINTS: [(&str, &str); 13] = [
     ("/", "search"),
     ("r", "refresh"),
     ("a", "add source"),
-    ("E", "export all saved"),
+    ("E", "export (S view)"),
     ("i", "icon mode"),
     ("t", "theme"),
     ("→/l", "expand topic"),
@@ -1687,6 +1687,14 @@ fn draw_until_quit(
                             message: format!("export failed: {err:#}"),
                         },
                     };
+                }
+
+                // `E` anywhere except the Saved view does nothing useful, so
+                // say so instead of leaving the person wondering why the
+                // key seems dead. (The arm above handles the Saved view
+                // first; `match` takes the first arm that fits.)
+                KeyCode::Char('E') => {
+                    notice = Some("Export works from the Saved view: press S, then E".to_string());
                 }
 
                 _ => {}
