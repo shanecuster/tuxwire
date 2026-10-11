@@ -11,6 +11,7 @@
 
 use anyhow::Context;
 use std::path::PathBuf;
+use tuxwire_core::export::{ExportOptions, render_saved_markdown};
 use tuxwire_core::models::Article;
 
 /// The resolved export destination -- a real, existing directory on disk,
@@ -20,7 +21,12 @@ use tuxwire_core::models::Article;
 /// default, or the `~` expansion -- everything downstream just gets a
 /// directory it can write into.
 pub struct ExportConfig {
+    /// The directory the export file is written into.
     pub path: PathBuf,
+    /// Whether saved articles that have no note are listed too (`true`, the
+    /// default) or only the articles that have a note (`false`). Read from
+    /// `include_unnoted` in `export.toml`.
+    pub include_unnoted: bool,
 }
 
 /// The shape `export.toml` deserializes into -- one table, one key,
@@ -43,6 +49,16 @@ struct RawExportFile {
 #[derive(serde::Deserialize)]
 struct RawExport {
     path: String,
+    /// Optional, so an `export.toml` written before this setting existed
+    /// still loads. `serde(default = "...")` calls the named function to get
+    /// the value when the key is missing.
+    #[serde(default = "include_unnoted_by_default")]
+    include_unnoted: bool,
+}
+
+/// The value used when `export.toml` does not say: export everything saved.
+fn include_unnoted_by_default() -> bool {
+    true
 }
 
 /// The bundled fallback `export.toml`, embedded into the compiled binary
@@ -101,7 +117,10 @@ impl ExportConfig {
             format!("failed to create export directory {}", export_dir.display())
         })?;
 
-        Ok(ExportConfig { path: export_dir })
+        Ok(ExportConfig {
+            path: export_dir,
+            include_unnoted: raw.export.include_unnoted,
+        })
     }
 }
 
@@ -154,71 +173,15 @@ fn export_config_path() -> anyhow::Result<PathBuf> {
 /// lands in this same file under `ExportConfig::path`.
 const EXPORT_FILENAME: &str = "saved-articles.md";
 
-/// Formats one saved article as the Markdown block `docs/ARCHITECTURE.md`
-/// specifies:
-/// ```markdown
-/// ## <title>
-/// Source: [<source name>](<url>) — saved <saved_at date>, noted <noted_at date>
-///
-/// > <note>
-/// ```
-/// `saved_at` falls back to the article's publish `timestamp` for a saved
-/// article that predates migration 003 (tuxwire didn't track `saved_at`
-/// before then) -- the exact same fallback `ui/mod.rs`'s `saved_meta_line`
-/// already uses for the Saved view's own on-screen date, so the exported
-/// file and the screen it was exported from never disagree about which
-/// date "saved" means. `noted_at` is only appended when it's a genuinely
-/// different day than `saved_at` -- a note added the same day it was saved
-/// (the common case) would otherwise show a redundant "noted 2026-08-12"
-/// right next to "saved 2026-08-12."
-///
-/// The note itself is only included when there is one -- an empty `>`
-/// blockquote for a saved-without-a-note article would just be visual
-/// noise in the exported file. A multi-line note gets `> ` prefixed onto
-/// *every* line (`str::lines`), not just the first, since Markdown's
-/// blockquote syntax only continues a quote across a line break if each
-/// line carries its own `>` marker.
-pub fn format_article_markdown(article: &Article) -> String {
-    let saved_day = article
-        .saved_at
-        .map(|d| d.format("%Y-%m-%d").to_string())
-        .unwrap_or_else(|| article.timestamp.format("%Y-%m-%d").to_string());
-
-    let noted_day = article.noted_at.map(|d| d.format("%Y-%m-%d").to_string());
-
-    let mut header = format!(
-        "Source: [{}]({}) — saved {saved_day}",
-        article.source, article.url
-    );
-    if let Some(noted_day) = noted_day.filter(|day| *day != saved_day) {
-        header.push_str(&format!(", noted {noted_day}"));
-    }
-
-    let mut out = format!("## {}\n{header}\n", article.title);
-
-    if let Some(note) = article
-        .note
-        .as_deref()
-        .filter(|note| !note.trim().is_empty())
-    {
-        let quoted: String = note
-            .lines()
-            .map(|line| format!("> {line}"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        out.push('\n');
-        out.push_str(&quoted);
-        out.push('\n');
-    }
-
-    out
-}
-
 /// The `E` keybind's one job: write every saved article into a single
-/// `saved-articles.md` under `config.path`, each article's own block (see
-/// `format_article_markdown`) separated from the next by a Markdown
-/// thematic break (`---` on its own line), and hand back the path written
-/// so `ui/mod.rs` can show it back to the user as confirmation.
+/// `saved-articles.md` under `config.path`, and hand back the path written so
+/// `ui/mod.rs` can show it back to the user as confirmation.
+///
+/// The text itself comes from `tuxwire_core::export::render_saved_markdown`,
+/// the same function the Android app uses, so both apps write the same file:
+/// saved articles without a note first, then the notes. This function only
+/// adds the terminal-specific part, which is where the file goes (from
+/// `export.toml`) and whether articles without a note are included.
 ///
 /// **Regenerates the file from scratch every time** rather than appending
 /// -- `std::fs::write` truncates and replaces whatever was there, same as
@@ -233,15 +196,16 @@ pub fn export_saved_articles(
     config: &ExportConfig,
     articles: &[Article],
 ) -> anyhow::Result<PathBuf> {
-    let combined = articles
-        .iter()
-        .map(format_article_markdown)
-        .collect::<Vec<_>>()
-        .join("\n---\n");
+    // Step 1: build the text with the shared formatter, passing along the
+    // person's choice about articles that have no note.
+    let options = ExportOptions {
+        include_unnoted: config.include_unnoted,
+    };
+    let text = render_saved_markdown(articles, &options);
 
+    // Step 2: write it (replacing any earlier export) and report where.
     let path = config.path.join(EXPORT_FILENAME);
-    std::fs::write(&path, combined)
-        .with_context(|| format!("failed to write {}", path.display()))?;
+    std::fs::write(&path, text).with_context(|| format!("failed to write {}", path.display()))?;
 
     Ok(path)
 }
@@ -251,8 +215,9 @@ mod tests {
     use super::*;
     use chrono::{TimeZone, Utc};
 
-    /// A minimal saved article, note included -- enough for
-    /// `format_article_markdown` to have every field it looks at.
+    /// A saved article with a note. (How one article is formatted is tested
+    /// in `tuxwire_core::export`; the tests here are about the file the
+    /// terminal app writes.)
     fn saved_article() -> Article {
         let mut article = Article::new(
             "Btrfs send/receive got noticeably faster in 6.18".to_string(),
@@ -268,98 +233,49 @@ mod tests {
         article
     }
 
-    /// The exact shape ARCHITECTURE.md specifies: a `##` title line, the
-    /// source/link/date line, and the note as a blockquote -- with
-    /// `noted_at` shown because it's a different day than `saved_at`.
-    #[test]
-    fn formats_the_documented_markdown_shape() {
-        let markdown = format_article_markdown(&saved_article());
-
-        assert_eq!(
-            markdown,
-            "## Btrfs send/receive got noticeably faster in 6.18\n\
-             Source: [r/linux](https://reddit.com/r/linux/comments/example) — saved 2026-08-12, noted 2026-08-14\n\
-             \n\
-             > worth trying on the homelab NAS\n"
-        );
-    }
-
-    /// `noted_at` on the *same* day as `saved_at` is the common case (a
-    /// note written at save time) and would be redundant to print twice --
-    /// only a genuinely different day should show.
-    #[test]
-    fn omits_noted_date_when_it_matches_saved_date() {
+    /// A saved article with no note.
+    fn plain_article() -> Article {
         let mut article = saved_article();
-        article.noted_at = article.saved_at;
-
-        let markdown = format_article_markdown(&article);
-
-        assert!(markdown.contains("saved 2026-08-12"));
-        assert!(!markdown.contains("noted"));
-    }
-
-    /// A saved article with no note at all shouldn't render an empty `>`
-    /// blockquote -- there's nothing to quote.
-    #[test]
-    fn omits_the_blockquote_when_there_is_no_note() {
-        let mut article = saved_article();
+        article.title = "Just saved, no note".to_string();
         article.note = None;
         article.noted_at = None;
-
-        let markdown = format_article_markdown(&article);
-
-        assert!(!markdown.contains('>'));
+        article
     }
 
-    /// A saved article from before migration 003 has no `saved_at` at all
-    /// -- falls back to the publish `timestamp`, same as `saved_meta_line`
-    /// in `ui/mod.rs`.
+    /// The file holds the shared two-section text: saved articles without a
+    /// note first, then the notes, and it lands in `saved-articles.md`.
     #[test]
-    fn falls_back_to_publish_timestamp_when_saved_at_is_missing() {
-        let mut article = saved_article();
-        article.saved_at = None;
-
-        let markdown = format_article_markdown(&article);
-
-        assert!(markdown.contains("saved 2026-08-10"));
-    }
-
-    /// A multi-line note needs `> ` on every line for Markdown to render it
-    /// as one continuous blockquote rather than a blockquote followed by
-    /// plain paragraphs.
-    #[test]
-    fn quotes_every_line_of_a_multiline_note() {
-        let mut article = saved_article();
-        article.note = Some("first line\nsecond line".to_string());
-
-        let markdown = format_article_markdown(&article);
-
-        assert!(markdown.contains("> first line\n> second line"));
-    }
-
-    /// Every saved article lands in the *one* combined file, each block
-    /// separated from the next by a `---` thematic break on its own line
-    /// -- not concatenated directly against each other, which would run
-    /// one article's text straight into the next `##` heading.
-    #[test]
-    fn export_saved_articles_joins_every_article_with_a_separator() {
+    fn export_writes_both_sections_to_the_one_file() {
         let dir = tempdir();
-        let config = ExportConfig { path: dir.clone() };
+        let config = ExportConfig {
+            path: dir.clone(),
+            include_unnoted: true,
+        };
 
-        let mut first = saved_article();
-        first.title = "First article".to_string();
-        let mut second = saved_article();
-        second.title = "Second article".to_string();
-
-        let expected = format!(
-            "{}\n---\n{}",
-            format_article_markdown(&first),
-            format_article_markdown(&second)
-        );
-
-        let path = export_saved_articles(&config, &[first, second]).unwrap();
+        let path = export_saved_articles(&config, &[saved_article(), plain_article()]).unwrap();
         assert_eq!(path, dir.join(EXPORT_FILENAME));
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), expected);
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.find("## Saved articles (1)").unwrap() < text.find("## Notes (1)").unwrap());
+        assert!(text.contains("Just saved, no note"));
+        assert!(text.contains("> worth trying on the homelab NAS"));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// With `include_unnoted` off, articles without a note are left out.
+    #[test]
+    fn export_can_leave_out_articles_without_notes() {
+        let dir = tempdir();
+        let config = ExportConfig {
+            path: dir.clone(),
+            include_unnoted: false,
+        };
+
+        let path = export_saved_articles(&config, &[saved_article(), plain_article()]).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("## Notes (1)"));
+        assert!(!text.contains("Just saved, no note"));
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -372,7 +288,10 @@ mod tests {
     #[test]
     fn export_saved_articles_regenerates_rather_than_appending() {
         let dir = tempdir();
-        let config = ExportConfig { path: dir.clone() };
+        let config = ExportConfig {
+            path: dir.clone(),
+            include_unnoted: true,
+        };
 
         let mut first = saved_article();
         first.title = "Old article, later un-saved".to_string();
@@ -395,7 +314,10 @@ mod tests {
     #[test]
     fn export_saved_articles_with_none_saved_writes_an_empty_file() {
         let dir = tempdir();
-        let config = ExportConfig { path: dir.clone() };
+        let config = ExportConfig {
+            path: dir.clone(),
+            include_unnoted: true,
+        };
 
         export_saved_articles(&config, &[saved_article()]).unwrap();
         let path = export_saved_articles(&config, &[]).unwrap();
@@ -403,6 +325,19 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "");
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// An `export.toml` from before the setting existed has no
+    /// `include_unnoted` key, and must still load, exporting everything.
+    /// The key, when present, is respected.
+    #[test]
+    fn include_unnoted_defaults_to_on_and_can_be_turned_off() {
+        let old: RawExportFile = toml::from_str("[export]\npath = \"~/notes/\"\n").unwrap();
+        assert!(old.export.include_unnoted);
+
+        let off: RawExportFile =
+            toml::from_str("[export]\npath = \"~/notes/\"\ninclude_unnoted = false\n").unwrap();
+        assert!(!off.export.include_unnoted);
     }
 
     /// A fresh temp directory under the OS temp dir, unique per call (PID +
