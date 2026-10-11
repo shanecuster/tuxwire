@@ -328,7 +328,7 @@ fn xml_escape(text: &str) -> String {
 /// Whether `address` is an `http` or `https` web address with something after
 /// the scheme, no spaces, and a sensible length. Anything else (`javascript:`,
 /// `file:`, `ftp:`, plain text) is refused.
-fn is_web_address(address: &str) -> bool {
+pub(crate) fn is_web_address(address: &str) -> bool {
     if address.len() > MAX_URL_BYTES || address.chars().any(|c| c.is_whitespace() || c.is_control())
     {
         return false;
@@ -394,7 +394,7 @@ fn skip_declaration(text: &str) -> anyhow::Result<&str> {
 /// The byte position of the `>` that ends the tag at the start of `text`
 /// (which begins with `<`), ignoring any `>` inside a quoted attribute value.
 /// `None` if the tag never ends.
-fn find_tag_end(text: &str) -> Option<usize> {
+pub(crate) fn find_tag_end(text: &str) -> Option<usize> {
     // `Some('"')` while inside a double-quoted value, and so on; `None` outside.
     let mut quote: Option<char> = None;
     for (position, ch) in text.char_indices() {
@@ -410,7 +410,7 @@ fn find_tag_end(text: &str) -> Option<usize> {
 
 /// Splits the inside of a tag into its name and the attribute text after it:
 /// `outline text="a"` becomes `("outline", " text=\"a\"")`.
-fn split_tag_name(inner: &str) -> (&str, &str) {
+pub(crate) fn split_tag_name(inner: &str) -> (&str, &str) {
     match inner.find(char::is_whitespace) {
         Some(at) => (&inner[..at], &inner[at..]),
         None => (inner, ""),
@@ -420,7 +420,7 @@ fn split_tag_name(inner: &str) -> (&str, &str) {
 /// Reads `name="value"` pairs from the text after a tag's name. Values may be
 /// in single or double quotes (or, leniently, bare), and have their entities
 /// decoded (`&amp;` becomes `&`). Names are kept as written.
-fn parse_attributes(text: &str) -> Vec<(String, String)> {
+pub(crate) fn parse_attributes(text: &str) -> Vec<(String, String)> {
     let mut attrs = Vec::new();
     let mut rest = text.trim_start();
 
@@ -479,7 +479,7 @@ fn parse_attributes(text: &str) -> Vec<(String, String)> {
 
 /// The value of the attribute called `name`, ignoring upper/lower case in the
 /// name (`xmlUrl`, `xmlurl` and `XMLURL` all match). `None` if absent.
-fn attr<'a>(attrs: &'a [(String, String)], name: &str) -> Option<&'a str> {
+pub(crate) fn attr<'a>(attrs: &'a [(String, String)], name: &str) -> Option<&'a str> {
     attrs
         .iter()
         .find(|(key, _)| key.eq_ignore_ascii_case(name))

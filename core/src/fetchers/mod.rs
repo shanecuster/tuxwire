@@ -81,12 +81,14 @@ pub trait Fetcher {
 // ARCHITECTURE.md ("fetchers/ -- one module per source type"). `rss`
 // covers both RSS and Atom feeds, since `feed-rs` (see Cargo.toml) parses
 // both into one shape -- from the app's perspective they're the same
-// source type. `reddit` is a placeholder (see its module doc comment).
+// source type. `discover` works out which feed belongs to an address a person
+// pasted (a page or a feed). `reddit` is a placeholder (see its module doc comment).
 //
 // Reading `sources.toml` from disk is NOT done here any more: that is a
 // terminal-app concern (an Android app keeps its feeds in the database), so
 // the TOML loader lives in the `tui` crate and hands this module plain
 // `SourceConfig` values.
+pub mod discover;
 pub mod reddit;
 pub mod rss;
 

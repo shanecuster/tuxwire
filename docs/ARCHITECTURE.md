@@ -465,31 +465,56 @@ startup error, like the other config files.
 
 For v1, a single entry point: the in-app `a` keybind.
 
-Deliberately simple — no HTML parsing, no feed autodiscovery. Paste the
-actual feed URL, tuxwire validates it by trying to parse it, that's the
-whole mechanism:
+**Decision (2026-10-10, Shane): feed discovery is now part of adding a
+source.** This reverses the original "no HTML parsing, no autodiscovery"
+rule. Paste a feed address *or* a web page; `core/src/fetchers/discover.rs`
+(`discover_feed`) works out the feed, and the terminal app and the Android app
+share it:
 
-1. Prompt for a feed URL directly (not the site's homepage) — most sites'
-   feed URLs are easy to find or guess (`/feed`, `/rss.xml`, `/feed.xml`).
-2. **Validation via the existing parser, nothing new:** tuxwire attempts to
-   fetch and parse the URL with `feed-rs`, the same crate already used for
-   every regular fetch. If it parses successfully, that *is* the proof it's
-   a valid feed — no separate discovery logic needed.
-3. On success, confirm screen: guessed name (from the feed's own `<title>`
-   metadata, editable), and a **single required topic** — pick from
-   existing topics (queried live via `Storage::topics()`) or type a new
-   one. No source can be left without a topic.
-4. On failure, show a clear error ("couldn't parse this as a feed — check
-   the URL") and let the user retry or cancel.
+1. **The address is a feed.** It downloads and parses as RSS/Atom (`feed-rs`,
+   the same crate used for every regular fetch). Used as it is, one request.
+2. **The page advertises a feed.** The `<link rel="alternate"
+   type="application/rss+xml|atom+xml|feed+json" href="...">` lines in the
+   page's `<head>` are read by hand (no HTML-parser dependency; the tag
+   helpers are shared with the OPML reader). The first one that downloads as
+   a real feed wins; up to 5 are tried.
+3. **Common addresses.** If nothing is advertised, `/feed /rss /rss.xml
+   /atom.xml /feed.xml /index.xml` are tried under the page's own path and
+   then the top of the site: at most 12 guesses, 10 seconds each, never
+   spawning work in the background. A guess only counts if it parses as a
+   feed, so a web page that happens to exist at `/feed` is rejected.
+
+**Comment feeds are never picked up by discovery** (steps 2-3): a link is
+skipped when its `title` or its path/query has the *word* "comments"
+("Comments Feed", `/comments/feed`, `?feed=comments-rss2`), and a downloaded
+feed is skipped when its own title *starts with* "comments" or ends with
+"comments feed". It is a rule of thumb: a blog called "Commentary" or
+"Comment is free" is not rejected. A feed address typed directly (step 1) is
+never second-guessed. If a page offers only a comments feed, the error says so.
+
+The rest of the flow is unchanged:
+
+1. Prompt for a feed or page address (`https://` is added when no scheme is
+   typed; only `http`/`https` are accepted).
+2. Discovery as above. Everything it downloads is checked the same way as a
+   refresh: HTTP status, size limit (2 MiB read from a page, 20 MiB per feed),
+   empty reply, and a `tuxwire/<version>` User-Agent.
+3. On success, confirm screen: the address *of the feed* (which may differ
+   from what was typed, with a line saying how it was found), a guessed name
+   (from the feed's own `<title>` metadata, editable), and a **single
+   required topic** — pick from existing topics (queried live via
+   `Storage::topics()`) or type a new one. No source can be left without a
+   topic.
+4. On failure, show discovery's own message ("answered HTTP 404", "no feed
+   found at ... (tried /feed /rss ...)", "only offers a comments feed") and
+   let the user retry or cancel.
 5. On confirm, write a new `[[source]]` block into `sources.toml` using the
    `toml_edit` crate rather than plain `toml` — `toml_edit` preserves
    existing formatting/comments on write instead of rewriting the whole
    file.
 
-This intentionally reuses the app's existing fetch/parse path as validation
-rather than adding HTML scraping or a fallback-path-guessing system — less
-code, fewer moving parts, and one less thing that can break independently
-of the rest of the app.
+Validation is still the existing parser: a feed that parses *is* a valid
+feed. Discovery only decides *which address* to hand it.
 
 A phone-capture inbox (sharing a URL from Android straight into a pending
 list) was considered and deliberately deferred — see Roadmap.
@@ -539,7 +564,7 @@ tuxwire/
 │       ├── text.rs        # HTML -> plain text, sentence-aware length cap
 │       ├── opml.rs        # OPML feed-list reader and writer (no file access)
 │       ├── storage/       # SQLite access + migrations (Storage::open_at(path))
-│       ├── fetchers/      # Fetcher trait, RSS, Reddit stub, SourceConfig
+│       ├── fetchers/      # Fetcher trait, RSS, feed discovery, Reddit stub, SourceConfig
 │       ├── fetch_report.rs# per-fetch new/failed/offline tally
 │       ├── icons/         # the icon table (Icon, IconMode, IconSettings)
 │       ├── theme.rs       # Rgb, Palette, the eight built-in palettes

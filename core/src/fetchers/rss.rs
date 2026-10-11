@@ -29,7 +29,8 @@ const USER_AGENT: &str = concat!("tuxwire/", env!("CARGO_PKG_VERSION"));
 /// first use (`LazyLock` runs its initializer exactly once, the first time
 /// `HTTP_CLIENT` is dereferenced, and caches the result for every call
 /// after that). It uses [`FETCH_TIMEOUT`] as its time limit.
-static HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| build_client(FETCH_TIMEOUT));
+pub(crate) static HTTP_CLIENT: LazyLock<reqwest::Client> =
+    LazyLock::new(|| build_client(FETCH_TIMEOUT));
 
 /// Builds an HTTP client whose requests fail after `timeout`.
 ///
@@ -124,6 +125,11 @@ pub async fn fetch_feed(url: &str) -> anyhow::Result<feed_rs::model::Feed> {
     fetch_feed_with(&HTTP_CLIENT, url).await
 }
 
+/// The most bytes of one feed we are willing to read: 20 MiB. Real feeds are
+/// a few hundred kilobytes at most; the limit only stops a broken or hostile
+/// server from making us read forever and fill the phone's memory.
+pub(crate) const FEED_MAX_BYTES: usize = 20 * 1024 * 1024;
+
 /// The same as [`fetch_feed`], but using the HTTP client it is given.
 ///
 /// `client: &reqwest::Client` borrows a client, so many calls can share one
@@ -134,62 +140,108 @@ async fn fetch_feed_with(
     client: &reqwest::Client,
     url: &str,
 ) -> anyhow::Result<feed_rs::model::Feed> {
-    // `client.get(url).send()` is the explicit-`Client` equivalent of
-    // the `reqwest::get(url)` convenience function -- we can't use that
-    // convenience function here because it always builds its *own*
-    // internal client with no root certs of its own, which is exactly the
-    // codepath that hits the platform verifier (see `build_client`'s doc
-    // comment above). Otherwise this behaves the same way: it's `async`,
-    // so this line returns a `Future` immediately; `.await` is what
-    // actually drives the request and suspends this function (without
-    // blocking the whole program) until a response arrives.
-    //
-    // `.with_context(...)` (from anyhow) attaches a human-readable
-    // message to the error *if* this step fails, without changing
-    // anything on the success path. The closure `|| format!(...)`
-    // only actually runs when there's an error to attach it to — it's
-    // not wasted work formatting a string on every successful fetch.
-    let response = client
-        .get(url)
+    // The shared version: no extra time limit beyond the client's own.
+    fetch_feed_limited(client, url, None).await
+}
+
+/// Downloads and parses the feed at `url`, optionally with a time limit of its
+/// own that replaces the client's. Feed discovery uses a shorter limit when it
+/// is only *guessing* at addresses, so a slow site cannot stall it for long.
+///
+/// `timeout: Option<Duration>` is `Some(limit)` or `None` (`None` means "keep
+/// the client's own limit").
+pub(crate) async fn fetch_feed_limited(
+    client: &reqwest::Client,
+    url: &str,
+    timeout: Option<Duration>,
+) -> anyhow::Result<feed_rs::model::Feed> {
+    // Step 1: download the bytes. All the HTTP details (status check, size
+    // limit, empty reply) live in `fetch_bytes`, which discovery shares.
+    let bytes = fetch_bytes(client, url, FEED_MAX_BYTES, timeout).await?;
+
+    // Step 2: parse them. `feed_rs::parser::parse` accepts anything
+    // implementing `std::io::Read`; `&[u8]` (a borrowed run of bytes) does.
+    // Handing it the raw bytes, instead of text we decoded ourselves, lets it
+    // honour the encoding the feed's own `<?xml ... encoding="..."?>` line
+    // declares (older feeds are often ISO-8859-1, not UTF-8). The parser is
+    // the same for RSS and Atom: `feed-rs` detects the format and returns one
+    // unified `Feed` either way.
+    feed_rs::parser::parse(&bytes[..])
+        .with_context(|| format!("failed to parse feed XML from {url}"))
+}
+
+/// Downloads `url` and returns the body as raw bytes, refusing anything that
+/// is not a normal, non-empty answer.
+///
+/// - **Status:** a refusal (403, 429, 500...) is reported as such ("answered
+///   HTTP 403") rather than handed to a parser, which would blame the content.
+///   Redirects never reach the check: reqwest follows them.
+/// - **Size:** at most `max_bytes` are read; a longer answer is an error. The
+///   body is read in pieces ("chunks") so a huge answer is stopped early
+///   instead of being loaded whole first.
+/// - **Empty:** a successful status with nothing (or only blank space) in it
+///   is reported as an empty reply.
+///
+/// `pub(crate)` so `fetchers::discover` can use the same careful download.
+///
+/// `timeout` replaces the client's own limit for this one request when it is
+/// `Some`.
+pub(crate) async fn fetch_bytes(
+    client: &reqwest::Client,
+    url: &str,
+    max_bytes: usize,
+    timeout: Option<Duration>,
+) -> anyhow::Result<Vec<u8>> {
+    // Step 1: build the request. `let mut` because the optional time limit is
+    // added to the builder afterwards (each builder call returns a new one).
+    let mut request = client.get(url);
+    if let Some(limit) = timeout {
+        request = request.timeout(limit);
+    }
+
+    // Step 2: send it. `.send().await` returns once the status line and
+    // headers have arrived; the body is still on its way. `.with_context`
+    // adds a readable message to the error only if the step fails.
+    let mut response = request
         .send()
         .await
         .with_context(|| format!("failed to fetch feed at {url}"))?;
 
-    // Check the HTTP status before reading anything. A refusal (403, 429,
-    // 500...) usually comes with a web page or nothing at all, and handing
-    // that to the XML parser produces a confusing "failed to parse" message
-    // that blames the feed. `is_success()` is true only for 200-299.
-    // `bail!` returns an `Err` from this function right away, like `?` does.
-    // Redirects (301, 302...) never reach this line: reqwest follows them.
+    // Step 3: check the HTTP status before reading anything. `is_success()` is
+    // true only for 200-299. `bail!` returns an `Err` from this function
+    // right away, like `?` does.
     let status = response.status();
     if !status.is_success() {
         anyhow::bail!("{url} answered HTTP {status}");
     }
 
-    // Read the whole response body into a `String`. RSS/Atom feeds
-    // are XML text, so `.text()` (rather than `.bytes()`) is the
-    // natural fit here — it also handles the response's declared
-    // character encoding for us.
-    let body = response
-        .text()
+    // Step 4: read the body piece by piece, stopping if it grows past the
+    // limit. `response.chunk()` yields `Ok(Some(piece))` until the body ends
+    // (`Ok(None)`); `while let` repeats for as long as there is a piece.
+    let mut body: Vec<u8> = Vec::new();
+    while let Some(piece) = response
+        .chunk()
         .await
-        .with_context(|| format!("failed to read response body from {url}"))?;
+        .with_context(|| format!("failed to read response body from {url}"))?
+    {
+        if body.len() + piece.len() > max_bytes {
+            anyhow::bail!(
+                "{url} sent more than {} MiB; refusing to read it",
+                max_bytes / (1024 * 1024)
+            );
+        }
+        body.extend_from_slice(&piece);
+    }
 
-    // A successful status with nothing in it is also not a feed. Say so
-    // plainly, instead of letting the parser report "no root element".
-    // `trim()` ignores blank space, so a body of only newlines counts as empty.
-    if body.trim().is_empty() {
+    // Step 5: a successful status with nothing in it is not a feed or a page.
+    // Say so plainly, instead of letting a parser report "no root element".
+    // `trim_ascii` ignores blank space at both ends, so a body of only
+    // newlines counts as empty.
+    if body.trim_ascii().is_empty() {
         anyhow::bail!("{url} sent an empty reply (no feed in it)");
     }
 
-    // `feed_rs::parser::parse` accepts anything implementing
-    // `std::io::Read`; `&str` doesn't implement `Read` directly, but
-    // `.as_bytes()` gives us a `&[u8]` byte slice, which does. This
-    // is the same parser regardless of whether the feed turns out to
-    // be RSS or Atom — `feed-rs` detects the format and returns one
-    // unified `Feed` either way.
-    feed_rs::parser::parse(body.as_bytes())
-        .with_context(|| format!("failed to parse feed XML from {url}"))
+    Ok(body)
 }
 
 /// Works out the plain-text summary for one feed entry, or `None` if the entry
@@ -366,7 +418,9 @@ mod tests {
     /// Starts a one-shot server on `127.0.0.1` that answers the first request
     /// with `reply` (a complete HTTP response) and returns the address to
     /// fetch plus a channel that delivers the request text the server saw.
-    fn serve_once(reply: &'static str) -> (String, std::sync::mpsc::Receiver<String>) {
+    fn serve_once(
+        reply: impl Into<Vec<u8>> + Send + 'static,
+    ) -> (String, std::sync::mpsc::Receiver<String>) {
         use std::io::{Read, Write};
         use std::net::TcpListener;
 
@@ -377,12 +431,14 @@ mod tests {
 
         // Step 2: in the background, accept one connection, pass the request
         // text back through the channel, and write the canned reply.
+        // `Into<Vec<u8>>` lets a test pass text (`&str`) or raw bytes.
+        let reply: Vec<u8> = reply.into();
         std::thread::spawn(move || {
             if let Ok((mut stream, _)) = listener.accept() {
                 let mut buffer = [0u8; 4096];
                 let read = stream.read(&mut buffer).unwrap_or(0);
                 let _ = sender.send(String::from_utf8_lossy(&buffer[..read]).into_owned());
-                let _ = stream.write_all(reply.as_bytes());
+                let _ = stream.write_all(&reply);
             }
         });
 
@@ -426,6 +482,42 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("empty reply"), "error was: {error}");
+    }
+
+    /// An answer longer than the limit is refused, not read to the end.
+    #[tokio::test]
+    async fn an_oversized_reply_is_refused() {
+        // A 5000-byte body against a 1000-byte limit.
+        let mut reply =
+            b"HTTP/1.1 200 OK\r\nContent-Length: 5000\r\nConnection: close\r\n\r\n".to_vec();
+        reply.extend(std::iter::repeat_n(b'x', 5000));
+        let (url, _seen) = serve_once(reply);
+        let error = fetch_bytes(&build_client(Duration::from_secs(5)), &url, 1000, None)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("refusing to read"), "error was: {error}");
+    }
+
+    /// A feed that declares an older encoding (ISO-8859-1) in its XML line is
+    /// read correctly, because the parser gets the raw bytes. `0xE9` is `é`
+    /// in that encoding (and is not valid UTF-8 on its own).
+    #[tokio::test]
+    async fn a_latin_1_feed_is_read_correctly() {
+        let mut body = b"<?xml version=\"1.0\" encoding=\"ISO-8859-1\"?><rss version=\"2.0\"><channel><title>Caf".to_vec();
+        body.push(0xE9);
+        body.extend_from_slice(b"</title><item><title>A</title></item></channel></rss>");
+        let mut reply = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        )
+        .into_bytes();
+        reply.extend(body);
+        let (url, _seen) = serve_once(reply);
+        let feed = fetch_feed_with(&build_client(Duration::from_secs(5)), &url)
+            .await
+            .unwrap();
+        assert_eq!(feed.title.unwrap().content, "Caf\u{e9}");
     }
 
     /// Parses `xml` as a feed and returns the summary of its first entry.
