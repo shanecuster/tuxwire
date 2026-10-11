@@ -88,6 +88,15 @@ impl FeedLists {
         self.lists.len() == 1
     }
 
+    /// The name remembered as the active list (`active = "..."` in
+    /// `lists.toml`), or `None` if nothing is remembered. It may name a list
+    /// that no longer exists, so check it with [`FeedLists::index_of`].
+    pub fn preferred(&self) -> Option<&str> {
+        // `as_deref` turns `&Option<String>` into `Option<&str>`, lending
+        // the text out without copying it.
+        self.preferred.as_deref()
+    }
+
     /// The position of the list called `name`, ignoring case, or `None`.
     pub fn index_of(&self, name: &str) -> Option<usize> {
         self.lists

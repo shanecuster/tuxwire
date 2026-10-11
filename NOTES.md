@@ -434,7 +434,21 @@ tmux kill-session -t tuxwire-lists-test         # only this session
 3. **Android.** `AddFeedScreen`: after `addFeed`, `refreshFeed(address)`; success leaves the form, a failed
    download keeps the form open with a message ("saved, but its articles could not be downloaded yet ...")
    and a `saved` flag stops a second save. Kotlin is not compiled in the sandbox: test on a device.
-4. **Not done (ask if wanted):** OPML import still adds feeds without fetching them (use refresh all).
+4. **OPML import fetching:** done on Android (`feature/opml-import-refresh-android`, one refresh-all at the end). The terminal import does not download; the next start does.
 5. **Tests:** two new terminal tests (articles stored at once; dead feed reported not raised), mutation-checked
    (breaking the source lookup fails the first); also run by hand in tmux against a local test blog.
 - Tests: 180 pass (178 before, 2 new); clippy and fmt clean; core still has no ratatui/crossterm.
+
+## Terminal OPML commands (branch `feature/tui-opml-commands`, 2026-10-11)
+
+1. **`tui/src/opml_cli.rs`.** `parse_args` (no arguments = open the reader; a typo is an error, never
+   a silent fallback), `pick_list`, `import_into`, `export_from`, `save_export`, `run`. `main.rs` calls
+   it right after the lists are loaded, before anything else starts.
+2. **`append_sources_at`** in `fetchers/config.rs` adds many `[[source]]` blocks in one read/write and
+   replaces the file via a `.tmp` rename. `add_source_at` now calls it with one source.
+3. **Shared with core:** `opml::feed_address` is now public so duplicates are compared the same way the
+   export writes addresses. No new dependency; no argument-parsing crate (the arguments are hand-read).
+4. **Try it without touching your config:** `env -u XDG_CONFIG_HOME -u XDG_DATA_HOME HOME=$(mktemp -d)
+   ./target/debug/tuxwire import-opml file.opml` (build first; do not put the fake HOME before `cargo`).
+5. **Tests:** 11 in `opml_cli.rs` (argument reading, list choice, comment keeping, duplicates, bad file
+   changes nothing, missing file created, round trip, no overwrite, size limit, Reddit address).

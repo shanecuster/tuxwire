@@ -224,8 +224,48 @@ pub fn add_source_at(
     url: &str,
     topic: &str,
 ) -> anyhow::Result<()> {
-    let contents = std::fs::read_to_string(path)
-        .with_context(|| format!("failed to read sources file {}", path.display()))?;
+    // One source is just a batch of one: build the `SourceConfig` the batch
+    // function wants and hand it over, so there is a single code path that
+    // edits the file. (`to_string` turns each `&str` into an owned `String`,
+    // because `SourceConfig` owns its text rather than borrowing it.)
+    append_sources_at(
+        path,
+        &[SourceConfig {
+            name: name.to_string(),
+            source_type,
+            url: url.to_string(),
+            topic: topic.to_string(),
+        }],
+    )
+}
+
+/// Appends several `[[source]]` blocks to the sources file at `path` in one
+/// go: the file is read and parsed once, every block is added, and the file
+/// is written once.
+///
+/// This is what `import-opml` uses. Calling [`add_source_at`] once per feed
+/// would re-read and re-write the whole file for every feed, which is slow
+/// for an import of hundreds of feeds. Like `add_source_at` it keeps every
+/// comment and blank line already in the file (see the comment there for why
+/// `toml_edit` is used), and does no validation: the caller has already
+/// checked the addresses.
+///
+/// The file is replaced safely: the new text is first written to a sibling
+/// file ending in `.tmp`, then renamed over the real one. A rename is a single
+/// step, so a crash or a full disk part-way through leaves the original file
+/// untouched instead of half-written.
+pub fn append_sources_at(path: &std::path::Path, new: &[SourceConfig]) -> anyhow::Result<()> {
+    // Step 1: read the file, or start from nothing if it does not exist yet
+    // (a brand-new list). Any other read error (permissions, a folder where
+    // a file should be) is a real problem and is passed on with `?`.
+    let contents = match std::fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(err) => {
+            return Err(err)
+                .with_context(|| format!("failed to read sources file {}", path.display()));
+        }
+    };
 
     // `DocumentMut` is `toml_edit`'s mutable, formatting-preserving parse
     // of the whole file -- as opposed to `toml::from_str::<RawSourcesFile>`
@@ -234,12 +274,9 @@ pub fn add_source_at(
         .parse()
         .with_context(|| format!("failed to parse sources file {} as TOML", path.display()))?;
 
-    // `sources.toml` always has at least one `[[source]]` block by the
-    // time this can run (see the doc comment on `load_sources_at` -- a
-    // missing file is written out with the bundled default on first
-    // load), but this guards the theoretical case of a hand-edited file
-    // with the `source` key removed entirely: auto-vivify an empty array
-    // of tables to append into, rather than erroring.
+    // Step 2: make sure there is a `source` list to append to. A missing file
+    // or a hand-edited file with the key removed gets an empty one created
+    // ("auto-vivified") instead of an error.
     if doc
         .get("source")
         .and_then(|item| item.as_array_of_tables())
@@ -252,26 +289,37 @@ pub fn add_source_at(
         anyhow!("sources file's 'source' key exists but isn't an array of [[source]] tables")
     })?;
 
-    // Field order here (name, type, url, topic) matches every existing
-    // `[[source]]` block in `sources.toml.example` and the real config --
-    // purely cosmetic (TOML doesn't care), but keeps a newly-appended
-    // block looking like every other one instead of standing out.
-    let mut table = toml_edit::Table::new();
-    table["name"] = toml_edit::value(name);
-    table["type"] = toml_edit::value(match source_type {
-        SourceType::Rss => "rss",
-        SourceType::Reddit => "reddit",
-    });
-    table["url"] = toml_edit::value(url);
-    table["topic"] = toml_edit::value(topic);
-    sources.push(table);
+    // Step 3: add one block per new source. Field order (name, type, url,
+    // topic) matches every existing `[[source]]` block in
+    // `sources.toml.example` and the real config -- purely cosmetic (TOML
+    // doesn't care), but keeps a newly-appended block looking like the rest.
+    for source in new {
+        let mut table = toml_edit::Table::new();
+        table["name"] = toml_edit::value(source.name.as_str());
+        table["type"] = toml_edit::value(match source.source_type {
+            SourceType::Rss => "rss",
+            SourceType::Reddit => "reddit",
+        });
+        table["url"] = toml_edit::value(source.url.as_str());
+        table["topic"] = toml_edit::value(source.topic.as_str());
+        sources.push(table);
+    }
 
+    // Step 4: make sure the folder exists (a new list may live in a folder
+    // that has not been created yet), then replace the file safely.
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create folder {}", parent.display()))?;
+    }
     // `doc.to_string()` renders the whole document back out, including
-    // every byte of formatting/comments that was there before -- the
-    // entire reason this function reaches for `toml_edit` over plain
-    // `toml` in the first place.
-    std::fs::write(path, doc.to_string())
-        .with_context(|| format!("failed to write sources file {}", path.display()))?;
+    // every byte of formatting/comments that was there before.
+    let mut temporary = path.as_os_str().to_owned();
+    temporary.push(".tmp");
+    let temporary = std::path::PathBuf::from(temporary);
+    std::fs::write(&temporary, doc.to_string())
+        .with_context(|| format!("failed to write {}", temporary.display()))?;
+    std::fs::rename(&temporary, path)
+        .with_context(|| format!("failed to replace sources file {}", path.display()))?;
 
     Ok(())
 }

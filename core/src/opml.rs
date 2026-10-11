@@ -286,7 +286,10 @@ pub fn write_opml(sources: &[SourceConfig]) -> String {
 
 /// The web address to write for a source: its own address for an RSS feed,
 /// or the subreddit's ordinary feed address for a Reddit source.
-fn feed_address(source: &SourceConfig) -> String {
+///
+/// Public so that the terminal app can tell whether an imported feed is
+/// already in a list by comparing addresses on the same terms the export uses.
+pub fn feed_address(source: &SourceConfig) -> String {
     match source.source_type {
         SourceType::Rss => source.url.clone(),
         SourceType::Reddit => {

@@ -112,6 +112,21 @@ source link, save/note dates, and your note — into a single Markdown
 file. Configurable output location, useful for feeding notes straight
 into a blog post or personal wiki.
 
+### Move your feeds in and out (OPML)
+Other feed readers use OPML files to move a feed list around. From the
+terminal:
+
+```bash
+tuxwire import-opml feeds.opml          # add the feeds in the file
+tuxwire export-opml my-feeds.opml       # save your feeds as a file
+tuxwire export-opml - | less            # "-" prints to the screen
+```
+
+With several feed lists, add `--list NAME` to pick one; without it the list you
+used last is used. Importing skips feeds you already have, keeps the comments in
+your `sources.toml`, and downloads nothing: the new feeds' articles arrive the
+next time you open tuxwire. Exporting never overwrites an existing file.
+
 ### Eight built-in themes, plus your own colors
 Everforest (default), Dracula, Gruvbox, Catppuccin Mocha, Nord, Solarized
 Dark, Tokyo Night, and Catppuccin Macchiato (tuxwire's original palette).
