@@ -420,3 +420,21 @@ tmux kill-session -t tuxwire-lists-test         # only this session
 6. **Typing `example.com/blog`** (no scheme) assumes `https://`. A site that only speaks plain `http` must be
    typed with `http://`.
 - Tests: 178 pass (156 before, 22 new); clippy and fmt clean; core still has no ratatui/crossterm.
+
+## Fetch on add (branch `feature/refresh-on-add`, 2026-10-11)
+
+1. **Problem.** Saving a source only wrote it to `sources.toml` (Android: the database); its articles
+   arrived on the next refresh, so a new feed looked empty. The check step had already downloaded it, but
+   that result was thrown away.
+2. **Terminal.** `handle_add_source_key` has a new out-parameter `saved_url: &mut Option<String>`, set only
+   when a source is saved (not on `Esc`). The caller then runs `fetch_added_source(storage, list_path, url)`:
+   it looks the source up in the active list's file again (so it is fetched exactly like a refresh), runs
+   `fetch_one`, and `record_outcome`s it. The footer uses `fetch_notice`, new articles get the `Icon::New`
+   marker, and a failed download is counted in the report (feed stays saved), not raised.
+3. **Android.** `AddFeedScreen`: after `addFeed`, `refreshFeed(address)`; success leaves the form, a failed
+   download keeps the form open with a message ("saved, but its articles could not be downloaded yet ...")
+   and a `saved` flag stops a second save. Kotlin is not compiled in the sandbox: test on a device.
+4. **Not done (ask if wanted):** OPML import still adds feeds without fetching them (use refresh all).
+5. **Tests:** two new terminal tests (articles stored at once; dead feed reported not raised), mutation-checked
+   (breaking the source lookup fails the first); also run by hand in tmux against a local test blog.
+- Tests: 180 pass (178 before, 2 new); clippy and fmt clean; core still has no ratatui/crossterm.

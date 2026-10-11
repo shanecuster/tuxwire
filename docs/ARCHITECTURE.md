@@ -512,6 +512,13 @@ The rest of the flow is unchanged:
    `toml_edit` crate rather than plain `toml` — `toml_edit` preserves
    existing formatting/comments on write instead of rewriting the whole
    file.
+6. **Decision (2026-10-11, Shane): the new source is fetched right away.**
+   Straight after the block is written, just that one source is fetched and
+   stored (`fetch_added_source` in `tui/src/ui/mod.rs`; Android calls
+   `refresh_feed` after `add_feed`), so the person sees its articles at once
+   instead of an empty feed that looks broken. The footer reports the result
+   like `r` does ("2 new article(s)"). A feed that fails to download stays
+   saved, with the reason shown; its articles arrive on the next refresh.
 
 Validation is still the existing parser: a feed that parses *is* a valid
 feed. Discovery only decides *which address* to hand it.

@@ -1030,11 +1030,15 @@ fn draw_until_quit(
             let Mode::AddSource(step) = mode else {
                 unreachable!("just checked mode is Mode::AddSource above")
             };
+            // Filled in by `handle_add_source_key` with the new feed's address
+            // when (and only when) a source was just saved.
+            let mut saved_url: Option<String> = None;
             mode = handle_add_source_key(
                 key.code,
                 step,
                 topics,
                 &feed_lists.lists()[active_list].path,
+                &mut saved_url,
             )?;
 
             // `mode` is back to `Mode::Normal` once the flow ends, whether
@@ -1071,6 +1075,27 @@ fn draw_until_quit(
                 topic_index = previously_selected_topic
                     .and_then(|name| topics.iter().position(|t| *t == name))
                     .unwrap_or(0);
+
+                // A source was just saved: fetch its articles now, so the person
+                // is not left looking at a feed with nothing in it and thinking
+                // the app is broken. Done after the list above was re-read (so
+                // the feed is in `scope`) and before `articles` is reloaded
+                // below (so the new articles are in that list). A feed that
+                // fails to download stays saved; the footer says what happened.
+                if let Some(url) = saved_url {
+                    match fetch_added_source(storage, &feed_lists.lists()[active_list].path, &url) {
+                        Ok(report) => {
+                            new_article_ids.extend(report.new_article_ids.iter().copied());
+                            notice = fetch_notice(&icons, &report, true);
+                        }
+                        Err(err) => {
+                            notice = Some(format!(
+                                "{} Saved, but couldn't fetch it yet: {err:#}",
+                                icons.glyph(Icon::Error)
+                            ));
+                        }
+                    }
+                }
 
                 // The add-source flow has nothing to do with a source-row
                 // selection that may have been active before it opened --
@@ -1893,6 +1918,51 @@ fn refresh_topic(
     ))
 }
 
+/// Fetches just the one source whose feed address is `url`, from the active
+/// list's file, and stores whatever comes back. Used right after a source is
+/// added with `a`, so its articles show up at once instead of waiting for the
+/// next `r` (a feed that is saved but empty looks like a broken app).
+///
+/// The source is looked up in the file again (rather than built from what was
+/// just typed) so it is fetched exactly like every later refresh will fetch it.
+/// A source that is not found (the file changed in the meantime) simply gives
+/// an empty report, which `fetch_notice` words as "no local sources".
+///
+/// Like [`refresh_topic`], a dead feed does not make this an `Err`: it is
+/// counted in the returned `FetchReport`, so the footer can say what happened,
+/// while the source stays saved. `Err` is only for real problems (the file
+/// could not be read, the database could not be written).
+///
+/// `block_in_place` + `block_on` is the same "drive an async call from this
+/// synchronous code" trick `refresh_topic` explains.
+fn fetch_added_source(
+    storage: &Storage,
+    list_path: &Path,
+    url: &str,
+) -> anyhow::Result<FetchReport> {
+    let mut report = FetchReport::default();
+
+    // `into_iter().find(..)` walks the sources and stops at the first match.
+    let found = fetchers::configured_sources_at(list_path)?
+        .into_iter()
+        .find(|source| source.url() == url);
+
+    // `if let Some(..)` runs the fetch only when the source was found.
+    if let Some(source) = found {
+        let outcome = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(fetchers::fetch_one(&source))
+        });
+        // Same as a refresh: print a failure's reason, then store the articles
+        // (noting which are new) or count the failure.
+        if let Err(err) = &outcome.result {
+            eprintln!("skipped {}: {err:#}", outcome.name);
+        }
+        report.record_outcome(storage, outcome)?;
+    }
+
+    Ok(report)
+}
+
 /// The one-shot footer message summarizing a fetch round, with an icon in
 /// front, or `None` when there's nothing worth interrupting the keybind
 /// hints for.
@@ -2153,11 +2223,16 @@ fn move_sidebar_selection(
 /// `fetchers::config::add_source_at`, see its own doc comment for why
 /// nothing here needs to separately "reload" the in-memory fetcher list)
 /// -- every other keypress just edits `step`'s fields in memory.
+///
+/// `saved_url` is an "out-parameter": a `&mut` the caller lends so this
+/// function can hand a second answer back besides the returned `Mode`. It is
+/// set to the new feed's address only when a source was actually saved.
 fn handle_add_source_key(
     key: KeyCode,
     step: AddSourceStep,
     topics: &mut Vec<String>,
     list_path: &Path,
+    saved_url: &mut Option<String>,
 ) -> anyhow::Result<Mode> {
     match step {
         AddSourceStep::Url { mut text, error } => match key {
@@ -2381,6 +2456,11 @@ fn handle_add_source_key(
                             topics.push(trimmed_topic.to_string());
                             topics.sort();
                         }
+                        // Tell the caller which feed was just saved (through
+                        // the `&mut` out-parameter), so it can fetch that
+                        // feed's articles right away. Cancelling with `Esc`
+                        // leaves this `None`.
+                        *saved_url = Some(url.clone());
                         Ok(Mode::Normal)
                     }
                     Err(err) => Ok(Mode::AddSource(AddSourceStep::Confirm {
@@ -4231,5 +4311,97 @@ mod tests {
             list_topics(&storage, &scope, &several, &sources).unwrap(),
             ["kernel"]
         );
+    }
+
+    /// Writes a one-source `sources.toml` into a fresh temporary folder and
+    /// returns its path. The source points at `url` and is filed under
+    /// "Testing". (A unique folder per call keeps parallel tests apart.)
+    fn temp_sources_file(url: &str) -> std::path::PathBuf {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("tuxwire-add-test-{}-{unique}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("sources.toml");
+        std::fs::write(
+            &path,
+            format!(
+                "[[source]]\nname = \"Test Blog\"\ntype = \"rss\"\nurl = \"{url}\"\ntopic = \"Testing\"\n"
+            ),
+        )
+        .unwrap();
+        path
+    }
+
+    /// Starts a tiny web server on `127.0.0.1` (this computer only) that
+    /// answers one request with a feed holding two articles, and returns the
+    /// feed's address. If a proxy is set in your environment, run the tests
+    /// with `NO_PROXY=127.0.0.1`.
+    fn serve_two_article_feed() -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let body = r#"<?xml version="1.0"?><rss version="2.0"><channel><title>Test Blog</title>
+<item><title>First</title><link>https://example.com/1</link></item>
+<item><title>Second</title><link>https://example.com/2</link></item></channel></rss>"#;
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buffer = [0u8; 2048];
+                let _ = stream.read(&mut buffer);
+                let reply = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(reply.as_bytes());
+            }
+        });
+        format!("http://127.0.0.1:{port}/feed.xml")
+    }
+
+    /// Fetching a just-added source stores its articles at once, reports them
+    /// as new, and files them under the source's topic. (`multi_thread` because
+    /// `fetch_added_source` uses `block_in_place`, which needs a runtime with
+    /// more than one worker thread, the same as the real app.)
+    #[tokio::test(flavor = "multi_thread")]
+    async fn adding_a_source_fetches_its_articles_at_once() {
+        let url = serve_two_article_feed();
+        let path = temp_sources_file(&url);
+        let storage = Storage::open_in_memory().unwrap();
+
+        let report = fetch_added_source(&storage, &path, &url).unwrap();
+
+        assert_eq!(report.attempted, 1);
+        assert_eq!(report.failed, 0);
+        assert_eq!(report.new_article_ids.len(), 2);
+        assert_eq!(
+            storage
+                .articles_by_topic(&Scope::All, "Testing")
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    /// A feed that cannot be downloaded is not an error for the caller: it is
+    /// counted as a failure in the report (so the footer can say so), and the
+    /// source stays saved. An address that is not in the file fetches nothing.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_dead_feed_is_reported_not_raised() {
+        // Port 9 on this computer refuses connections: a dead feed with no
+        // real network needed.
+        let url = "http://127.0.0.1:9/feed.xml";
+        let path = temp_sources_file(url);
+        let storage = Storage::open_in_memory().unwrap();
+
+        let report = fetch_added_source(&storage, &path, url).unwrap();
+        assert_eq!(report.attempted, 1);
+        assert_eq!(report.failed, 1);
+        assert!(report.new_article_ids.is_empty());
+
+        // An address that is not in the file: nothing is attempted.
+        let none = fetch_added_source(&storage, &path, "http://127.0.0.1:9/other").unwrap();
+        assert_eq!(none.attempted, 0);
     }
 }
