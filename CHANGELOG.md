@@ -42,6 +42,14 @@ messages — what changed and why, not just what.
 
 ### Added
 
+- **Groundwork for optional CouchDB sync (core only, nothing to see yet).** The
+  shared core can now share saved articles and notes between devices through a
+  CouchDB server you run yourself. It is off by default and has no screen yet, so
+  nothing changes for you until the Android and terminal parts land. It insists
+  on `https://` (plain `http://` only to this computer), keeps the password out
+  of the database, logs and error messages, and does nothing at all while turned
+  off. Migration 008 adds a change stamp to articles and a small bookkeeping
+  table; back up your database before first running a build that contains it.
 - **Un-save (`u`), always with a "are you sure?" first.** Saved something by
   mistake? `u` asks "Un-save?" and only a `y` does it. A note and a save are
   locked together: an article with a note shows a stronger warning (un-saving
