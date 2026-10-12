@@ -449,22 +449,58 @@ impl Storage {
     /// the database reflects `saved = true, read = false`.
     ///
     /// Also stamps `saved_at` with the current instant -- per
-    /// ARCHITECTURE.md, "`saved_at`, set the moment `s` is pressed." Set
-    /// unconditionally on every call rather than only the first: there's
-    /// no separate "unsave" action in tuxwire today, so in practice this
-    /// only ever runs once per article, but even a hypothetical re-save
-    /// should honestly reflect *when the save happened*, not the first
-    /// time it happened.
+    /// ARCHITECTURE.md, "`saved_at`, set the moment `s` is pressed." The
+    /// stamp is only written when the article was *not already saved*:
+    /// pressing `s` on an article that is already saved must not move its
+    /// save date forward. (Un-saving clears `saved_at`, so saving again
+    /// after an un-save gets a fresh date, which is honest: it really was
+    /// saved again then.)
+    ///
+    /// In the SQL below, `CASE WHEN ... THEN ... ELSE ... END` is SQL's
+    /// "if / else". On the right-hand side of an `UPDATE`, column names
+    /// still mean the row's *old* values, so `saved` and `saved_at` here
+    /// are what the row held before this statement changed anything.
     ///
     /// `note: Option<String>` mirrors `Article::note` exactly: passing
     /// `None` saves the article with no note, `Some(text)` saves it with
     /// one attached.
     pub fn save_article(&self, id: i64, note: Option<String>) -> anyhow::Result<()> {
         self.conn.execute(
-            "UPDATE articles SET saved = 1, read = 1, note = ?2, saved_at = ?3 WHERE id = ?1",
+            "UPDATE articles SET saved = 1, read = 1, note = ?2,
+                 saved_at = CASE WHEN saved = 1 AND saved_at IS NOT NULL
+                                 THEN saved_at ELSE ?3 END
+             WHERE id = ?1",
             params![id, note, Utc::now()],
         )?;
         Ok(())
+    }
+
+    /// Un-saves an article: the opposite of [`Storage::save_article`].
+    ///
+    /// A note and a save are *locked together*: a note only exists on a
+    /// saved article (see [`Storage::update_note`]), so un-saving also
+    /// deletes the note and its date. Callers must therefore ask the person
+    /// to confirm before calling this on an article that has a note. This
+    /// function does not ask; it only does.
+    ///
+    /// The article itself stays in the database and keeps its read state;
+    /// only the saved-article parts are cleared (`saved`, `saved_at`,
+    /// `note`, `noted_at`). `NULL` is SQL's "no value", which is how
+    /// `None` is stored.
+    ///
+    /// Returns `true` when an article with this `id` existed and was saved,
+    /// and `false` when there was nothing to un-save (unknown id, or the
+    /// article was not saved), so the caller can tell the difference.
+    pub fn unsave_article(&self, id: i64) -> anyhow::Result<bool> {
+        // `execute` returns how many rows the statement changed. The
+        // `AND saved = 1` makes an already-unsaved article change zero rows.
+        let changed = self.conn.execute(
+            "UPDATE articles
+             SET saved = 0, saved_at = NULL, note = NULL, noted_at = NULL
+             WHERE id = ?1 AND saved = 1",
+            params![id],
+        )?;
+        Ok(changed > 0)
     }
 
     /// Replaces the note on an already-saved article -- the `n` keybind
@@ -480,11 +516,29 @@ impl Storage {
     /// `Option::then` is what turns that `bool` into `Some(Utc::now())` /
     /// `None` in one expression, matching `note`'s own shape rather than
     /// writing an `if`/`else` to build the same thing by hand.
+    ///
+    /// A note and a save are *locked together*: storing a real note also
+    /// saves the article (marking it read and stamping `saved_at` if it
+    /// had no save date yet), so a note can never sit on an article that
+    /// is missing from the Saved view and the export. Clearing a note
+    /// (`None`) leaves the article saved. Removing the save is a separate,
+    /// confirmed action: [`Storage::unsave_article`].
     pub fn update_note(&self, id: i64, note: Option<String>) -> anyhow::Result<()> {
-        let noted_at = note.is_some().then(Utc::now);
+        let now = Utc::now();
+        let noted_at = note.is_some().then_some(now);
+        // `has_note` is 1 when a real note is being stored and 0 when it is
+        // being cleared; SQLite has no separate boolean type, so 0/1 it is.
+        let has_note = i64::from(note.is_some());
         self.conn.execute(
-            "UPDATE articles SET note = ?2, noted_at = ?3 WHERE id = ?1",
-            params![id, note, noted_at],
+            "UPDATE articles
+             SET note = ?2,
+                 noted_at = ?3,
+                 saved = CASE WHEN ?4 = 1 THEN 1 ELSE saved END,
+                 read = CASE WHEN ?4 = 1 THEN 1 ELSE read END,
+                 saved_at = CASE WHEN ?4 = 1 AND (saved = 0 OR saved_at IS NULL)
+                                 THEN ?5 ELSE saved_at END
+             WHERE id = ?1",
+            params![id, note, noted_at, has_note, now],
         )?;
         Ok(())
     }
@@ -1123,6 +1177,122 @@ mod tests {
             cleared.noted_at, None,
             "clearing the note must clear noted_at too"
         );
+    }
+
+    /// Builds a throwaway article and stores it, returning its id. Used by
+    /// the save / un-save tests below so each test body stays short.
+    fn stored_article(storage: &Storage) -> i64 {
+        let article = Article::new(
+            "title".to_string(),
+            "url".to_string(),
+            "source".to_string(),
+            "topic".to_string(),
+            Utc::now(),
+        );
+        storage.insert_article(&article).unwrap()
+    }
+
+    /// Saving an article that is already saved must not move its save date.
+    #[test]
+    fn saving_again_keeps_the_original_saved_at() {
+        let storage = test_storage();
+        let id = stored_article(&storage);
+
+        storage.save_article(id, None).unwrap();
+        let first = storage.saved_articles().unwrap()[0].saved_at;
+
+        // A second save (for example `s` pressed twice) changes nothing.
+        storage.save_article(id, None).unwrap();
+        let second = storage.saved_articles().unwrap()[0].saved_at;
+
+        assert!(first.is_some());
+        assert_eq!(first, second, "a repeat save must keep the first save date");
+    }
+
+    /// Un-saving removes the article from the saved list and clears the
+    /// note and both dates, but keeps the article itself (and its read flag).
+    #[test]
+    fn unsave_article_clears_save_note_and_dates() {
+        let storage = test_storage();
+        let id = stored_article(&storage);
+        storage
+            .save_article(id, Some("worth keeping".to_string()))
+            .unwrap();
+        storage
+            .update_note(id, Some("worth keeping".to_string()))
+            .unwrap();
+
+        // `true` means "there was a save to remove".
+        assert!(storage.unsave_article(id).unwrap());
+
+        assert!(storage.saved_articles().unwrap().is_empty());
+        let after = storage.article_by_id(id).unwrap().expect("article remains");
+        assert!(!after.saved);
+        assert!(after.read, "un-saving does not make the article unread");
+        assert_eq!(after.note, None, "the note goes with the save");
+        assert_eq!(after.noted_at, None);
+        assert_eq!(after.saved_at, None);
+    }
+
+    /// Un-saving something that is not saved (or does not exist) reports
+    /// `false` and changes nothing.
+    #[test]
+    fn unsave_article_reports_when_there_was_nothing_to_remove() {
+        let storage = test_storage();
+        let id = stored_article(&storage);
+
+        assert!(!storage.unsave_article(id).unwrap(), "never saved");
+        assert!(!storage.unsave_article(9_999).unwrap(), "unknown id");
+    }
+
+    /// Saving again after an un-save gets a new, fresh save date.
+    #[test]
+    fn saving_after_an_unsave_stamps_a_new_saved_at() {
+        let storage = test_storage();
+        let id = stored_article(&storage);
+        storage.save_article(id, None).unwrap();
+        storage.unsave_article(id).unwrap();
+
+        let before = Utc::now();
+        storage.save_article(id, None).unwrap();
+
+        let saved_at = storage.saved_articles().unwrap()[0]
+            .saved_at
+            .expect("a re-save is stamped");
+        assert!(saved_at >= before);
+    }
+
+    /// The lock between a note and a save: storing a note saves the article
+    /// too, and clearing the note leaves it saved.
+    #[test]
+    fn a_note_saves_the_article_and_clearing_it_keeps_the_save() {
+        let storage = test_storage();
+        let id = stored_article(&storage);
+
+        // A note on an article that was never saved saves it.
+        storage
+            .update_note(id, Some("remember this".to_string()))
+            .unwrap();
+        let saved = storage.saved_articles().unwrap();
+        assert_eq!(saved.len(), 1);
+        assert!(saved[0].saved_at.is_some());
+        assert!(saved[0].read);
+
+        // Editing the note keeps the original save date.
+        let first_saved_at = saved[0].saved_at;
+        storage
+            .update_note(id, Some("remember this, edited".to_string()))
+            .unwrap();
+        assert_eq!(
+            storage.saved_articles().unwrap()[0].saved_at,
+            first_saved_at
+        );
+
+        // Clearing the note removes only the note.
+        storage.update_note(id, None).unwrap();
+        let after = storage.saved_articles().unwrap();
+        assert_eq!(after.len(), 1, "the article is still saved");
+        assert_eq!(after[0].note, None);
     }
 
     #[test]
