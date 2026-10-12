@@ -81,6 +81,14 @@ const MIGRATIONS: &[Migration] = &[
         name: "007_add_summary",
         sql: include_str!("../../migrations/007_add_summary.sql"),
     },
+    // Bookkeeping for the optional CouchDB sync (a change stamp on each
+    // article and a table of synced document revisions). Adds only; sync
+    // itself stays off until the person turns it on.
+    Migration {
+        version: 8,
+        name: "008_add_sync",
+        sql: include_str!("../../migrations/008_add_sync.sql"),
+    },
 ];
 
 /// Brings `conn`'s schema up to date by running every migration whose
@@ -106,6 +114,22 @@ const MIGRATIONS: &[Migration] = &[
 /// Called once, right after opening the connection, before any other
 /// query touches the database -- see `Storage::open_at` in `storage/mod.rs`.
 pub fn run(conn: &Connection) -> anyhow::Result<()> {
+    // Every migration, with no upper limit.
+    run_through(conn, u32::MAX)
+}
+
+/// Runs only the migrations up to and including version `last`. Tests use it
+/// to build a database as it was before a given migration, put data in it, and
+/// then run the rest, which is how a migration's effect on existing data is
+/// checked.
+#[cfg(test)]
+pub fn run_up_to(conn: &Connection, last: u32) -> anyhow::Result<()> {
+    run_through(conn, last)
+}
+
+/// The shared loop behind [`run`] and the test-only `run_up_to`: applies the
+/// pending migrations whose version is at most `last`.
+fn run_through(conn: &Connection, last: u32) -> anyhow::Result<()> {
     // `query_row` runs a query expected to return exactly one row and
     // hands it to the closure to decode. `PRAGMA` statements always
     // return their value this way (as if `SELECT`ed), so this reads back
@@ -115,6 +139,10 @@ pub fn run(conn: &Connection) -> anyhow::Result<()> {
     let current_version: u32 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
 
     for migration in MIGRATIONS {
+        // Stop at the limit (always u32::MAX outside tests).
+        if migration.version > last {
+            break;
+        }
         if migration.version <= current_version {
             // Already applied on a previous run -- skip it. This is what
             // makes `run` safe to call unconditionally on every startup,
