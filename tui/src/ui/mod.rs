@@ -78,6 +78,7 @@ use crate::export::{self, ExportConfig};
 use crate::feedlists::{self, FeedLists, Switch};
 use crate::fetchers::{self, ConfiguredSource};
 use crate::icons::{self, Icon, IconMode, IconSettings};
+use crate::sync_cli;
 use crate::theme::{self, BUILTIN_THEMES, Theme, ThemeSettings, picker_order};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use ratatui::Frame;
@@ -270,7 +271,7 @@ const NOTE_PREVIEW_CHARS: usize = 45;
 /// `i` (cycle the icon mode: Nerd → Unicode → ASCII) and `t` (the theme
 /// picker) are listed here too, since they change the whole app's look
 /// rather than one row.
-const KEY_HINTS: [(&str, &str); 14] = [
+const KEY_HINTS: [(&str, &str); 15] = [
     ("s", "save"),
     ("u", "un-save"),
     ("x", "close"),
@@ -281,6 +282,7 @@ const KEY_HINTS: [(&str, &str); 14] = [
     ("r", "refresh"),
     ("a", "add source"),
     ("E", "export (S view)"),
+    ("c", "sync (optional)"),
     ("i", "icon mode"),
     ("t", "theme"),
     ("→/l", "expand topic"),
@@ -1829,6 +1831,28 @@ fn draw_until_quit(
                             };
                         }
                     }
+                }
+
+                // `c` runs the optional CouchDB sync once (saved articles and
+                // notes only). It does nothing unless the person set sync up
+                // and switched it on in `sync.toml`; otherwise the footer says
+                // why. The screen waits while it runs (at most about half a
+                // minute), then the lists are reloaded so articles that
+                // arrived from another device show up straight away.
+                KeyCode::Char('c') => {
+                    notice = Some(match sync_cli::sync_for_reader() {
+                        Ok(summary) => format!("Synced: {summary}"),
+                        Err(err) => format!("Sync: {err:#}"),
+                    });
+                    articles = articles_for_view(
+                        storage,
+                        &scope,
+                        view,
+                        topics,
+                        topic_index,
+                        selected_source.as_deref(),
+                    )?;
+                    article_index = article_index.min(articles.len().saturating_sub(1));
                 }
 
                 // `E` anywhere except the Saved view does nothing useful, so

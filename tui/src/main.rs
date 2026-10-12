@@ -26,6 +26,8 @@ mod fetchers;
 mod icons;
 mod opml_cli;
 mod paths;
+mod sync_cli;
+mod sync_config;
 mod theme;
 mod ui;
 
@@ -61,6 +63,16 @@ async fn main() -> anyhow::Result<()> {
     // usual. A mistake is turned into an error here (`anyhow::bail!` returns
     // early with a message) so a typo never silently opens the full-screen app.
     let words: Vec<String> = std::env::args().skip(1).collect();
+
+    // `tuxwire sync` (and `sync --test`) is the optional CouchDB sync. It
+    // is tried first so its words never reach the OPML parser below, and it
+    // returns before any feed is downloaded. A mistake after `sync` is
+    // reported the same way as an OPML one.
+    match sync_cli::parse_args(&words) {
+        Ok(Some(command)) => return sync_cli::run(command).await,
+        Ok(None) => {}
+        Err(message) => anyhow::bail!("{message}\n\n{}", opml_cli::USAGE),
+    }
     match opml_cli::parse_args(&words) {
         Ok(Some(command)) => return opml_cli::run(command, &feed_lists),
         Ok(None) => {}
