@@ -45,6 +45,19 @@ pub(crate) static HTTP_CLIENT: LazyLock<reqwest::Client> =
 /// can build a client with a very short time limit and check that a silent
 /// server really is cut off, without waiting 30 seconds.
 fn build_client(timeout: Duration) -> reqwest::Client {
+    client_builder()
+        // The whole request, including reading the body, must finish within
+        // this time or it fails with a timeout error.
+        .timeout(timeout)
+        .build()
+        .expect("building the shared HTTP client with bundled root certs should never fail")
+}
+
+/// The HTTP client settings every part of tuxwire shares: the bundled root
+/// certificates (see [`build_client`]) and the `User-Agent`. Returned as a
+/// builder so a caller can add its own limits (the CouchDB sync adds a short
+/// connect timeout) before calling `.build()`.
+pub(crate) fn client_builder() -> reqwest::ClientBuilder {
     let root_certs = webpki_root_certs::TLS_SERVER_ROOT_CERTS
         .iter()
         .map(|der| {
@@ -59,11 +72,6 @@ fn build_client(timeout: Duration) -> reqwest::Client {
         // a bot or a broken script, and some sites (or the content networks in
         // front of them) answer it with an empty page instead of the feed.
         .user_agent(USER_AGENT)
-        // The whole request, including reading the body, must finish within
-        // this time or it fails with a timeout error.
-        .timeout(timeout)
-        .build()
-        .expect("building the shared HTTP client with bundled root certs should never fail")
 }
 
 /// One RSS/Atom source, built from a `[[source]]` block in `sources.toml`

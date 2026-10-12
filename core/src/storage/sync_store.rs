@@ -88,6 +88,15 @@ impl Storage {
         upsert_sync_doc(self, doc_id, rev, updated_at)
     }
 
+    /// Forgets the remembered revision for `doc_id`, so the article counts as
+    /// "never sent" and is written again next time. Used when a document was
+    /// deleted on the server (for example by hand in the CouchDB web page).
+    pub fn forget_sync_doc(&self, doc_id: &str) -> anyhow::Result<()> {
+        self.conn
+            .execute("DELETE FROM sync_docs WHERE doc_id = ?1", params![doc_id])?;
+        Ok(())
+    }
+
     /// How far through CouchDB's change list we have read, or `None` before
     /// the first pull (meaning "start from the beginning").
     pub fn sync_since(&self) -> anyhow::Result<Option<String>> {
