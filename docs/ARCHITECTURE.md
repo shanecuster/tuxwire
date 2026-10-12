@@ -246,13 +246,14 @@ underneath.
 | `Enter`   | open article in `w3m` (falls back to `$BROWSER`/`xdg-open` if `w3m` isn't installed) |
 | `x`       | skip article (recolors, no keyword-learning behind it — see below) |
 | `s`       | save article (auto-marks as read) |
-| `n`       | edit note on a saved article     |
+| `u`       | un-save the selected article, after a yes/no question (an article with a note loses the note too -- see "Un-save and the note lock") |
+| `n`       | write or edit a note (a real note also saves the article; emptying the box asks before deleting an existing note) |
 | `r`       | refresh all sources               |
 | `S`       | view saved articles               |
 | `y`       | view history (every article ever fetched) |
 | `/`       | search titles/notes across the current view |
 | `a`       | add a new source                  |
-| `E`       | export every saved article into one combined Markdown file (Saved view only -- pressing it elsewhere shows a hint; regenerates the file fresh each press) |
+| `E`       | export every saved article into one combined Markdown file (Saved view only -- pressing it elsewhere shows a hint; regenerates the file fresh each press, and asks first if the file already exists) |
 | `q`       | quit                             |
 
 ---
@@ -264,11 +265,34 @@ underneath.
 | unread    | default state, not yet interacted with    |                                      |
 | read      | opened, or saved (saving implies read)     |                                      |
 | skipped   | explicitly dismissed                       | purely visual/state — see below     |
-| saved     | permanent until manually unsaved           | supports an optional free-text note |
+| saved     | stays until the person un-saves it (`u`, after a yes/no question) | supports an optional free-text note |
 
 **Saving auto-marks as read** — these are not tracked as independent
 booleans in practice; pressing `s` sets both `saved = true, read = true`
-in one action.
+in one action. Pressing `s` on an article that is already saved changes
+nothing, including its save date.
+
+### Un-save and the note lock (decided 2026-10-11, Shane)
+
+- **Un-saving exists.** `u` (a key of its own, so `s` and `u` can never be
+  confused) asks "Un-save?" naming the article; only a plain `y` does it.
+  `Storage::unsave_article` clears `saved`, `saved_at`, `note` and
+  `noted_at`; the article stays in the database and stays read.
+- **A note and a save are locked together.** A note only exists on a saved
+  article. Storing a real note (`Storage::update_note`) saves the article
+  too, and un-saving deletes the note. So if the article has a note, the
+  question says so ("un-saving also DELETES the note"); answering no leaves
+  both in place and the footer explains that a note keeps the article in
+  Saved. Clearing only the note is a separate action and leaves the article
+  saved.
+- **Nothing is deleted or replaced without a yes/no question** (a plain `y`
+  confirms; any other key cancels): un-saving, deleting a note (emptying the
+  note box on an article that has one), and `E` when the export file already
+  exists. Android asks for the same things in the same words. Deliberately
+  *not* confirmed for now: `x` (skip, which only recolors) and `Esc` in the
+  note box (discards typing that was never saved); revisit if they cause
+  trouble.
+- No schema change and no migration: the existing columns are reused.
 
 ---
 
@@ -662,7 +686,9 @@ Exports saved articles as Markdown files, fitting directly into the
 existing Hugo/rclone blog pipeline — "things I want to try" can become a
 ready-made post skeleton.
 
-- Triggered by the `E` keybind from the Saved view — no-op from
+- Triggered by the `E` keybind from the Saved view (if the export file
+  already exists, `E` asks "Replace export?" first, since the file is
+  rewritten from scratch) — no-op from
   `View::Topic`/`View::History`, since there's no guarantee the selected
   row there is even a saved article, and there's nothing selection-
   dependent about the export itself anyway (see below).

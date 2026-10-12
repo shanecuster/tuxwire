@@ -197,6 +197,11 @@ const SAVED_HINTS: &str = "j/k move · Enter open · Esc/Tab back · q quit";
 /// underneath.
 const EDITING_NOTE_HINTS: &str = "Enter save note · Esc cancel";
 
+/// The footer hint line shown while a yes/no confirmation popup
+/// (`Mode::Confirm`) is open. Only a plain `y` confirms; every other key
+/// cancels, so a stray key press can never delete anything.
+const CONFIRM_HINTS: &str = "y yes, do it · any other key cancels";
+
 /// The footer hint line shown while the add-source popup is open and on
 /// its first step -- prompting for the feed URL itself (see
 /// `AddSourceStep::Url`).
@@ -265,8 +270,9 @@ const NOTE_PREVIEW_CHARS: usize = 45;
 /// `i` (cycle the icon mode: Nerd → Unicode → ASCII) and `t` (the theme
 /// picker) are listed here too, since they change the whole app's look
 /// rather than one row.
-const KEY_HINTS: [(&str, &str); 13] = [
+const KEY_HINTS: [(&str, &str); 14] = [
     ("s", "save"),
+    ("u", "un-save"),
     ("x", "close"),
     ("n", "note"),
     ("S", "saved view"),
@@ -421,6 +427,43 @@ enum Mode {
     /// this is only the moment of actively typing the query.
     Searching {
         text: String,
+    },
+
+    /// A yes/no question is open: something would be deleted or replaced,
+    /// and nothing happens until the person answers. Only a plain `y`
+    /// confirms; any other key cancels (see the `Mode::Confirm` branch in
+    /// `draw_until_quit`). `Pending` says *what* is being confirmed and
+    /// carries everything needed to carry it out, so the question and the
+    /// action cannot drift apart.
+    Confirm(Pending),
+}
+
+/// What a `Mode::Confirm` popup is asking about. Each variant holds just
+/// enough to show the question and to do the action if the answer is yes.
+enum Pending {
+    /// `u`: remove an article from Saved. If it has a note, the note goes
+    /// too (a note and a save are locked together), and the question says so.
+    Unsave {
+        /// Database id of the article to un-save.
+        article_id: i64,
+        /// Its title, shown in the question so there is no doubt which one.
+        title: String,
+        /// Whether it has a note, which changes what the question warns about.
+        has_note: bool,
+    },
+    /// `n` then `Enter` on an emptied box: delete the note but keep the
+    /// article saved.
+    DeleteNote {
+        /// Database id of the article whose note would be deleted.
+        article_id: i64,
+        /// Its title, shown in the question.
+        title: String,
+    },
+    /// `E` when the export file already exists: replacing it overwrites
+    /// whatever is in the file, including anything edited by hand.
+    ReplaceExport {
+        /// The file that would be replaced, shown in the question.
+        path: std::path::PathBuf,
     },
 }
 
@@ -1112,6 +1155,79 @@ fn draw_until_quit(
             continue;
         }
 
+        // While a yes/no question is open, the next key is the answer: a
+        // plain `y` does the action, anything else cancels it. Checked before
+        // every other mode so that no navigation key can ever slip through
+        // while a deletion is waiting for its answer.
+        if matches!(mode, Mode::Confirm(_)) {
+            // `std::mem::replace` swaps `Mode::Normal` in and hands back the
+            // old value, so we own the `Pending` and the popup is closed
+            // whichever way the answer goes.
+            let Mode::Confirm(pending) = std::mem::replace(&mut mode, Mode::Normal) else {
+                continue;
+            };
+            let confirmed = key.code == KeyCode::Char('y');
+            match (pending, confirmed) {
+                // Yes: remove the save (and the note with it) in the
+                // database, then make the on-screen list match.
+                (
+                    Pending::Unsave {
+                        article_id,
+                        title,
+                        has_note,
+                    },
+                    true,
+                ) => {
+                    storage.unsave_article(article_id)?;
+                    if view == View::Saved {
+                        // The Saved view lists only saved articles, so the
+                        // row disappears; keep the selection on the list.
+                        articles.retain(|a| a.id != article_id);
+                        article_index = article_index.min(articles.len().saturating_sub(1));
+                    } else if let Some(a) = articles.iter_mut().find(|a| a.id == article_id) {
+                        // Other views keep the row, now drawn as not saved.
+                        a.saved = false;
+                        a.saved_at = None;
+                        a.note = None;
+                        a.noted_at = None;
+                    }
+                    notice = Some(if has_note {
+                        format!("Un-saved and deleted its note: {title}")
+                    } else {
+                        format!("Un-saved: {title}")
+                    });
+                }
+                // No: explain, especially why an article with a note stays.
+                (Pending::Unsave { has_note, .. }, false) => {
+                    notice = Some(if has_note {
+                        "Kept saved: an article with a note stays in Saved. Delete the note first, or press u and confirm to remove both".to_string()
+                    } else {
+                        "Kept: the article is still saved".to_string()
+                    });
+                }
+                // Yes: clear the note only; the article stays saved.
+                (Pending::DeleteNote { article_id, .. }, true) => {
+                    storage.update_note(article_id, None)?;
+                    if let Some(a) = articles.iter_mut().find(|a| a.id == article_id) {
+                        a.note = None;
+                        a.noted_at = None;
+                    }
+                    notice = Some("Note deleted; the article stays saved".to_string());
+                }
+                (Pending::DeleteNote { .. }, false) => {
+                    notice = Some("Note kept".to_string());
+                }
+                // Yes: write the export over the existing file.
+                (Pending::ReplaceExport { .. }, true) => {
+                    mode = run_export(storage);
+                }
+                (Pending::ReplaceExport { .. }, false) => {
+                    notice = Some("Export cancelled; the file was not changed".to_string());
+                }
+            }
+            continue;
+        }
+
         // While the error popup is open, every keypress dismisses it back
         // to `Mode::Normal` -- there's no text to type or field to navigate,
         // so unlike the note/add-source popups this doesn't need to inspect
@@ -1446,6 +1562,27 @@ fn draw_until_quit(
                     }
                 }
 
+                // `u` un-saves the selected article -- but never straight
+                // away. It opens a yes/no question (`Mode::Confirm`), and
+                // nothing changes until `y` is pressed. A separate key from
+                // `s` on purpose, so saving and un-saving can never be
+                // mixed up by one slip of the finger. If the article has a
+                // note the question says so, because a note and a save are
+                // locked together: un-saving deletes the note.
+                KeyCode::Char('u') => match articles.get(article_index) {
+                    Some(article) if article.saved => {
+                        mode = Mode::Confirm(Pending::Unsave {
+                            article_id: article.id,
+                            title: article.title.clone(),
+                            has_note: article.note.is_some(),
+                        });
+                    }
+                    Some(_) => {
+                        notice = Some("Not saved, so there is nothing to un-save".to_string());
+                    }
+                    None => {}
+                },
+
                 // `n` opens the note popup (switches `mode` to
                 // `Mode::EditingNote`), pre-filled with whatever note (if any)
                 // the selected article already has -- `Option<String>`'s
@@ -1669,24 +1806,29 @@ fn draw_until_quit(
                 // enough to just re-read" reasoning -- an edit to
                 // `export.toml` while tuxwire is already running takes
                 // effect on the very next `E` with no restart needed.
+                //
+                // If the export file already exists, `E` asks before
+                // replacing it (`Pending::ReplaceExport`): the file is
+                // rewritten from scratch, so any edits made to it by hand
+                // would be lost.
                 KeyCode::Char('E') if view == View::Saved => {
-                    mode = match storage.saved_articles().and_then(|saved| {
-                        let config = ExportConfig::load()?;
-                        let path = export::export_saved_articles(&config, &saved)?;
-                        Ok((saved.len(), path))
-                    }) {
-                        Ok((count, path)) => Mode::Error {
-                            title: "Export",
-                            message: format!(
-                                "Exported {count} saved article(s) to {}",
-                                path.display()
-                            ),
-                        },
-                        Err(err) => Mode::Error {
-                            title: "Error",
-                            message: format!("export failed: {err:#}"),
-                        },
-                    };
+                    match ExportConfig::load() {
+                        // Config loaded: ask first if there is a file to replace.
+                        Ok(config) => {
+                            let path = export::export_file_path(&config);
+                            mode = if path.exists() {
+                                Mode::Confirm(Pending::ReplaceExport { path })
+                            } else {
+                                run_export(storage)
+                            };
+                        }
+                        Err(err) => {
+                            mode = Mode::Error {
+                                title: "Error",
+                                message: format!("export failed: {err:#}"),
+                            };
+                        }
+                    }
                 }
 
                 // `E` anywhere except the Saved view does nothing useful, so
@@ -1714,17 +1856,42 @@ fn draw_until_quit(
             // `Article::note`/`Storage::update_note`'s existing use of
             // `Option<String>` to mean "no note" via `None`, never an empty
             // string sitting inside `Some`.
+            //
+            // Removing an *existing* note is a deletion, so it asks first:
+            // an emptied box on an article that has a note opens a yes/no
+            // question instead of deleting.
             KeyCode::Enter => {
-                if let Some(article) = articles.get_mut(article_index) {
-                    let note = if text.is_empty() {
-                        None
-                    } else {
-                        Some(text.clone())
-                    };
-                    storage.update_note(article.id, note.clone())?;
-                    article.note = note;
+                // Is this Enter about to wipe out a note that exists?
+                let deleting = text.is_empty()
+                    && articles
+                        .get(article_index)
+                        .is_some_and(|a| a.note.is_some());
+                if deleting {
+                    if let Some(article) = articles.get(article_index) {
+                        mode = Mode::Confirm(Pending::DeleteNote {
+                            article_id: article.id,
+                            title: article.title.clone(),
+                        });
+                    }
+                } else {
+                    if let Some(article) = articles.get_mut(article_index) {
+                        let note = if text.is_empty() {
+                            None
+                        } else {
+                            Some(text.clone())
+                        };
+                        storage.update_note(article.id, note.clone())?;
+                        // A real note also saves the article (they are
+                        // locked together in `Storage::update_note`), so
+                        // mirror that onto the on-screen copy.
+                        if note.is_some() {
+                            article.saved = true;
+                            article.read = true;
+                        }
+                        article.note = note;
+                    }
+                    mode = Mode::Normal;
                 }
-                mode = Mode::Normal;
             }
 
             // `Esc` discards the buffer and returns to `Mode::Normal`
@@ -2706,6 +2873,9 @@ fn render(
     if let Mode::Error { title, message } = mode {
         render_error_popup(frame, theme, icons, body, title, message);
     }
+    if let Mode::Confirm(pending) = mode {
+        render_confirm_popup(frame, theme, body, pending);
+    }
     if let Mode::IconCheck = mode {
         render_icon_check_popup(frame, theme, body);
     }
@@ -3513,6 +3683,7 @@ fn footer_hints(mode: &Mode, view: View) -> &'static str {
         Mode::AddSource(AddSourceStep::Url { .. }) => ADD_SOURCE_URL_HINTS,
         Mode::AddSource(AddSourceStep::Confirm { .. }) => ADD_SOURCE_CONFIRM_HINTS,
         Mode::Error { .. } => ERROR_HINTS,
+        Mode::Confirm(_) => CONFIRM_HINTS,
         Mode::Searching { .. } => SEARCH_HINTS,
         Mode::IconCheck => ICON_CHECK_HINTS,
         Mode::ThemePicker { .. } => THEME_PICKER_HINTS,
@@ -3567,6 +3738,88 @@ fn render_note_popup(frame: &mut Frame, theme: &Theme, area: Rect, text: &str) {
     let cursor_x = popup_area.x + 1 + text.chars().count() as u16;
     let cursor_y = popup_area.y + 1;
     frame.set_cursor_position((cursor_x, cursor_y));
+}
+
+/// Carries out an export for real: reads `export.toml`, writes the Markdown
+/// file, and returns the popup that reports the result (a success message,
+/// or the error). Called straight from `E` when there is no file to replace,
+/// and again from the confirm answer when there is.
+fn run_export(storage: &Storage) -> Mode {
+    // Gather everything that can fail into one `Result`: `and_then` runs the
+    // next step only if the previous one worked, and `?` passes any error up.
+    match storage.saved_articles().and_then(|saved| {
+        let config = ExportConfig::load()?;
+        let path = export::export_saved_articles(&config, &saved)?;
+        Ok((saved.len(), path))
+    }) {
+        Ok((count, path)) => Mode::Error {
+            title: "Export",
+            message: format!("Exported {count} saved article(s) to {}", path.display()),
+        },
+        Err(err) => Mode::Error {
+            title: "Error",
+            message: format!("export failed: {err:#}"),
+        },
+    }
+}
+
+/// The yes/no popup for `Mode::Confirm`: a bordered box centered over `area`
+/// saying exactly what will happen, so the answer is an informed one. Same
+/// `Clear` + `Block` approach as `render_error_popup`.
+fn render_confirm_popup(frame: &mut Frame, theme: &Theme, area: Rect, pending: &Pending) {
+    // The heading and the message for each kind of question. `format!`
+    // builds an owned `String` because the messages include the title.
+    let (heading, message) = match pending {
+        Pending::Unsave {
+            title, has_note, ..
+        } => {
+            if *has_note {
+                (
+                    " Un-save? ",
+                    format!(
+                        "\"{title}\"\n\nThis article has a note. A note and a save go together, so un-saving also DELETES the note.\n\nRemove the save and delete the note? (y = yes, any other key keeps both)"
+                    ),
+                )
+            } else {
+                (
+                    " Un-save? ",
+                    format!(
+                        "\"{title}\"\n\nRemove this article from Saved? (y = yes, any other key cancels)"
+                    ),
+                )
+            }
+        }
+        Pending::DeleteNote { title, .. } => (
+            " Delete note? ",
+            format!(
+                "\"{title}\"\n\nDelete this note? The article stays saved. (y = yes, any other key keeps the note)"
+            ),
+        ),
+        Pending::ReplaceExport { path } => (
+            " Replace export? ",
+            format!(
+                "{} already exists.\n\nReplace it with a fresh export? Anything you changed in that file by hand will be lost. (y = yes, any other key cancels)",
+                path.display()
+            ),
+        ),
+    };
+
+    // Tall enough for the longest message once it wraps, capped by
+    // `centered_rect` to the room that is actually there.
+    let popup_area = centered_rect(area, 70, 10);
+    frame.render_widget(Clear, popup_area);
+
+    let block = Block::new()
+        .title(heading)
+        .borders(Borders::ALL)
+        .style(Style::new().bg(theme.background).fg(theme.text_primary))
+        .border_style(Style::new().fg(theme.accent_selected));
+
+    let paragraph = Paragraph::new(message)
+        .style(Style::new().fg(theme.text_primary))
+        .wrap(Wrap { trim: true })
+        .block(block);
+    frame.render_widget(paragraph, popup_area);
 }
 
 /// The error/result popup: same "bordered box centered over `area`" idea as

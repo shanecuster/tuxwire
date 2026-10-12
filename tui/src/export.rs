@@ -173,6 +173,13 @@ fn export_config_path() -> anyhow::Result<PathBuf> {
 /// lands in this same file under `ExportConfig::path`.
 const EXPORT_FILENAME: &str = "saved-articles.md";
 
+/// The file `E` writes: the fixed filename inside the configured folder.
+/// Public so the UI can check whether it already exists and ask before
+/// replacing it.
+pub fn export_file_path(config: &ExportConfig) -> PathBuf {
+    config.path.join(EXPORT_FILENAME)
+}
+
 /// The `E` keybind's one job: write every saved article into a single
 /// `saved-articles.md` under `config.path`, and hand back the path written so
 /// `ui/mod.rs` can show it back to the user as confirmation.
@@ -204,7 +211,7 @@ pub fn export_saved_articles(
     let text = render_saved_markdown(articles, &options);
 
     // Step 2: write it (replacing any earlier export) and report where.
-    let path = config.path.join(EXPORT_FILENAME);
+    let path = export_file_path(config);
     std::fs::write(&path, text).with_context(|| format!("failed to write {}", path.display()))?;
 
     Ok(path)
@@ -259,6 +266,28 @@ mod tests {
         assert!(text.find("## Saved articles (1)").unwrap() < text.find("## Notes (1)").unwrap());
         assert!(text.contains("Just saved, no note"));
         assert!(text.contains("> worth trying on the homelab NAS"));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `export_file_path` names exactly the file `export_saved_articles`
+    /// writes, so the "file already exists, replace it?" check in the UI
+    /// looks at the right place: it is missing before the first export and
+    /// present afterwards.
+    #[test]
+    fn export_file_path_is_the_file_that_gets_written() {
+        let dir = tempdir();
+        let config = ExportConfig {
+            path: dir.clone(),
+            include_unnoted: true,
+        };
+
+        // Before any export there is nothing to replace.
+        assert!(!export_file_path(&config).exists());
+
+        let written = export_saved_articles(&config, &[saved_article()]).unwrap();
+        assert_eq!(written, export_file_path(&config));
+        assert!(export_file_path(&config).exists());
 
         std::fs::remove_dir_all(&dir).ok();
     }

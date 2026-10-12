@@ -464,6 +464,24 @@ tmux kill-session -t tuxwire-lists-test         # only this session
    core (10 tests there); 5 file-writing tests stay.
 4. **Changes the look of the `E` file** (headings are now `###` under `##` sections). Documented in the
    changelog.
-5. **Next:** step 2 (the Android bridge: save, unsave, edit note, list saved, export) and step 3 (the
-   Android screens). Neither is started.
+5. **Done since:** the Android bridge and screens (see the Android repo's notes). Un-save came after, below.
 
+## Un-save and confirmations (branch `feature/unsave-tui`, 2026-10-11)
+
+1. **Core (`storage/mod.rs`).** `unsave_article(id) -> bool` clears saved, saved_at, note, noted_at (true
+   when there was a save to remove). `update_note` with text now also saves the article and marks it read,
+   keeping an existing `saved_at`; `save_article` keeps `saved_at` when already saved. No schema change, so
+   no migration and nothing to back up.
+2. **TUI (`ui/mod.rs`).** `Mode::Confirm(Pending)`; `Pending` is `Unsave`, `DeleteNote` or `ReplaceExport`.
+   The confirm branch runs before every other mode: only a plain `y` acts, anything else cancels and says
+   what stayed. `u` opens the un-save question; the note popup's Enter on an emptied box (when a note
+   exists) opens the delete-note question; `E` checks `export::export_file_path` and asks before replacing.
+   `run_export` is the shared "write it now" helper.
+3. **Not confirmed on purpose:** `x` (skip) and `Esc` in the note box. Easy to add as more `Pending`
+   variants if they cause trouble.
+4. **Try it without touching your config** (build first; HOME goes in front of the binary, not `cargo`):
+   `env -u XDG_CONFIG_HOME -u XDG_DATA_HOME HOME=(mktemp -d) ./target/debug/tuxwire`. Save with `s`, add a
+   note with `n`, press `u` (note warning), press `n` to decline, `u` then `y` to confirm.
+5. **Tests:** core +5 (repeat save keeps date, un-save clears everything, nothing-to-unsave is false,
+   re-save after un-save is re-stamped, note saves and clearing keeps the save); TUI +1
+   (`export_file_path`). Popups were checked by hand in a named tmux session.
