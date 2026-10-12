@@ -33,5 +33,6 @@ pub mod models;
 pub mod opml;
 pub mod scoring;
 pub mod storage;
+pub mod sync;
 pub mod text;
 pub mod theme;
