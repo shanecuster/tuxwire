@@ -50,6 +50,12 @@ tracks both *when you saved* an article and *when you last wrote or
 edited its note* as separate dates, since those are often different
 moments.
 
+Saved by mistake? Press `u` to un-save — it asks first, and only a `y`
+does it. A note and a save go together, so un-saving an article that has a
+note also deletes the note, and the question says so. Deleting a note (empty
+the note box and press Enter) and replacing an existing export file ask
+first too.
+
 <p align="center">
   <img src="docs/screenshots/notes_window.png" alt="Note-editing popup" width="700">
 </p>

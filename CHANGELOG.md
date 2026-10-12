@@ -23,6 +23,13 @@ messages — what changed and why, not just what.
 
 ### Changed
 
+- **Deleting or replacing anything now asks first.** Emptying the note box on an
+  article that has a note asks "Delete note?" before deleting it, and `E` asks
+  "Replace export?" when the export file already exists (the file is rewritten
+  from scratch, so hand edits would be lost). A plain `y` confirms; any other
+  key cancels.
+- **Pressing `s` on an article that is already saved no longer moves its save
+  date forward.**
 - **`E` now tells you when you are in the wrong view.** Export only works from
   the Saved view (`S`); pressing `E` anywhere else used to do nothing, which
   looked like a broken key. It now shows "Export works from the Saved view:
@@ -35,6 +42,12 @@ messages — what changed and why, not just what.
 
 ### Added
 
+- **Un-save (`u`), always with a "are you sure?" first.** Saved something by
+  mistake? `u` asks "Un-save?" and only a `y` does it. A note and a save are
+  locked together: an article with a note shows a stronger warning (un-saving
+  also deletes the note), and answering no tells you the note keeps it saved.
+  Writing a note now saves the article too, so a note can never be hidden from
+  the Saved view and the export. Core gains `Storage::unsave_article`.
 - **`tuxwire import-opml FILE` and `tuxwire export-opml FILE`.** Bring a feed
   list in from another reader, or save yours, from the terminal. `--list NAME`
   picks one of your feed lists; otherwise the list you used last. Import adds
