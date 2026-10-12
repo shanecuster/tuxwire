@@ -120,6 +120,13 @@ Set `include_unnoted = false` in `export.toml` to export only the notes.
 Configurable output location, useful for feeding notes straight into a blog
 post or personal wiki.
 
+### Optional sync of saved articles and notes (your own CouchDB)
+If you run a CouchDB server, tuxwire can copy your saved articles and notes to
+it so your other devices (the terminal app and the Android app) share them. It
+is **off by default**: with no `sync.toml` it never touches the network for
+this. Only saved articles and their notes are synced, not read/unread. See
+[`sync.toml` below](#synctoml--optional-couchdb-sync).
+
 ### Move your feeds in and out (OPML)
 Other feed readers use OPML files to move a feed list around. From the
 terminal:
@@ -312,6 +319,7 @@ tuxwire
 | `/` | Search titles and notes in the current view |
 | `a` | Add a new source |
 | `E` | Export all saved articles to Markdown (works from the Saved view, `S`) |
+| `c` | Sync saved articles and notes with your CouchDB, once (only if you set it up; see `sync.toml`) |
 | `i` | Cycle the icon mode (Nerd Font → Unicode → ASCII) |
 | `t` | Open the theme picker (`j`/`k` preview, `Enter` keep, `Esc` cancel) |
 | `f` | Switch feed lists (`j`/`k` choose, `Enter` switch, `Esc` cancel); only with two or more lists in `lists.toml` |
@@ -375,6 +383,31 @@ path = "~/tuxwire-notes/"
 
 Change `path` to wherever you'd like your exported Markdown notes to
 land — a synced folder, a notes vault, anywhere you have write access.
+
+### `sync.toml` — optional CouchDB sync
+
+Optional, and never created for you. Copy `tui/sync.toml.example` to
+`~/.config/tuxwire/sync.toml` and fill it in:
+
+```toml
+[sync]
+enabled = true
+url = "https://couch.example.net"   # must be https:// (http only for this computer)
+database = "tuxwire"                # make it on the server first; tuxwire never creates one
+username = "tuxwire"
+password_file = "~/.config/tuxwire/sync-password"   # optional, see below
+```
+
+- **The password is never in this file** (tuxwire refuses a `password` line).
+  Give it as the `TUXWIRE_SYNC_PASSWORD` environment variable, or put it alone in
+  `password_file` and run `chmod 600` on that file; a password file other users
+  could read is refused.
+- `tuxwire sync --test` checks the server, database and login and sends nothing.
+  `tuxwire sync` (or `c` in the reader) runs one sync. Nothing runs by itself:
+  no timer, no sync at startup.
+- Un-saving an article syncs as an un-save, so it leaves Saved on your other
+  devices too. If two devices change the same article, the later change wins.
+- Keep `sync.toml` out of public repositories: your server's address is private.
 
 ### `icons.toml` — icons
 
