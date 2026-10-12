@@ -485,3 +485,23 @@ tmux kill-session -t tuxwire-lists-test         # only this session
 5. **Tests:** core +5 (repeat save keeps date, un-save clears everything, nothing-to-unsave is false,
    re-save after un-save is re-stamped, note saves and clearing keeps the save); TUI +1
    (`export_file_path`). Popups were checked by hand in a named tmux session.
+
+## CouchDB sync, core (branch `feature/couchdb-sync-core`, 2026-10-12)
+
+1. **Where:** `core/src/sync/` (`mod.rs` config + cycle, `doc.rs` document format and the newer-wins rule,
+   `client.rs` the three HTTP requests, `fake.rs` + `tests.rs` the fake server and tests) and
+   `core/src/storage/sync_store.rs` (pending pushes, applying pulled batches, checkpoint). Migration 008.
+2. **Not wired to any screen yet.** `sync::sync_now(&Mutex<Storage>, &SyncConfig)` is the whole API, plus
+   `test_connection`. Apps build the `SyncConfig` from their own settings and keep the password themselves.
+3. **Before the first run of a build with migration 008 on your real database: back it up** (copy
+   `~/.local/share/tuxwire/` somewhere). The migration only adds, in one transaction, but the rule stands.
+4. **Server side, when we get to a real test (placeholders, fill in your own and keep them out of the repo):**
+   create a database `tuxwire-test` and a user `tuxwire`, make the user the only member of that database's
+   `_security`, and point the app at `https://<your-machine>.<your-tailnet>.ts.net` with database
+   `tuxwire-test`. Use the real `tuxwire` database only after a week of trying it on the test one. Delete the
+   test database afterwards (`curl -X DELETE` as the admin user, on the server).
+5. **Tests:** +28 in core (six document format, nine storage, thirteen for the cycle against the fake server:
+   two devices converging, un-save staying un-saved, later edit wins, write conflict settled, 250 articles in
+   pages, deleted-on-server rewritten, newer/unreadable documents skipped, only saved state sent, nothing
+   happens while off, plain-sentence failures, address rules, password hidden from `Debug`).
+   Run with `NO_PROXY=127.0.0.1` (the fake listens on this computer).

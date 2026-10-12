@@ -905,6 +905,82 @@ read one line in the README about it, same reasoning as the cuts above).
 
 ---
 
+## Optional CouchDB sync (decided 2026-10-12, Shane)
+
+Sync shares **saved articles and their notes** between a person's devices
+through a CouchDB server they run themselves. It is **off by default** and
+nothing is ever sent unless the person turns it on and asks for a sync.
+Read state is *not* synced (it would mean a document for every article ever
+read); that may become a separate switch later.
+
+**Privacy and safety rules (hard requirements).**
+- Nothing syncs, and no request is made, while sync is off. `sync::sync_now`
+  refuses outright; there is no background or startup sync in this first version
+  (the person presses "sync now" / runs `tuxwire sync`).
+- The server address must be `https://`. Plain `http://` is accepted only for
+  this computer (`localhost`, `127.0.0.1`), so a password is never sent
+  unprotected to another machine. Credentials may not be written inside the
+  address.
+- The password is never stored in the SQLite database, never in the repository,
+  never in a log or an error message, and `SyncConfig`'s `Debug` output hides it
+  and the server address. `core/` never decides where it lives: the app passes
+  it in. Android keeps it in private app storage (Keystore-backed); the terminal
+  app reads it from the OS keyring or a mode-0600 file, or an environment
+  variable. Nothing identifying (hostnames, usernames, passwords, tailnet names)
+  belongs in the repo, the docs examples, tests or changelog.
+- Errors are short plain sentences ("wrong username or password", "database not
+  found", "offline: timed out") and never echo the address or the password.
+- Documents are stored unencrypted on the server (like any CouchDB data); the
+  server is the person's own and should be reachable only privately (for
+  example over Tailscale).
+
+**How it works.**
+- **One document per article**, named `article:<the article's address>`. The
+  address is the identity because `articles.url` is already unique and, unlike
+  local article numbers, is the same on every device. A document carries the
+  title, source, topic, published date and summary (so a device that never saw
+  the article can show it), plus `saved`, `saved_at`, `note`, `noted_at` and
+  `updated_at`. Format version `v` is 1; documents from a newer version are
+  skipped and reported, and unreadable ones are skipped and counted.
+- **Newer wins.** `articles.sync_updated_at` (migration 008) is a change stamp in
+  milliseconds, strictly increasing per article, set by save, note and un-save
+  (not by no-ops). When a pulled document's `updated_at` is strictly newer, its
+  whole saved-and-note state replaces the local one; otherwise the local state
+  stays and is pushed. The state moves as a unit, never half a note.
+- **Un-save is a document**, not a deletion: `saved: false` with a newer
+  `updated_at`. A CouchDB deletion would leave nothing to compare dates with, so
+  the other device could not tell "un-saved later" from "never heard of it" and
+  would save it again.
+- **The note lock holds across devices.** Every document is normalized: a real
+  note means saved; an unsaved article has no note.
+- **Bookkeeping.** `sync_docs` remembers each document's CouchDB revision and the
+  stamp last pushed or pulled; the pull checkpoint (`settings` key `sync.since`)
+  moves in the *same transaction* as the data it covers, so a crash cannot skip
+  changes. Changing the server or database should call `reset_sync_state`.
+- **One cycle:** pull (CouchDB `_changes`, 200 at a time), then push everything
+  changed locally (`_bulk_docs`, 200 at a time); a conflict (another device wrote
+  in between) triggers another pull-then-push round, up to three. Deleting a
+  document by hand on the server just makes it be written again.
+- **Migration 008** adds one nullable column and one table, in one transaction,
+  and stamps already-saved articles with the time of the migration so the first
+  sync sends them. As with every migration, back up the real database before the
+  first run of a build that contains it.
+- Built on `reqwest` and `serde_json`, which core already had: no new
+  dependency. Tests use an in-memory fake CouchDB (`core/src/sync/fake.rs`) that
+  checks the login and answers stale revisions with conflicts.
+
+**Known limits.** A conflict replaces the whole saved/note state of one article
+(editing the note on one device while another un-saves it keeps only the newer
+change). Clocks: "newer" is judged by each device's clock, so devices whose
+clocks are far apart can pick the wrong winner (a clock check is a possible
+later addition). A pulled article this device does not have shows in Saved under
+its topic but belongs to no local feed.
+
+**Order of work.** Core (done) -> Android (settings screen, sync now) ->
+terminal (`sync.toml`, `tuxwire sync`, a key).
+
+---
+
 ## Roadmap / Not Yet Decided
 
 **Deferred until the rest of v1 + near-term features are solid:**
@@ -949,9 +1025,10 @@ not merged into master until it's genuinely liked:**
   shelling out to `$EDITOR` for real Vim; likely support both, config-toggled
 - Whether the "Saved" view is a pseudo-topic in the sidebar or a separate pane
 - Custom fetchers for any source without RSS
-- Optional sync of read state, saved articles and notes to a user's own CouchDB,
-  off by default and tucked away in settings (planned, built for the Android
-  app first; saved articles and notes are otherwise local-only)
+- Optional sync of saved articles and notes to a user's own CouchDB, off by
+  default and tucked away in settings (core built; Android and terminal screens
+  to come -- see "Optional CouchDB sync" above). Syncing read state is a possible
+  later, separate switch.
 - Offline caching strategy: cache-on-fetch vs. cache-on-save/open
 - Export location/config for Markdown export — likely an `export.toml`
 - Duplicate article detection across sources (same story, multiple sites —

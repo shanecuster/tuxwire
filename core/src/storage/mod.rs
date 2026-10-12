@@ -25,6 +25,7 @@
 // implementation detail of *how* `Storage::open_at` gets the schema ready,
 // not something any other part of the app should ever call directly.
 mod migrations;
+mod sync_store;
 
 use crate::fetchers::{SourceConfig, SourceType};
 use crate::models::Article;
@@ -32,6 +33,8 @@ use anyhow::Context;
 use chrono::Utc;
 use rusqlite::{Connection, OptionalExtension, Row, params, params_from_iter};
 use std::path::Path;
+
+pub use sync_store::{ApplyCounts, PendingPush};
 
 /// A handle to tuxwire's SQLite database.
 ///
@@ -468,9 +471,12 @@ impl Storage {
         self.conn.execute(
             "UPDATE articles SET saved = 1, read = 1, note = ?2,
                  saved_at = CASE WHEN saved = 1 AND saved_at IS NOT NULL
-                                 THEN saved_at ELSE ?3 END
+                                 THEN saved_at ELSE ?3 END,
+                 sync_updated_at = CASE
+                     WHEN saved = 1 AND note IS ?2 THEN sync_updated_at
+                     ELSE MAX(COALESCE(sync_updated_at, 0) + 1, ?4) END
              WHERE id = ?1",
-            params![id, note, Utc::now()],
+            params![id, note, Utc::now(), Utc::now().timestamp_millis()],
         )?;
         Ok(())
     }
@@ -496,9 +502,10 @@ impl Storage {
         // `AND saved = 1` makes an already-unsaved article change zero rows.
         let changed = self.conn.execute(
             "UPDATE articles
-             SET saved = 0, saved_at = NULL, note = NULL, noted_at = NULL
+             SET saved = 0, saved_at = NULL, note = NULL, noted_at = NULL,
+                 sync_updated_at = MAX(COALESCE(sync_updated_at, 0) + 1, ?2)
              WHERE id = ?1 AND saved = 1",
-            params![id],
+            params![id, Utc::now().timestamp_millis()],
         )?;
         Ok(changed > 0)
     }
@@ -536,9 +543,13 @@ impl Storage {
                  saved = CASE WHEN ?4 = 1 THEN 1 ELSE saved END,
                  read = CASE WHEN ?4 = 1 THEN 1 ELSE read END,
                  saved_at = CASE WHEN ?4 = 1 AND (saved = 0 OR saved_at IS NULL)
-                                 THEN ?5 ELSE saved_at END
+                                 THEN ?5 ELSE saved_at END,
+                 sync_updated_at = CASE
+                     WHEN note IS NOT ?2 OR (saved = 0 AND ?4 = 1)
+                     THEN MAX(COALESCE(sync_updated_at, 0) + 1, ?6)
+                     ELSE sync_updated_at END
              WHERE id = ?1",
-            params![id, note, noted_at, has_note, now],
+            params![id, note, noted_at, has_note, now, now.timestamp_millis()],
         )?;
         Ok(())
     }
@@ -1562,9 +1573,9 @@ mod tests {
             .conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        // 005 ran, and then 006 and 007 after it, so the database ends at the
-        // latest version.
-        assert_eq!(version, 7);
+        // 005 ran, and then 006, 007 and 008 after it, so the database ends at
+        // the latest version.
+        assert_eq!(version, 8);
     }
 
     /// A fresh database has the `feeds` and `settings` tables (migration 006).
