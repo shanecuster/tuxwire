@@ -36,6 +36,8 @@ Usage:
   tuxwire                              open the reader
   tuxwire import-opml FILE [--list NAME]   add the feeds in an OPML file
   tuxwire export-opml FILE [--list NAME]   save a feed list as an OPML file
+  tuxwire sync [--test]                optional: sync saved articles and notes
+                                       with your own CouchDB (see sync.toml.example)
   tuxwire --help                       show this help
 
 FILE is the OPML file. For export, FILE \"-\" prints to the screen instead, and

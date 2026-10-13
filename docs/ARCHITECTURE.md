@@ -976,8 +976,20 @@ clocks are far apart can pick the wrong winner (a clock check is a possible
 later addition). A pulled article this device does not have shows in Saved under
 its topic but belongs to no local feed.
 
-**Order of work.** Core (done) -> Android (settings screen, sync now) ->
-terminal (`sync.toml`, `tuxwire sync`, a key).
+**Order of work.** Core (done) -> Android (done: settings screen, sync now,
+password encrypted with the Android Keystore) -> terminal (done, below).
+
+**Terminal.** `tui/src/sync_config.rs` reads `~/.config/tuxwire/sync.toml`
+(never created automatically; no file means no sync). A `password` key in it is
+an error. The password comes from `TUXWIRE_SYNC_PASSWORD`, else a
+`password_file` that must not be readable by group or others (checked on Unix).
+Decision (2026-10-12): **no keyring support**, because a keyring crate would be
+a new dependency; revisit only if asked. `tui/src/sync_cli.rs` has
+`tuxwire sync [--test]` and the reader's `c` key; both open a *second*
+connection to the database for core's `sync_now` (which wants a
+`&Mutex<Storage>`), so `ui::run` keeps its plain `&Storage`. They never run
+together because the reader waits for the sync. `c` blocks the screen while it
+runs (up to ~30 s per request) and has no progress line.
 
 ---
 

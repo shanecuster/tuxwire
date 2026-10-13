@@ -1,0 +1,40 @@
+# tuxwire sync -- docs/ARCHITECTURE.md § Optional CouchDB sync.
+#
+# OPTIONAL. Copy this file to ~/.config/tuxwire/sync.toml and fill it in only
+# if you want your saved articles and notes copied to a CouchDB server that
+# YOU run, so your devices share them. Without this file (or with
+# `enabled = false`) tuxwire never touches the network for sync.
+#
+# What is synced: saved articles and their notes. Read/unread is not synced.
+#
+# Run a sync with `tuxwire sync` (or press `c` in the reader). Check the
+# settings without sending anything with `tuxwire sync --test`.
+#
+# THE PASSWORD NEVER GOES IN THIS FILE. tuxwire refuses to start if it finds a
+# `password` line here. Give it one of two ways:
+#   1. the environment variable TUXWIRE_SYNC_PASSWORD (checked first), or
+#   2. `password_file` below: a file holding only the password, readable by
+#      you alone (`chmod 600 FILE`). tuxwire refuses a password file that
+#      other users on this computer could read.
+#
+# Do not commit this file to a public repository: the address of your server
+# is private.
+
+[sync]
+# Sync is off until you set this to true.
+enabled = false
+
+# Your server's address. Must start with https:// (plain http:// is only
+# accepted for this computer itself: localhost, 127.0.0.1 or ::1). Do not put
+# a username or password in the address.
+url = "https://couch.example.net"
+
+# The database to use. tuxwire never creates databases; make it first.
+database = "tuxwire"
+
+# The login name for that database.
+username = "tuxwire"
+
+# Optional: where the password file is (`~` means your home directory).
+# Not needed if you use TUXWIRE_SYNC_PASSWORD instead.
+# password_file = "~/.config/tuxwire/sync-password"

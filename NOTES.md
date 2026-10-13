@@ -505,3 +505,20 @@ tmux kill-session -t tuxwire-lists-test         # only this session
    pages, deleted-on-server rewritten, newer/unreadable documents skipped, only saved state sent, nothing
    happens while off, plain-sentence failures, address rules, password hidden from `Debug`).
    Run with `NO_PROXY=127.0.0.1` (the fake listens on this computer).
+
+## CouchDB sync, terminal (branch `feature/couchdb-sync-tui`, 2026-10-12)
+
+1. **Where:** `tui/src/sync_config.rs` (reads `sync.toml`, finds the password), `tui/src/sync_cli.rs`
+   (`tuxwire sync [--test]`, and `sync_for_reader` for the `c` key), `tui/sync.toml.example`.
+2. **Try it safely:** use a throwaway home and the throwaway `tuxwire-test` database, never the real one:
+   `set t (mktemp -d); mkdir -p $t/.config/tuxwire; cp tui/sync.toml.example $t/.config/tuxwire/sync.toml`,
+   edit it, then `env -u XDG_CONFIG_HOME -u XDG_DATA_HOME TUXWIRE_SYNC_PASSWORD=... HOME=$t ./target/debug/tuxwire sync --test`.
+   Keep the filled-in file out of any repo.
+3. **Back up `~/.local/share/tuxwire/` before the first run of a build with migration 008 on your real
+   database** (this branch contains it, since it sits on the sync core).
+4. **Checked by hand** against a tiny stand-in CouchDB on loopback: no file, `enabled = false`,
+   world-readable password file, wrong password, empty sync, a saved article with a note sent, a second
+   fresh home receiving it, and an un-save arriving as `saved: false`. No password turned up in the
+   database or config afterwards.
+5. **Tests:** +9 TUI (seven for `sync_config`, two for argument parsing). The sidebar Keys list gained a row
+   (`c`).

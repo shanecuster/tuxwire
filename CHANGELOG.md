@@ -42,6 +42,14 @@ messages — what changed and why, not just what.
 
 ### Added
 
+- **Optional CouchDB sync in the terminal app.** `tuxwire sync` copies saved
+  articles and notes to and from a CouchDB server you run; `tuxwire sync --test`
+  only checks the connection; `c` in the reader runs one sync and refreshes the
+  list. Set it up in `~/.config/tuxwire/sync.toml` (see `tui/sync.toml.example`).
+  It is off by default, never runs by itself, and the password stays out of
+  `sync.toml`: it comes from `TUXWIRE_SYNC_PASSWORD` or a `password_file` that
+  only you can read (anything more open is refused).
+
 - **Groundwork for optional CouchDB sync (core only, nothing to see yet).** The
   shared core can now share saved articles and notes between devices through a
   CouchDB server you run yourself. It is off by default and has no screen yet, so
