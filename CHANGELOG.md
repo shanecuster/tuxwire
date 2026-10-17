@@ -42,6 +42,16 @@ messages — what changed and why, not just what.
 
 ### Added
 
+- **Optional feed-list sync in the terminal app.** With `feeds = true` in
+  `sync.toml` (off by default, separate from saved-article sync), `tuxwire sync`
+  adds the feeds your other devices added to your feed list, and asks `[y/N]`
+  about each feed another device removed. A yes does not delete: the feed's
+  block in the list file becomes `#` comments, with a note on how to undo it.
+  From something that is not a terminal it only lists the removals. `c` in the
+  reader says how many feeds were added (restart to load them) and how many
+  removals are waiting. `feed_list = "main"` picks which list is mirrored
+  (default: the first). Renames, topic changes and Reddit sources are not synced.
+
 - **Groundwork for optional feed-list sync (core only, nothing to see yet).**
   The shared core can now mirror your feed list between devices through the
   same CouchDB server, so a feed you add on your phone can appear in the

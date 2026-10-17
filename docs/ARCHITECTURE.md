@@ -1036,6 +1036,19 @@ unless both switches are on, because a feed list shows what someone reads.
 - **Not synced:** renaming a feed, changing its topic, Reddit sources (core does
   not fetch them yet), and which list of several a feed is in (the terminal app
   syncs one list, named in `sync.toml`).
+- **Terminal app (`tui/src/feed_sync.rs`, `sync_cli.rs`):** `sync.toml` gains
+  `feeds` (bool, default false) and `feed_list` (a name in `lists.toml`; default
+  the first list; an unknown name is an error, never a quiet fallback). Only RSS
+  sources go to core. Additions are appended with `append_sources_at` (comments
+  kept, safe replace) and then `feed_added_locally`. **A confirmed removal
+  comments the `[[source]]` block out** (`# ` in front of each line, a note
+  above it saying how to undo it) instead of deleting it, is re-parsed as TOML
+  before the file is replaced, and only then calls `feed_removed_locally`; a no
+  calls `dismiss_feed_removal`. `tuxwire sync` asks y/N on a terminal; with
+  stdin not a terminal it lists the removals and changes nothing (they are asked
+  again next time). `c` in the reader never prompts: it reports new feeds and
+  waiting removals. A change by hand to `sources.toml` is noticed at the next
+  sync, like any other local change.
 - **Migration 009** adds the `feed_sync` table only. Back up the real database
   before the first run of a build that contains it.
 
