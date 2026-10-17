@@ -45,6 +45,13 @@ pub struct SyncSettings {
     pub username: String,
     /// The `password_file` path with `~` already expanded, if one was given.
     pub password_file: Option<PathBuf>,
+    /// The `feeds` switch: whether the feed *list* is synced too. `false`
+    /// unless the file says `true`, and it only counts while `enabled` is
+    /// also `true` (core checks both).
+    pub feeds: bool,
+    /// The `feed_list` name: which of the lists in `lists.toml` is mirrored.
+    /// `None` means the first list.
+    pub feed_list: Option<String>,
 }
 
 /// The shape of the file as TOML sees it: one `[sync]` table.
@@ -72,6 +79,13 @@ struct RawSync {
     /// Optional: where the password file is (may start with `~`).
     #[serde(default)]
     password_file: Option<String>,
+    /// Optional; a missing line means the feed list is not synced. It is a
+    /// separate switch from `enabled` because a feed list shows what you read.
+    #[serde(default)]
+    feeds: bool,
+    /// Optional: the name of the feed list to mirror (see `lists.toml`).
+    #[serde(default)]
+    feed_list: Option<String>,
 }
 
 /// Where the settings file lives: `$XDG_CONFIG_HOME/tuxwire/sync.toml`, or
@@ -153,6 +167,8 @@ pub fn load_at(path: &Path, home: Option<&Path>) -> anyhow::Result<Option<SyncSe
         database: raw.database,
         username: raw.username,
         password_file,
+        feeds: raw.feeds,
+        feed_list: raw.feed_list,
     }))
 }
 
@@ -199,13 +215,16 @@ impl SyncSettings {
 
         // Step 3: hand everything to core. The password is moved into the
         // object and is hidden from its `Debug` output.
+        // `with_feeds` turns on the separate feed-list switch (it stays off
+        // unless `feeds = true` was written in the file).
         Ok(SyncConfig::new(
             self.enabled,
             self.url.clone(),
             self.database.clone(),
             self.username.clone(),
             password,
-        ))
+        )
+        .with_feeds(self.feeds))
     }
 }
 
@@ -335,6 +354,8 @@ password_file = "~/pw"
             database: "d".into(),
             username: "u".into(),
             password_file: None,
+            feeds: false,
+            feed_list: None,
         };
         assert!(settings.to_core_config_with(Some("pw".into())).is_ok());
         // An empty variable counts as not set.
@@ -361,6 +382,8 @@ password_file = "~/pw"
             database: "d".into(),
             username: "u".into(),
             password_file: Some(file.clone()),
+            feeds: false,
+            feed_list: None,
         };
 
         // Readable by others: refused.
@@ -376,5 +399,26 @@ password_file = "~/pw"
         // Empty file: refused.
         std::fs::write(&file, "\n").unwrap();
         assert!(settings.to_core_config_with(None).is_err());
+    }
+
+    /// The feed-list switch is off unless written, and `feed_list` is
+    /// optional; when both are written they are read back.
+    #[test]
+    fn the_feed_settings_default_to_off_and_are_read_when_given() {
+        // Not mentioned: off, and no list named.
+        let plain = write_config(GOOD);
+        let settings = load_at(&plain, Some(Path::new("/home/me")))
+            .unwrap()
+            .unwrap();
+        assert!(!settings.feeds);
+        assert_eq!(settings.feed_list, None);
+
+        // Mentioned: both come through.
+        let with_feeds = write_config(&format!("{GOOD}feeds = true\nfeed_list = \"main\"\n"));
+        let settings = load_at(&with_feeds, Some(Path::new("/home/me")))
+            .unwrap()
+            .unwrap();
+        assert!(settings.feeds);
+        assert_eq!(settings.feed_list.as_deref(), Some("main"));
     }
 }
