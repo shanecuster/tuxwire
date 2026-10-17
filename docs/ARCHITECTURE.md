@@ -991,6 +991,54 @@ connection to the database for core's `sync_now` (which wants a
 together because the reader waits for the sync. `c` blocks the screen while it
 runs (up to ~30 s per request) and has no progress line.
 
+### Optional feed-list sync (decided 2026-10-17, Shane)
+
+Mirrors a person's **feed list** between devices through the same CouchDB, so a
+feed added on the phone appears in the terminal app and the other way round.
+It is a **separate switch** from saved-article sync (`SyncConfig::feeds`, set
+with `with_feeds`), **off by default**, and `sync::feeds::sync_feeds` refuses
+unless both switches are on, because a feed list shows what someone reads.
+
+- **One document per feed**, `feed:<address in lower case>`: `url`, `name`,
+  `topic`, `source_type` (only `rss`), `present`, `updated_at`, `v` = 1. The
+  lower-case address is the identity, so capitals never make two feeds. Article
+  documents and feed documents share the database; each sync ignores the other's
+  documents, and builds without feed sync ignore `feed:` documents.
+- **Adds are automatic, removals are asked.** A feed another device added is
+  offered to the app (`pending_feed_additions`), which adds it to its own list
+  and calls `feed_added_locally`. A feed another device *removed* is only listed
+  (`pending_feed_removals`); the app asks the person, and only on a yes removes
+  it and calls `feed_removed_locally`. A no calls `dismiss_feed_removal`: the
+  feed stays and nothing is sent. A newer change from the other device asks
+  again. This keeps the rule that nothing is removed without a confirmation.
+- **Removal is a document**, `present: false` with a newer `updated_at`, for the
+  same reason un-save is: a deletion would leave nothing to compare.
+- **Newer wins** (the same `remote_wins` rule as saved articles); a re-added feed
+  is a new addition.
+- **Core never touches an app's feed list.** The terminal app keeps feeds in
+  `sources.toml` (comments, several lists, Reddit) and Android in the `feeds`
+  table, so each app passes its whole current list to `sync_feeds`. Core keeps
+  only the `feed_sync` table (migration 009): per address, present or removed,
+  since when, whether this device has it, the CouchDB revision. Changes are
+  noticed at sync time, so their time is the time of the sync that saw them.
+- **An empty list is distrusted.** Handing in an empty list while sync believed
+  the device had feeds records no removals (the report says so): far more likely
+  a read problem than the person deleting everything.
+- **Order of a sync:** pull, record the device's list, push; conflicts go another
+  round, up to three, like articles. The pull has its **own checkpoint**
+  (`sync.feeds.since`), so turning the switch on later misses nothing written
+  while it was off.
+- **Input is untrusted.** A pulled document is used only if the name matches the
+  address, the kind is `rss`, the address is an ordinary `http(s)` address of at
+  most 2048 characters, name (200) and topic (100) are non-empty, and nothing
+  contains a control character (terminal escape sequences). At most 5000 feed
+  documents are read in one sync. Others are skipped and counted.
+- **Not synced:** renaming a feed, changing its topic, Reddit sources (core does
+  not fetch them yet), and which list of several a feed is in (the terminal app
+  syncs one list, named in `sync.toml`).
+- **Migration 009** adds the `feed_sync` table only. Back up the real database
+  before the first run of a build that contains it.
+
 ---
 
 ## Roadmap / Not Yet Decided
