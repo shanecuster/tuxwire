@@ -16,10 +16,9 @@
 #![warn(clippy::missing_docs_in_private_items)]
 
 use super::SyncConfig;
-use super::doc::ArticleDoc;
 use anyhow::{Context, anyhow};
 use reqwest::{StatusCode, Url};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
 /// How long to wait for a connection before deciding the server is
@@ -164,9 +163,12 @@ impl CouchClient {
     /// Writes a batch of documents in one request and returns CouchDB's
     /// answer for each. A document whose revision is out of date comes back
     /// with `error: "conflict"` rather than failing the whole batch.
-    pub(crate) async fn write_batch(
+    ///
+    /// `T` is any document type that `serde` can write as JSON (saved-article
+    /// documents and feed documents both qualify).
+    pub(crate) async fn write_batch<T: Serialize>(
         &self,
-        docs: &[ArticleDoc],
+        docs: &[T],
     ) -> anyhow::Result<Vec<WriteResult>> {
         let url = self.database_url.join("_bulk_docs")?;
         let body = serde_json::to_string(&serde_json::json!({ "docs": docs }))?;

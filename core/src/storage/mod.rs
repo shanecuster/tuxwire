@@ -24,6 +24,7 @@
 // `migrations` is a private submodule (no `pub`): its `run` function is an
 // implementation detail of *how* `Storage::open_at` gets the schema ready,
 // not something any other part of the app should ever call directly.
+mod feed_sync_store;
 mod migrations;
 mod sync_store;
 
@@ -34,6 +35,7 @@ use chrono::Utc;
 use rusqlite::{Connection, OptionalExtension, Row, params, params_from_iter};
 use std::path::Path;
 
+pub use feed_sync_store::{FeedApplyCounts, FeedEntry, LocalFeedChanges, PendingFeedPush};
 pub use sync_store::{ApplyCounts, PendingPush};
 
 /// A handle to tuxwire's SQLite database.
@@ -1573,9 +1575,9 @@ mod tests {
             .conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        // 005 ran, and then 006, 007 and 008 after it, so the database ends at
-        // the latest version.
-        assert_eq!(version, 8);
+        // 005 ran, and then 006 to 009 after it, so the database ends at the
+        // latest version.
+        assert_eq!(version, 9);
     }
 
     /// A fresh database has the `feeds` and `settings` tables (migration 006).

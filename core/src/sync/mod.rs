@@ -4,8 +4,10 @@
 //! the person has turned sync on and asked for it: [`sync_now`] refuses to do
 //! anything while [`SyncConfig::enabled`] is `false`.
 //!
-//! What is shared: which articles are saved, and their notes. Nothing else:
-//! not what you have read, not your feeds, not your settings.
+//! What [`sync_now`] shares: which articles are saved, and their notes. Nothing
+//! else: not what you have read, not your settings. The feed list can be shared
+//! too, but only through the separate, off-by-default [`feeds`] module (its
+//! own switch, [`SyncConfig::feeds`]).
 //!
 //! How a sync goes (one "cycle"):
 //! 1. **Pull**: ask CouchDB for everything that changed since last time, and
@@ -25,6 +27,9 @@ pub(crate) mod client;
 pub mod doc;
 #[cfg(test)]
 mod fake;
+#[cfg(test)]
+mod feed_tests;
+pub mod feeds;
 #[cfg(test)]
 mod tests;
 
@@ -53,6 +58,10 @@ pub struct SyncConfig {
     /// Whether sync is turned on. Anything that would send or fetch data
     /// refuses to run while this is `false`.
     pub enabled: bool,
+    /// Whether the feed list is synced too. A separate switch, `false` unless
+    /// the person turns it on, and it does nothing while [`SyncConfig::enabled`]
+    /// is `false`. Set it with [`SyncConfig::with_feeds`].
+    pub feeds: bool,
     /// The server address, for example `https://couch.example.ts.net`. No
     /// username or password inside it.
     pub url: String,
@@ -76,11 +85,20 @@ impl SyncConfig {
     ) -> Self {
         SyncConfig {
             enabled,
+            feeds: false,
             url,
             database,
             username,
             password,
         }
+    }
+
+    /// Returns this config with feed-list sync switched `on` or off. Feed sync
+    /// starts off, so a caller that never calls this never syncs feeds.
+    /// `mut self` takes the config by value so it can be changed and handed back.
+    pub fn with_feeds(mut self, on: bool) -> Self {
+        self.feeds = on;
+        self
     }
 
     /// The password, for the client to build its login header. Crate-private
@@ -151,6 +169,7 @@ impl std::fmt::Debug for SyncConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SyncConfig")
             .field("enabled", &self.enabled)
+            .field("feeds", &self.feeds)
             .field("url", &"<hidden>")
             .field("database", &self.database)
             .field("username", &self.username)

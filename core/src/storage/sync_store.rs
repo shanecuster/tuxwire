@@ -111,6 +111,8 @@ impl Storage {
         self.conn.execute("DELETE FROM sync_docs", [])?;
         self.conn
             .execute("DELETE FROM settings WHERE key = ?1", params![SINCE_KEY])?;
+        // The feed-list sync keeps its own server bookkeeping; forget that too.
+        self.reset_feed_sync_state()?;
         Ok(())
     }
 

@@ -89,6 +89,13 @@ const MIGRATIONS: &[Migration] = &[
         name: "008_add_sync",
         sql: include_str!("../../migrations/008_add_sync.sql"),
     },
+    // Bookkeeping for the optional feed-list sync (what sync knows about each
+    // feed address). Adds one table; the feature stays off until switched on.
+    Migration {
+        version: 9,
+        name: "009_add_feed_sync",
+        sql: include_str!("../../migrations/009_add_feed_sync.sql"),
+    },
 ];
 
 /// Brings `conn`'s schema up to date by running every migration whose
