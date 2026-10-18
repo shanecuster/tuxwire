@@ -410,6 +410,12 @@ password_file = "~/.config/tuxwire/sync-password"   # optional, see below
 - `tuxwire sync --test` checks the server, database and login and sends nothing.
   `tuxwire sync` (or `c` in the reader) runs one sync. Nothing runs by itself:
   no timer, no sync at startup.
+- **Switching to a different server or database:** run `tuxwire sync --reset`
+  once first. It asks `[y/N]`, then forgets what sync already sent and received
+  (the position in the server's change list and the version labels), so the next
+  sync starts fresh against the new database. Your saved articles, notes and
+  feeds are not touched and the server is not contacted. The Android app does
+  this by itself when you change the address or database on its Sync screen.
 - **Feed list (optional, off by default):** add `feeds = true` (and, if you have
   several lists, `feed_list = "main"`; otherwise the first list is used) under
   `[sync]`. `tuxwire sync` then adds feeds your other devices added to that list's

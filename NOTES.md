@@ -556,3 +556,11 @@ tmux kill-session -t tuxwire-lists-test         # only this session
 5. **Tests:** +10 in the terminal crate: one for the settings defaults, seven in `feed_sync` (RSS only, commenting
    out keeps the rest and stays valid, an unknown address changes nothing, CRLF and last block, additions written
    once, removals follow the answers, list choice) and two in `sync_cli` (the y/N answer, the `c` note).
+
+## `tuxwire sync --reset` (branch `feature/sync-reset`, 2026-10-18)
+
+1. **What it does:** after a y/N question, calls core's `reset_sync_state`: clears the pull checkpoints and the
+   remembered server revisions. Articles, notes, feeds and unanswered feed-removal questions are kept.
+2. **When:** once, before pointing `sync.toml` at a different server or database. Not needed otherwise.
+3. **Needs** a terminal (it asks) and nothing else: no `sync.toml`, no password, no network.
+4. **Tests:** +2 in `sync_cli` (the word parses; a no changes nothing and a yes clears the checkpoint).

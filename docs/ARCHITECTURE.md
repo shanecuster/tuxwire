@@ -956,7 +956,10 @@ read); that may become a separate switch later.
 - **Bookkeeping.** `sync_docs` remembers each document's CouchDB revision and the
   stamp last pushed or pulled; the pull checkpoint (`settings` key `sync.since`)
   moves in the *same transaction* as the data it covers, so a crash cannot skip
-  changes. Changing the server or database should call `reset_sync_state`.
+  changes. Changing the server or database should call `reset_sync_state`: the Android
+  app does it when the address or database changes on its Sync screen, and the
+  terminal app has `tuxwire sync --reset` (asks y/N, needs no `sync.toml`, no
+  network and a terminal; it never touches articles, notes or feeds).
 - **One cycle:** pull (CouchDB `_changes`, 200 at a time), then push everything
   changed locally (`_bulk_docs`, 200 at a time); a conflict (another device wrote
   in between) triggers another pull-then-push round, up to three. Deleting a
