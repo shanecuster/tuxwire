@@ -42,6 +42,12 @@ messages — what changed and why, not just what.
 
 ### Added
 
+- **`tuxwire sync --reset`.** When you point sync at a different server or
+  database, run this once first. It asks `[y/N]`, then forgets what sync already
+  sent and received so the next sync starts fresh. Saved articles, notes and
+  feeds are not touched, and the server is not contacted. (The Android app does
+  this by itself when you change the address or database.)
+
 - **Optional feed-list sync in the terminal app.** With `feeds = true` in
   `sync.toml` (off by default, separate from saved-article sync), `tuxwire sync`
   adds the feeds your other devices added to your feed list, and asks `[y/N]`
