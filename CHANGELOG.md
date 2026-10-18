@@ -42,6 +42,28 @@ messages — what changed and why, not just what.
 
 ### Added
 
+- **Optional feed-list sync in the terminal app.** With `feeds = true` in
+  `sync.toml` (off by default, separate from saved-article sync), `tuxwire sync`
+  adds the feeds your other devices added to your feed list, and asks `[y/N]`
+  about each feed another device removed. A yes does not delete: the feed's
+  block in the list file becomes `#` comments, with a note on how to undo it.
+  From something that is not a terminal it only lists the removals. `c` in the
+  reader says how many feeds were added (restart to load them) and how many
+  removals are waiting. `feed_list = "main"` picks which list is mirrored
+  (default: the first). Renames, topic changes and Reddit sources are not synced.
+
+- **Groundwork for optional feed-list sync (core only, nothing to see yet).**
+  The shared core can now mirror your feed list between devices through the
+  same CouchDB server, so a feed you add on your phone can appear in the
+  terminal app and the other way round. It has its own switch, off by default,
+  apart from saved-article sync, because a feed list shows what you read. Feeds
+  another device added are offered to the app to add; a feed another device
+  *removed* is only listed, for the app to ask you about: nothing is ever
+  removed by sync on its own. Not synced: renames, topic changes, Reddit
+  sources. Migration 009 adds one small bookkeeping table; back up your
+  database before first running a build that contains it. The terminal app and
+  Android parts follow.
+
 - **Optional CouchDB sync in the terminal app.** `tuxwire sync` copies saved
   articles and notes to and from a CouchDB server you run; `tuxwire sync --test`
   only checks the connection; `c` in the reader runs one sync and refreshes the

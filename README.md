@@ -127,6 +127,11 @@ is **off by default**: with no `sync.toml` it never touches the network for
 this. Only saved articles and their notes are synced, not read/unread. See
 [`sync.toml` below](#synctoml--optional-couchdb-sync).
 
+A second, separate switch (`feeds = true`) also mirrors your **feed list**, so a
+feed you add on your phone shows up in the terminal app and the other way round.
+Feeds from other devices are added for you; feeds another device *removed* are
+only offered, and you are asked before anything is taken out.
+
 ### Move your feeds in and out (OPML)
 Other feed readers use OPML files to move a feed list around. From the
 terminal:
@@ -405,6 +410,16 @@ password_file = "~/.config/tuxwire/sync-password"   # optional, see below
 - `tuxwire sync --test` checks the server, database and login and sends nothing.
   `tuxwire sync` (or `c` in the reader) runs one sync. Nothing runs by itself:
   no timer, no sync at startup.
+- **Feed list (optional, off by default):** add `feeds = true` (and, if you have
+  several lists, `feed_list = "main"`; otherwise the first list is used) under
+  `[sync]`. `tuxwire sync` then adds feeds your other devices added to that list's
+  file (comments in it are kept; restart tuxwire to load them). For each feed
+  another device removed it asks `[y/N]`; a yes **comments the feed out** of the
+  file rather than deleting it, so you can undo it by hand. When `tuxwire sync`
+  is not run from a terminal it only lists them. `c` in the reader never asks:
+  it says "N feed removal(s) waiting - run tuxwire sync". Renames, topic changes
+  and Reddit sources are not synced. Back up `~/.local/share/tuxwire/` before the
+  first run of a build with this feature (it adds a small table).
 - Un-saving an article syncs as an un-save, so it leaves Saved on your other
   devices too. If two devices change the same article, the later change wins.
 - Keep `sync.toml` out of public repositories: your server's address is private.

@@ -21,6 +21,7 @@
 //! matter here — these declarations just make each corresponding
 //! file part of the compiled program.
 mod export;
+mod feed_sync;
 mod feedlists;
 mod fetchers;
 mod icons;

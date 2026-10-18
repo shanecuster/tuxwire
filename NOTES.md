@@ -522,3 +522,37 @@ tmux kill-session -t tuxwire-lists-test         # only this session
    database or config afterwards.
 5. **Tests:** +9 TUI (seven for `sync_config`, two for argument parsing). The sidebar Keys list gained a row
    (`c`).
+
+## Feed-list sync, core (branch `feature/feed-sync-core`, 2026-10-17)
+
+1. **Where:** `core/src/sync/feeds.rs` (the `feed:<address>` document, the checks on what arrives, `sync_feeds`),
+   `core/src/storage/feed_sync_store.rs` (the `Storage` methods), `core/migrations/009_add_feed_sync.sql`.
+2. **Decisions (Shane, 2026-10-17):** feeds move both ways; additions apply on their own; a removal from
+   another device is **listed and asked about, never applied by sync**; feed sync has its **own switch**
+   (`SyncConfig::feeds`, off by default); the terminal app takes the feeds into one named list.
+3. **How an app uses it:** call `sync_feeds(storage, config, its_whole_feed_list)`, then read
+   `pending_feed_additions()` (add them, then `feed_added_locally(url)`) and `pending_feed_removals()` (ask;
+   yes -> remove then `feed_removed_locally(url)`; no -> `dismiss_feed_removal(url)`).
+4. **Back up `~/.local/share/tuxwire/` before the first run of a build with migration 009 on your real
+   database.**
+5. **Not synced:** renames and topic changes (the address is the identity), Reddit sources (core cannot fetch
+   them yet). An empty feed list handed to `sync_feeds` is distrusted: it records no removals and the report
+   says so.
+6. **Tests:** +26 in core (eleven for the record rules and migration, four for the document checks, eleven for the
+   cycle against the fake server: two devices mirroring, removals waiting for a yes, keeping a feed, hostile and newer
+   documents skipped, an empty list not wiping feeds, the switch turned on later still finding earlier feeds).
+   Run with `NO_PROXY=127.0.0.1`.
+
+## Feed-list sync, terminal app (branch `feature/feed-sync-tui`, 2026-10-17)
+
+1. **Where:** `tui/src/feed_sync.rs` (choosing the list, adding feeds, commenting a removed feed out),
+   `tui/src/sync_cli.rs` (the y/N question, the `c` message), `tui/src/sync_config.rs` (`feeds`, `feed_list`).
+2. **Turn it on:** in `~/.config/tuxwire/sync.toml`, under `[sync]`, add `feeds = true` (and `feed_list = "main"`
+   if you want a list other than the first). Try it against the test database first, and back up
+   `~/.local/share/tuxwire/` before the first run (migration 009).
+3. **Removal is never a deletion:** a yes turns the feed's block in the list file into `#` comments with a note
+   above. To bring it back, remove the leading `# ` from those lines (sync then sees it as a new addition).
+4. **Safe test run** (throwaway home, as always): `t=$(mktemp -d); env -u XDG_CONFIG_HOME -u XDG_DATA_HOME HOME="$t" ./target/debug/tuxwire sync`.
+5. **Tests:** +10 in the terminal crate: one for the settings defaults, seven in `feed_sync` (RSS only, commenting
+   out keeps the rest and stays valid, an unknown address changes nothing, CRLF and last block, additions written
+   once, removals follow the answers, list choice) and two in `sync_cli` (the y/N answer, the `c` note).

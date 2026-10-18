@@ -38,3 +38,20 @@ username = "tuxwire"
 # Optional: where the password file is (`~` means your home directory).
 # Not needed if you use TUXWIRE_SYNC_PASSWORD instead.
 # password_file = "~/.config/tuxwire/sync-password"
+
+# Optional, and a SEPARATE switch (off unless you write `true`): also mirror
+# your FEED LIST, so a feed added on your phone appears here and the other way
+# round. Your feed addresses are sent to your server only if you turn this on,
+# and it only works while `enabled = true` above.
+#
+#   - Feeds another device added are added to your feed list file.
+#   - Feeds another device removed are NEVER removed on their own. `tuxwire sync`
+#     asks y/N for each one, and a yes only turns the feed's block in your list
+#     file into `#` comments (so you can bring it back). Run from something that
+#     is not a terminal, it lists them and removes nothing. `c` in the reader
+#     only says how many are waiting.
+#   - Renames, topic changes and Reddit sources are not synced.
+# feeds = false
+
+# Which feed list (see lists.toml) to mirror. Without this line, the first one.
+# feed_list = "main"
