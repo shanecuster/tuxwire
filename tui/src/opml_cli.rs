@@ -39,6 +39,9 @@ Usage:
   tuxwire sync [--test]                optional: sync saved articles, notes and
                                        (if enabled) your feed list with your own
                                        CouchDB (see sync.toml.example)
+  tuxwire sync --reset                 forget what sync already sent and received
+                                       (asks first); run once after switching to
+                                       a different server or database
   tuxwire --help                       show this help
 
 FILE is the OPML file. For export, FILE \"-\" prints to the screen instead, and

@@ -4,6 +4,7 @@
 //! ```text
 //! tuxwire sync            copy saved articles and notes to / from your server
 //! tuxwire sync --test     check the server, database and login; sends nothing
+//! tuxwire sync --reset    forget what sync already sent and received (asks first)
 //! ```
 //!
 //! Both run *instead of* opening the reader and do not download any feeds.
@@ -30,7 +31,7 @@ use anyhow::bail;
 use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::sync::Mutex;
-use tuxwire_core::storage::FeedEntry;
+use tuxwire_core::storage::{FeedEntry, Storage};
 
 /// What to do when the person typed `tuxwire sync ...`.
 #[derive(Debug, PartialEq, Eq)]
@@ -39,6 +40,9 @@ pub enum Command {
     Sync,
     /// `tuxwire sync --test`: only check the connection.
     Test,
+    /// `tuxwire sync --reset`: forget the sync bookkeeping (after asking), for
+    /// when the server or database changed. Needs no `sync.toml` and no network.
+    Reset,
 }
 
 /// Reads the words typed after `tuxwire`.
@@ -56,7 +60,8 @@ pub fn parse_args(args: &[String]) -> Result<Option<Command>, String> {
     match args[1..].iter().map(String::as_str).collect::<Vec<_>>()[..] {
         [] => Ok(Some(Command::Sync)),
         ["--test"] => Ok(Some(Command::Test)),
-        _ => Err("sync takes no arguments except --test".to_string()),
+        ["--reset"] => Ok(Some(Command::Reset)),
+        _ => Err("sync takes no arguments except --test or --reset".to_string()),
     }
 }
 
@@ -79,8 +84,16 @@ fn load_settings() -> anyhow::Result<SyncSettings> {
 /// Errors come back as plain sentences (core's wording never includes the
 /// server address or the password) and `main` prints them.
 pub async fn run(command: Command) -> anyhow::Result<()> {
+    // `--reset` only works on the local database, so it runs before
+    // `sync.toml` is even read: it must work after the file was changed or
+    // removed, which is exactly when it is needed.
+    if command == Command::Reset {
+        return run_reset();
+    }
     let settings = load_settings()?;
     match command {
+        // Handled above; this arm only keeps the `match` complete.
+        Command::Reset => Ok(()),
         Command::Test => {
             // Works even while `enabled = false`, so the setup can be
             // checked before turning sync on.
@@ -253,6 +266,61 @@ fn is_yes(answer: &str) -> bool {
     matches!(answer.trim().to_lowercase().as_str(), "y" | "yes")
 }
 
+/// Runs `tuxwire sync --reset` on the real database.
+///
+/// It asks a question, so it needs a person at a terminal; when it is not run
+/// from one, it stops without changing anything.
+fn run_reset() -> anyhow::Result<()> {
+    if !std::io::stdin().is_terminal() {
+        bail!("--reset asks a question, so run it in a terminal. Nothing was changed.");
+    }
+    let storage = paths::open_storage()?;
+    if reset_with(&storage, ask_to_reset)? {
+        println!(
+            "Sync bookkeeping cleared. Your saved articles, notes and feeds were not touched. \
+             The next `tuxwire sync` starts fresh against whatever sync.toml points to."
+        );
+    } else {
+        println!("Nothing was changed.");
+    }
+    Ok(())
+}
+
+/// Clears the sync bookkeeping in `storage`, but only if `confirm` says yes.
+/// Returns whether it cleared anything.
+///
+/// `confirm` is a closure (a small function passed in as a value): the real
+/// command asks on the keyboard, while the tests just return `true` or `false`.
+/// `impl FnOnce() -> bool` means "any function that takes nothing, returns a
+/// `bool`, and is called at most once".
+pub fn reset_with(storage: &Storage, confirm: impl FnOnce() -> bool) -> anyhow::Result<bool> {
+    // Ask first; anything but a yes leaves the database exactly as it was.
+    if !confirm() {
+        return Ok(false);
+    }
+    // Core clears the pull checkpoints and the remembered server revisions.
+    // It never touches articles, notes, feeds or unanswered removal questions.
+    storage.reset_sync_state()?;
+    Ok(true)
+}
+
+/// Asks, on the keyboard, whether to clear the sync bookkeeping. Anything but
+/// `y` or `yes` (including just pressing Enter) means no.
+fn ask_to_reset() -> bool {
+    use std::io::Write;
+    // `print!` has no newline, so `flush` pushes the question to the screen
+    // before we wait for the answer.
+    print!(
+        "Forget what sync has already sent and received? Your saved articles, notes and \
+         feeds are not touched, and the server is not contacted. [y/N] "
+    );
+    let _ = std::io::stdout().flush();
+    let mut answer = String::new();
+    // An error or end-of-input leaves `answer` empty, which `is_yes` treats as no.
+    let _ = std::io::stdin().read_line(&mut answer);
+    is_yes(&answer)
+}
+
 /// What the reader's `c` key calls: run one sync and return a one-line
 /// message for the footer. Never panics and never returns the password;
 /// problems come back as `Err` text the caller shows.
@@ -361,5 +429,47 @@ mod tests {
         let note = reader_feed_note(&outcome);
         assert!(note.contains("2 new feed(s) added - restart"), "{note}");
         assert!(note.contains("1 feed removal(s) waiting - run tuxwire sync"));
+    }
+
+    /// `--reset` is understood, and is the only other word `sync` takes.
+    #[test]
+    fn parses_reset() {
+        assert_eq!(
+            parse_args(&words(&["sync", "--reset"])),
+            Ok(Some(Command::Reset))
+        );
+        assert!(parse_args(&words(&["sync", "--reset", "--test"])).is_err());
+    }
+
+    /// A temporary database in its own folder, so these tests never touch the
+    /// real one.
+    fn temp_storage() -> Storage {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        // One counter for the whole program: each call takes the next number.
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let number = NEXT.fetch_add(1, Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!(
+            "tuxwire-sync-reset-{}-{number}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        Storage::open_at(&dir.join("db.sqlite")).unwrap()
+    }
+
+    /// A no changes nothing; a yes clears the bookkeeping; and the question is
+    /// only asked once.
+    #[test]
+    fn reset_clears_the_bookkeeping_only_after_a_yes() {
+        let storage = temp_storage();
+        // Pretend a sync happened: the pull checkpoint is set.
+        storage.set_setting("sync.since", "7-xyz").unwrap();
+
+        // No: nothing changes.
+        assert!(!reset_with(&storage, || false).unwrap());
+        assert_eq!(storage.sync_since().unwrap().as_deref(), Some("7-xyz"));
+
+        // Yes: the checkpoint is forgotten.
+        assert!(reset_with(&storage, || true).unwrap());
+        assert_eq!(storage.sync_since().unwrap(), None);
     }
 }
