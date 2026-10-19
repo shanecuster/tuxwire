@@ -90,7 +90,9 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use tuxwire_core::fetch_report::FetchReport;
 use tuxwire_core::models::Article;
-use tuxwire_core::storage::{Scope, Storage};
+use tuxwire_core::storage::{ReadLaterItem, Scope, Storage};
+
+mod read_later;
 
 /// Everything else `main.rs` hands `ui::run` from startup: the theme and
 /// icon settings, whether to open with the first-run icon check, and what
@@ -271,12 +273,15 @@ const NOTE_PREVIEW_CHARS: usize = 45;
 /// `i` (cycle the icon mode: Nerd → Unicode → ASCII) and `t` (the theme
 /// picker) are listed here too, since they change the whole app's look
 /// rather than one row.
-const KEY_HINTS: [(&str, &str); 15] = [
+const KEY_HINTS: [(&str, &str); 18] = [
     ("s", "save"),
     ("u", "un-save"),
     ("x", "close"),
     ("n", "note"),
     ("S", "saved view"),
+    ("L", "read later"),
+    ("R", "add to read later"),
+    ("p", "paste a link"),
     ("y", "history"),
     ("/", "search"),
     ("r", "refresh"),
@@ -385,6 +390,33 @@ enum Mode {
         selected: usize,
         rows: Vec<ListRow>,
     },
+
+    /// The `L` Read Later list is open. `items` is the list as loaded from the
+    /// database when it opened (and reloaded after every change), `selected`
+    /// the highlighted row. Its keys are handled in `read_later.rs`.
+    ReadLater {
+        items: Vec<ReadLaterItem>,
+        selected: usize,
+    },
+
+    /// The `p` paste-a-link prompt is open: `text` is what has been typed or
+    /// pasted, `error` why the last attempt was refused (if it was), and
+    /// `from_list` whether it was opened from the Read Later list, so
+    /// finishing returns there.
+    PasteLink {
+        text: String,
+        error: Option<String>,
+        from_list: bool,
+    },
+
+    /// A pasted link was accepted and the question "read it later, or save
+    /// it?" is open. `title` is the page's title, or empty if it had none (the
+    /// address is then used). `from_list` is as for `PasteLink`.
+    LinkChoice {
+        url: String,
+        title: String,
+        from_list: bool,
+    },
     /// The `a` "add a new source" flow is open -- see `AddSourceStep` for
     /// which of its two steps is currently showing. Wrapping the step in
     /// its own type (rather than adding more `Mode` variants directly, one
@@ -460,6 +492,16 @@ enum Pending {
         article_id: i64,
         /// Its title, shown in the question.
         title: String,
+    },
+    /// `x` in the Read Later list: take a link off the list. `selected` is
+    /// the highlighted row, so the list can be reopened near it afterwards.
+    DiscardReadLater {
+        /// The address of the link to discard.
+        url: String,
+        /// Its title, shown in the question.
+        title: String,
+        /// The row that was highlighted in the list.
+        selected: usize,
     },
     /// `E` when the export file already exists: replacing it overwrites
     /// whatever is in the file, including anything edited by hand.
@@ -955,6 +997,58 @@ fn draw_until_quit(
             continue;
         }
 
+        // While the Read Later list, the paste-a-link prompt or the "read
+        // later or save?" question is open, every keypress belongs to it. Each
+        // handler takes the popup's state by value and returns the next mode
+        // (see `read_later.rs`). `std::mem::replace` swaps `Mode::Normal` in
+        // and hands back the old value, so the state can be moved out of
+        // `mode` without leaving it empty. Afterwards, if the screen is back
+        // to normal, the article list is reloaded, because saving a link can
+        // have added a saved article.
+        if matches!(
+            mode,
+            Mode::ReadLater { .. } | Mode::PasteLink { .. } | Mode::LinkChoice { .. }
+        ) {
+            mode = match std::mem::replace(&mut mode, Mode::Normal) {
+                Mode::ReadLater { items, selected } => read_later::handle_list_key(
+                    key.code,
+                    items,
+                    selected,
+                    storage,
+                    terminal,
+                    &mut notice,
+                )?,
+                Mode::PasteLink {
+                    text, from_list, ..
+                } => read_later::handle_paste_key(key.code, text, from_list, storage)?,
+                Mode::LinkChoice {
+                    url,
+                    title,
+                    from_list,
+                } => read_later::handle_choice_key(
+                    key.code,
+                    url,
+                    title,
+                    from_list,
+                    storage,
+                    &mut notice,
+                )?,
+                other => other,
+            };
+            if matches!(mode, Mode::Normal) {
+                articles = articles_for_view(
+                    storage,
+                    &scope,
+                    view,
+                    topics,
+                    topic_index,
+                    selected_source.as_deref(),
+                )?;
+                article_index = article_index.min(articles.len().saturating_sub(1));
+            }
+            continue;
+        }
+
         // While the theme picker is open, every keypress belongs to it, the
         // same isolation as the other popups. Moving the selection changes
         // `themes.base` and re-resolves `current_theme` immediately, which is
@@ -1218,6 +1312,25 @@ fn draw_until_quit(
                 }
                 (Pending::DeleteNote { .. }, false) => {
                     notice = Some("Note kept".to_string());
+                }
+                // The Read Later discard question: yes discards, anything else
+                // keeps; either way the list is shown again.
+                (
+                    Pending::DiscardReadLater {
+                        url,
+                        title,
+                        selected,
+                    },
+                    answer,
+                ) => {
+                    mode = read_later::resolve_discard(
+                        answer,
+                        &url,
+                        &title,
+                        selected,
+                        storage,
+                        &mut notice,
+                    )?;
                 }
                 // Yes: write the export over the existing file.
                 (Pending::ReplaceExport { .. }, true) => {
@@ -1720,6 +1833,35 @@ fn draw_until_quit(
                         text: String::new(),
                         error: None,
                     });
+                }
+
+                // `L` opens the Read Later list: links to come back to. It is a
+                // popup over whichever view is showing (see `read_later.rs`).
+                KeyCode::Char('L') => {
+                    mode = read_later::open_list(storage, 0)?;
+                }
+
+                // `R` puts the selected article on the Read Later list. The
+                // list ignores a link it already has, and the footer says
+                // which happened.
+                KeyCode::Char('R') => {
+                    if let Some(article) = articles.get(article_index) {
+                        notice = Some(match storage.add_read_later(&article.title, &article.url) {
+                            Ok(true) => "Added to Read Later".to_string(),
+                            Ok(false) => "Already in Read Later".to_string(),
+                            Err(err) => format!("Read Later: {err:#}"),
+                        });
+                    }
+                }
+
+                // `p` opens the paste-a-link prompt: any web address can be put
+                // on the Read Later list or saved, with the choice asked each time.
+                KeyCode::Char('p') => {
+                    mode = Mode::PasteLink {
+                        text: String::new(),
+                        error: None,
+                        from_list: false,
+                    };
                 }
 
                 // `/` opens the search input (switches `mode` to
@@ -2916,6 +3058,16 @@ fn render(
     if let Mode::ListPicker { selected, rows } = mode {
         render_list_picker_popup(frame, theme, icons, body, *selected, rows);
     }
+    // The Read Later screens (see `read_later.rs`).
+    if let Mode::ReadLater { items, selected } = mode {
+        read_later::render_list_popup(frame, theme, icons, body, *selected, items);
+    }
+    if let Mode::PasteLink { text, error, .. } = mode {
+        read_later::render_paste_popup(frame, theme, body, text, error);
+    }
+    if let Mode::LinkChoice { url, title, .. } = mode {
+        read_later::render_choice_popup(frame, theme, icons, body, url, title);
+    }
 }
 
 /// The top banner bar (`docs/ARCHITECTURE.md` § 3. TUI): the `tuxwire`
@@ -3712,6 +3864,9 @@ fn footer_hints(mode: &Mode, view: View) -> &'static str {
         Mode::IconCheck => ICON_CHECK_HINTS,
         Mode::ThemePicker { .. } => THEME_PICKER_HINTS,
         Mode::ListPicker { .. } => LIST_PICKER_HINTS,
+        Mode::ReadLater { .. } => read_later::LIST_HINTS,
+        Mode::PasteLink { .. } => read_later::PASTE_HINTS,
+        Mode::LinkChoice { .. } => read_later::CHOICE_HINTS,
         Mode::Normal => match view {
             View::Topic => KEYBIND_HINTS,
             View::Saved | View::History => SAVED_HINTS,
@@ -3817,6 +3972,12 @@ fn render_confirm_popup(frame: &mut Frame, theme: &Theme, area: Rect, pending: &
             " Delete note? ",
             format!(
                 "\"{title}\"\n\nDelete this note? The article stays saved. (y = yes, any other key keeps the note)"
+            ),
+        ),
+        Pending::DiscardReadLater { title, .. } => (
+            " Discard? ",
+            format!(
+                "\"{title}\"\n\nTake this link off the Read Later list? (y = yes, any other key keeps it)"
             ),
         ),
         Pending::ReplaceExport { path } => (

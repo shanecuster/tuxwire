@@ -89,6 +89,7 @@ pub trait Fetcher {
 // the TOML loader lives in the `tui` crate and hands this module plain
 // `SourceConfig` values.
 pub mod discover;
+pub mod link_title;
 pub mod reddit;
 pub mod rss;
 

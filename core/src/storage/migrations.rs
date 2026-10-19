@@ -96,6 +96,13 @@ const MIGRATIONS: &[Migration] = &[
         name: "009_add_feed_sync",
         sql: include_str!("../../migrations/009_add_feed_sync.sql"),
     },
+    // The Read Later list: links to come back to, with the bookkeeping to
+    // sync them. Adds one table; syncing stays off until the person turns sync on.
+    Migration {
+        version: 10,
+        name: "010_add_read_later",
+        sql: include_str!("../../migrations/010_add_read_later.sql"),
+    },
 ];
 
 /// Brings `conn`'s schema up to date by running every migration whose

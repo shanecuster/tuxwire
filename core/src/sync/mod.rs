@@ -4,7 +4,8 @@
 //! the person has turned sync on and asked for it: [`sync_now`] refuses to do
 //! anything while [`SyncConfig::enabled`] is `false`.
 //!
-//! What [`sync_now`] shares: which articles are saved, and their notes. Nothing
+//! What [`sync_now`] shares: which articles are saved, and their notes, and the
+//! Read Later list (links the person chose to put there; see [`later`]). Nothing
 //! else: not what you have read, not your settings. The feed list can be shared
 //! too, but only through the separate, off-by-default [`feeds`] module (its
 //! own switch, [`SyncConfig::feeds`]).
@@ -30,6 +31,9 @@ mod fake;
 #[cfg(test)]
 mod feed_tests;
 pub mod feeds;
+pub mod later;
+#[cfg(test)]
+mod later_tests;
 #[cfg(test)]
 mod tests;
 
@@ -202,6 +206,14 @@ pub struct SyncReport {
     /// Writes that were still in conflict after the last round; they are sent
     /// again on the next sync.
     pub conflicts_left: usize,
+    /// Read Later changes sent to the server.
+    pub later_sent: usize,
+    /// Read Later changes received from the server (links added, changed or
+    /// taken off the list here).
+    pub later_received: usize,
+    /// Read Later writes still in conflict after the last round; they are sent
+    /// again on the next sync.
+    pub later_conflicts_left: usize,
 }
 
 impl SyncReport {
@@ -212,6 +224,14 @@ impl SyncReport {
             self.pushed,
             self.pulled_added + self.pulled_updated
         )];
+        // The Read Later counts are mentioned only when there is something to
+        // say, so the line is unchanged for someone who does not use the list.
+        if self.later_sent > 0 || self.later_received > 0 {
+            parts.push(format!(
+                "Read Later: {} sent, {} received",
+                self.later_sent, self.later_received
+            ));
+        }
         if self.skipped_newer_version > 0 {
             parts.push(format!(
                 "{} skipped (update tuxwire)",
@@ -221,8 +241,9 @@ impl SyncReport {
         if self.skipped_unreadable > 0 {
             parts.push(format!("{} unreadable", self.skipped_unreadable));
         }
-        if self.conflicts_left > 0 {
-            parts.push(format!("{} to retry next time", self.conflicts_left));
+        let retries = self.conflicts_left + self.later_conflicts_left;
+        if retries > 0 {
+            parts.push(format!("{retries} to retry next time"));
         }
         parts.join(", ")
     }
@@ -248,7 +269,8 @@ fn lock(storage: &Mutex<Storage>) -> anyhow::Result<MutexGuard<'_, Storage>> {
         .map_err(|_| anyhow!("the database lock was poisoned by an earlier crash"))
 }
 
-/// Runs one sync cycle. **Refuses while sync is turned off.**
+/// Runs one sync cycle: saved articles and notes, then the Read Later list.
+/// **Refuses while sync is turned off.**
 ///
 /// `storage` is the app's database behind a `Mutex`, locked only for short,
 /// non-waiting steps. Fails with a plain-sentence error when the server cannot
@@ -273,6 +295,9 @@ pub async fn sync_now(storage: &Mutex<Storage>, config: &SyncConfig) -> anyhow::
             break;
         }
     }
+
+    // Step 3: the Read Later list, on the same switch (see `later`).
+    later::sync_read_later(storage, &client, &mut report).await?;
     Ok(report)
 }
 

@@ -564,3 +564,19 @@ tmux kill-session -t tuxwire-lists-test         # only this session
 2. **When:** once, before pointing `sync.toml` at a different server or database. Not needed otherwise.
 3. **Needs** a terminal (it asks) and nothing else: no `sync.toml`, no password, no network.
 4. **Tests:** +2 in `sync_cli` (the word parses; a no changes nothing and a yes clears the checkpoint).
+
+## Read Later (branch `feature/read-later`, 2026-10-19)
+
+1. **What:** a list of links to come back to, apart from Saved. Core: migration 010 (`read_later`), storage
+   methods, a `later:<address>` sync document, `fetch_page_title`. Terminal: a popup on `L`, `R` to add an
+   article, `p` to paste a link.
+2. **Back up first:** copy `~/.local/share/tuxwire/` before the first run of a build with migration 010.
+   A database that has run this build reports version 10.
+3. **Syncing:** on the same switch as saved articles (no new setting). Run `tuxwire sync` on each device.
+4. **Safe test run** (throwaway home): `t=$(mktemp -d); cargo build; env -u XDG_CONFIG_HOME -u XDG_DATA_HOME HOME="$t" ./target/debug/tuxwire`,
+   then press `p`, type a web address, press `Enter`, and answer `l` or `s`; `L` shows the list.
+5. **Tests:** +13 in core's `read_later_store` (rules), +9 in `sync::later_tests` (two and three devices, removals,
+   promote, odd documents, a write race, the separate checkpoint), +5 in `sync::later` (document checks), +7 in
+   `link_title`, +4 in the terminal's `read_later` (address and title helpers).
+6. **Still to do:** the Android screens (a separate branch in the Android repo), and read marks for ordinary
+   articles (own switch, not started).

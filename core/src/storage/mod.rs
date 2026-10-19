@@ -26,6 +26,7 @@
 // not something any other part of the app should ever call directly.
 mod feed_sync_store;
 mod migrations;
+mod read_later_store;
 mod sync_store;
 
 use crate::fetchers::{SourceConfig, SourceType};
@@ -36,6 +37,7 @@ use rusqlite::{Connection, OptionalExtension, Row, params, params_from_iter};
 use std::path::Path;
 
 pub use feed_sync_store::{FeedApplyCounts, FeedEntry, LocalFeedChanges, PendingFeedPush};
+pub use read_later_store::{LaterApplyCounts, PendingLaterPush, ReadLaterItem};
 pub use sync_store::{ApplyCounts, PendingPush};
 
 /// A handle to tuxwire's SQLite database.
@@ -1575,9 +1577,9 @@ mod tests {
             .conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        // 005 ran, and then 006 to 009 after it, so the database ends at the
+        // 005 ran, and then 006 to 010 after it, so the database ends at the
         // latest version.
-        assert_eq!(version, 9);
+        assert_eq!(version, 10);
     }
 
     /// A fresh database has the `feeds` and `settings` tables (migration 006).
