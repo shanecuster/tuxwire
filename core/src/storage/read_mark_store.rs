@@ -446,4 +446,41 @@ mod tests {
         let guessed = guessed.expect("the stored date parses");
         assert!((Utc::now().timestamp_millis() - guessed).abs() < 60_000);
     }
+
+    /// A database that already had read articles before migration 011 gets
+    /// their publish date as the guess for "when it was opened"; an unread
+    /// article and one with an unreadable date get nothing.
+    #[test]
+    fn already_read_articles_get_a_guess_from_the_migration() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        // Bring the schema to just before migration 11, add three articles,
+        // then run the remaining migration.
+        super::super::migrations::run_up_to(&conn, 10).unwrap();
+        for (url, stamp, read) in [
+            ("https://old/read", "2026-01-01T00:00:00Z", 1),
+            ("https://old/unread", "2026-01-01T00:00:00Z", 0),
+            ("https://old/garbled", "not a date", 1),
+        ] {
+            conn.execute(
+                "INSERT INTO articles (title, url, source, topic, timestamp, read, skipped, saved)
+                 VALUES ('t', ?1, 's', 'c', ?2, ?3, 0, 0)",
+                params![url, stamp, read],
+            )
+            .unwrap();
+        }
+        super::super::migrations::run(&conn).unwrap();
+
+        let at = |url: &str| -> Option<i64> {
+            conn.query_row(
+                "SELECT read_at FROM articles WHERE url = ?1",
+                params![url],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        // 2026-01-01T00:00:00Z is 1767225600 seconds after 1970.
+        assert_eq!(at("https://old/read"), Some(1_767_225_600_000));
+        assert_eq!(at("https://old/unread"), None);
+        assert_eq!(at("https://old/garbled"), None);
+    }
 }

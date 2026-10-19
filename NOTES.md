@@ -591,6 +591,6 @@ tmux kill-session -t tuxwire-lists-test         # only this session
    reads cannot be undone. Articles read before the upgrade use their publish date as the guess for "when".
 4. **Try it** (throwaway home as always, two homes to play two devices, same server): put `read_marks = true`
    under `[sync]` in both `sync.toml` files, open an article in one, run `tuxwire sync` in both, restart the second.
-5. **Tests:** +13 core (4 document checks, 9 storage), +9 in `sync::read_mark_tests`, +1 terminal (the switch).
+5. **Tests:** +14 core (4 document checks, 10 storage incl. a real 10-to-11 upgrade), +9 in `sync::read_mark_tests`, +1 terminal (the switch).
    One run of the terminal tests failed 4 tests once (`feed_sync`, `opml_cli`: they use temp folders); it did not
    repeat in 30 further runs and no cause was found, so keep an eye on it.
