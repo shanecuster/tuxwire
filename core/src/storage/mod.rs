@@ -1575,9 +1575,9 @@ mod tests {
             .conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        // 005 ran, and then 006 to 009 after it, so the database ends at the
+        // 005 ran, and then 006 to 010 after it, so the database ends at the
         // latest version.
-        assert_eq!(version, 9);
+        assert_eq!(version, 10);
     }
 
     /// A fresh database has the `feeds` and `settings` tables (migration 006).
