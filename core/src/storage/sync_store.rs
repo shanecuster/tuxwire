@@ -115,6 +115,8 @@ impl Storage {
         self.reset_feed_sync_state()?;
         // So does the Read Later sync.
         self.reset_later_sync_state()?;
+        // And the read-marks sync.
+        self.reset_read_marks_sync_state()?;
         Ok(())
     }
 

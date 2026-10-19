@@ -27,6 +27,7 @@
 mod feed_sync_store;
 mod migrations;
 mod read_later_store;
+mod read_mark_store;
 mod sync_store;
 
 use crate::fetchers::{SourceConfig, SourceType};
@@ -38,6 +39,7 @@ use std::path::Path;
 
 pub use feed_sync_store::{FeedApplyCounts, FeedEntry, LocalFeedChanges, PendingFeedPush};
 pub use read_later_store::{LaterApplyCounts, PendingLaterPush, ReadLaterItem};
+pub use read_mark_store::{PendingReadMark, ReadMarkApplyCounts};
 pub use sync_store::{ApplyCounts, PendingPush};
 
 /// A handle to tuxwire's SQLite database.
@@ -178,6 +180,10 @@ impl Storage {
                     .then(|| Utc::now().timestamp_millis()),
             ],
         )?;
+
+        // If another device already told us this article was opened (the
+        // optional read-marks sync), mark it read now that it exists here.
+        self.apply_waiting_read_mark(&article.url)?;
 
         // Looking the ID up by URL (rather than trusting
         // `last_insert_rowid`) is what makes this correct in both cases:
