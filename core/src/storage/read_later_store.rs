@@ -240,37 +240,8 @@ impl Storage {
             bail!("that link is not on the Read Later list");
         };
 
-        // Step 2: find the article for this address, or make one.
-        let existing: Option<(i64, bool)> = self
-            .conn
-            .query_row(
-                "SELECT id, saved FROM articles WHERE url = ?1",
-                params![key],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()?;
-        let id = match existing {
-            // Already saved: leave it (and any note) exactly as it is.
-            Some((id, true)) => id,
-            // An article from a feed, not saved yet: save it.
-            Some((id, false)) => {
-                self.save_article(id, None)?;
-                id
-            }
-            // A pasted link with no article yet: make one, then save it.
-            None => {
-                let article = Article::new(
-                    title,
-                    key.clone(),
-                    PROMOTED_SOURCE.to_string(),
-                    PROMOTED_SOURCE.to_string(),
-                    Utc::now(),
-                );
-                let id = self.insert_article(&article)?;
-                self.save_article(id, None)?;
-                id
-            }
-        };
+        // Step 2: make sure there is a saved article for this address.
+        let id = self.ensure_saved_article(&title, &key)?;
 
         // Step 3: take it off the list.
         self.conn.execute(
@@ -282,6 +253,85 @@ impl Storage {
 
         tx.commit()?;
         Ok(id)
+    }
+
+    /// Saves a link permanently without putting it on the Read Later list
+    /// first: the "Save" answer when a pasted link is offered. Returns the saved
+    /// article's id.
+    ///
+    /// The same rules as [`Storage::promote_read_later`] decide what happens to
+    /// the article (an existing one is reused, an already-saved one is left
+    /// alone, a new one is made for an address tuxwire has never seen). If the
+    /// link also happens to be on the Read Later list, it is taken off, since
+    /// it is now saved. One transaction.
+    ///
+    /// Fails, with a message fit for the footer, when `url` is not an ordinary
+    /// web address.
+    pub fn save_link(&self, title: &str, url: &str) -> anyhow::Result<i64> {
+        // Step 1: only ordinary web addresses are accepted.
+        let url = url.trim();
+        if !is_syncable_url(url) {
+            bail!("that is not a web address (it must start with http:// or https://)");
+        }
+        let key = later_key(url);
+        let title = clean_title(title, url);
+
+        // Step 2: save it, and drop it from the list if it was there.
+        let tx = self.conn.unchecked_transaction()?;
+        let id = self.ensure_saved_article(&title, &key)?;
+        self.conn.execute(
+            "UPDATE read_later
+             SET present = 0, updated_at = MAX(updated_at + 1, ?2)
+             WHERE key = ?1 AND present = 1",
+            params![key, Utc::now().timestamp_millis()],
+        )?;
+        tx.commit()?;
+        Ok(id)
+    }
+
+    /// Finds the article whose address is `key`, or makes one, and makes sure
+    /// it is saved. Returns its id. The shared step of promoting a Read Later
+    /// link and of saving a pasted link directly. Callers run it inside their
+    /// own transaction.
+    ///
+    /// - Already saved: left exactly as it is, so any note is kept.
+    /// - An article from a feed, not saved yet: saved.
+    /// - No article for the address: a new one is made (source and topic
+    ///   "Read Later") and saved.
+    fn ensure_saved_article(&self, title: &str, key: &str) -> anyhow::Result<i64> {
+        // Step 1: is there an article for this address, and is it saved?
+        let existing: Option<(i64, bool)> = self
+            .conn
+            .query_row(
+                "SELECT id, saved FROM articles WHERE url = ?1",
+                params![key],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+
+        // Step 2: act on what was found.
+        match existing {
+            // Already saved: leave it (and any note) exactly as it is.
+            Some((id, true)) => Ok(id),
+            // An article from a feed, not saved yet: save it.
+            Some((id, false)) => {
+                self.save_article(id, None)?;
+                Ok(id)
+            }
+            // A pasted link with no article yet: make one, then save it.
+            None => {
+                let article = Article::new(
+                    title.to_string(),
+                    key.to_string(),
+                    PROMOTED_SOURCE.to_string(),
+                    PROMOTED_SOURCE.to_string(),
+                    Utc::now(),
+                );
+                let id = self.insert_article(&article)?;
+                self.save_article(id, None)?;
+                Ok(id)
+            }
+        }
     }
 
     /// Every Read Later record whose change time is newer than what was last sent.
@@ -628,6 +678,29 @@ mod tests {
             .find(|a| a.id == noted_id)
             .unwrap();
         assert_eq!(kept.note.as_deref(), Some("remember this"));
+    }
+
+    /// Saving a pasted link directly makes a saved article, leaves the list
+    /// alone when the link was not on it, and takes it off when it was.
+    #[test]
+    fn saving_a_link_directly_works_with_or_without_the_list() {
+        let s = storage();
+        // Not on the list: nothing appears there, nothing is sent for it.
+        let id = s.save_link("Direct", "https://example.com/direct").unwrap();
+        assert_eq!(s.saved_articles().unwrap()[0].id, id);
+        assert!(s.list_read_later().unwrap().is_empty());
+        assert!(s.pending_later_pushes().unwrap().is_empty());
+
+        // On the list: saving takes it off.
+        s.add_read_later("Listed", "https://example.com/listed")
+            .unwrap();
+        s.save_link("Listed", "https://example.com/listed").unwrap();
+        assert!(s.list_read_later().unwrap().is_empty());
+        assert_eq!(s.saved_articles().unwrap().len(), 2);
+
+        // Not a web address: refused, nothing changes.
+        assert!(s.save_link("x", "file:///etc/passwd").is_err());
+        assert_eq!(s.saved_articles().unwrap().len(), 2);
     }
 
     /// Promoting a link that is not on the list fails and changes nothing.
