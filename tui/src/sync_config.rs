@@ -52,6 +52,10 @@ pub struct SyncSettings {
     /// The `feed_list` name: which of the lists in `lists.toml` is mirrored.
     /// `None` means the first list.
     pub feed_list: Option<String>,
+    /// The `read_marks` switch: whether *which articles you opened* is synced
+    /// too. `false` unless the file says `true`, and it only counts while
+    /// `enabled` is also `true` (core checks both).
+    pub read_marks: bool,
 }
 
 /// The shape of the file as TOML sees it: one `[sync]` table.
@@ -86,6 +90,10 @@ struct RawSync {
     /// Optional: the name of the feed list to mirror (see `lists.toml`).
     #[serde(default)]
     feed_list: Option<String>,
+    /// Optional; a missing line means opened articles are not synced. It is a
+    /// separate switch from `enabled` because it records what you read.
+    #[serde(default)]
+    read_marks: bool,
 }
 
 /// Where the settings file lives: `$XDG_CONFIG_HOME/tuxwire/sync.toml`, or
@@ -169,6 +177,7 @@ pub fn load_at(path: &Path, home: Option<&Path>) -> anyhow::Result<Option<SyncSe
         password_file,
         feeds: raw.feeds,
         feed_list: raw.feed_list,
+        read_marks: raw.read_marks,
     }))
 }
 
@@ -216,7 +225,8 @@ impl SyncSettings {
         // Step 3: hand everything to core. The password is moved into the
         // object and is hidden from its `Debug` output.
         // `with_feeds` turns on the separate feed-list switch (it stays off
-        // unless `feeds = true` was written in the file).
+        // unless `feeds = true` was written in the file); `with_read_marks`
+        // does the same for the opened-articles switch (`read_marks = true`).
         Ok(SyncConfig::new(
             self.enabled,
             self.url.clone(),
@@ -224,7 +234,8 @@ impl SyncSettings {
             self.username.clone(),
             password,
         )
-        .with_feeds(self.feeds))
+        .with_feeds(self.feeds)
+        .with_read_marks(self.read_marks))
     }
 }
 
@@ -356,6 +367,7 @@ password_file = "~/pw"
             password_file: None,
             feeds: false,
             feed_list: None,
+            read_marks: false,
         };
         assert!(settings.to_core_config_with(Some("pw".into())).is_ok());
         // An empty variable counts as not set.
@@ -384,6 +396,7 @@ password_file = "~/pw"
             password_file: Some(file.clone()),
             feeds: false,
             feed_list: None,
+            read_marks: false,
         };
 
         // Readable by others: refused.
@@ -420,5 +433,26 @@ password_file = "~/pw"
             .unwrap();
         assert!(settings.feeds);
         assert_eq!(settings.feed_list.as_deref(), Some("main"));
+    }
+
+    /// The read-marks switch is off unless written, and is passed on to core
+    /// as its own switch (separate from the main one and from `feeds`).
+    #[test]
+    fn the_read_marks_switch_defaults_to_off_and_reaches_core() {
+        // Not mentioned: off, in the file's settings and in core's.
+        let plain = write_config(GOOD);
+        let settings = load_at(&plain, Some(Path::new("/home/me")))
+            .unwrap()
+            .unwrap();
+        assert!(!settings.read_marks);
+        let config = settings.to_core_config_with(Some("pw".into())).unwrap();
+        assert!(!config.read_marks);
+
+        // Written: on in both, without touching the feed-list switch.
+        let on = write_config(&format!("{GOOD}read_marks = true\n"));
+        let settings = load_at(&on, Some(Path::new("/home/me"))).unwrap().unwrap();
+        assert!(settings.read_marks && !settings.feeds);
+        let config = settings.to_core_config_with(Some("pw".into())).unwrap();
+        assert!(config.read_marks && !config.feeds);
     }
 }

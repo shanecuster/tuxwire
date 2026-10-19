@@ -1031,9 +1031,42 @@ only articles from a feed.
   pickers, not a fourth view, so Topic/Saved/History are untouched. Keys: `L`
   list, `R` add the selected article, `p` paste. In the list: `Enter` open,
   `s` save, `x` discard (asks), `p` paste, `Esc`/`q`/`L` close.
-- **Not decided yet:** read marks for ordinary articles. They would be their own
-  switch (they show what someone opened), one small `read:<address>` document per
-  *opened* article, with an age limit on a first sync; not built.
+- **Read marks for ordinary articles:** see "Read marks sync" below.
+
+### Read marks sync (decided 2026-10-19, Shane)
+
+Which feed articles were **opened**, mirrored across devices. It records what
+someone read, so it has **its own switch** (`SyncConfig::read_marks`, `read_marks
+= true` in `sync.toml`, off by default) on top of the main one. Only opened
+articles are synced, not unread counts.
+
+- **Schema:** migration 011 adds `articles.read_at` (milliseconds, stamped the
+  first time an article becomes read: opening, saving, or a synced saved article)
+  and the `read_marks` table (`key` = the article's address, `read_at`, `rev`): the
+  articles whose mark the *server* holds, whoever sent it. Articles read before
+  the migration get their **publish date** as `read_at` (a guess, so old reads
+  fall outside the 90 days); an unreadable date leaves it empty and the article is
+  never sent.
+- **One-way:** an article can be opened, never un-opened, so there is no "newer
+  copy wins": a `read:<address>` document that exists means "opened". Two devices
+  opening the same article simply write the same document; a conflict is settled
+  by the usual extra round (the pull records the other device's document and
+  nothing is left to send).
+- **Sending:** an opened article with no `read_marks` row and `read_at` within the
+  last **90 days** (`sync::read_marks::MAX_AGE_DAYS`) is sent. The same rule
+  applies on every sync, not only the first: reads older than that are never
+  sent, and nothing is ever deleted from the server (no pruning; the records are
+  a URL and a time, about 200 bytes).
+- **Arriving early:** a mark for an article this device has not downloaded is kept
+  in `read_marks`; `Storage::insert_article` checks it on every insert (a
+  primary-key lookup) and marks the article read.
+- **Sync:** `sync::read_marks`, run inside `sync_now` only when `read_marks` is
+  on. Own checkpoint `sync.read.since`; `reset_sync_state` forgets it and the
+  `read_marks` list (what is read stays read). Builds that do not know `read:`
+  ignore it. Documents are checked like the others (`is_syncable_url`, name must
+  match the address, positive time).
+- **Privacy:** the address of each opened article is sent to the person's own
+  CouchDB, only with both switches on.
 
 ### Optional feed-list sync (decided 2026-10-17, Shane)
 

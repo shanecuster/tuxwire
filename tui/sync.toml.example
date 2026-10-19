@@ -55,3 +55,16 @@ username = "tuxwire"
 
 # Which feed list (see lists.toml) to mirror. Without this line, the first one.
 # feed_list = "main"
+
+# Optional, and a SEPARATE switch (off unless you write `true`): also share
+# WHICH ARTICLES YOU HAVE OPENED, so an article you read on your phone shows as
+# read here and the other way round. This records what you read, so it has its
+# own switch. The address of each opened article is sent to your server only if
+# you turn this on, and it only works while `enabled = true` above.
+#
+#   - Only articles opened in the last 90 days are sent; older reads stay as
+#     they are on each device. Nothing is ever deleted from your server.
+#   - Reading is one way: an article can be opened, never marked unread again.
+#   - If the other device opened an article this one has not downloaded yet,
+#     it is marked read when it arrives.
+# read_marks = false

@@ -42,6 +42,16 @@ messages — what changed and why, not just what.
 
 ### Added
 
+- **Read marks sync (optional, off by default).** Which articles you have opened
+  can now be shared between your devices, so one you read on your phone shows as
+  read in the terminal app and the other way round. It has its own switch
+  (`read_marks = true` in `sync.toml`) because it records what you read, and it
+  only works while sync itself is on. Only articles opened in the last 90 days
+  are sent, nothing is deleted from your server, and an article can be opened
+  but never marked unread. If another device read an article this one has not
+  downloaded yet, it is marked read when it arrives. Adds a column and a small
+  table (migration 011): back up `~/.local/share/tuxwire/` first.
+
 - **Read Later.** A list of links to come back to, kept apart from Saved (which
   is a permanent archive with notes). Press `L` to open it, `R` on any article
   to put it there, and `p` to paste any web address: tuxwire fetches the page's

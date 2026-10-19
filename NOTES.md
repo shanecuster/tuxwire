@@ -578,5 +578,19 @@ tmux kill-session -t tuxwire-lists-test         # only this session
 5. **Tests:** +13 in core's `read_later_store` (rules), +9 in `sync::later_tests` (two and three devices, removals,
    promote, odd documents, a write race, the separate checkpoint), +5 in `sync::later` (document checks), +7 in
    `link_title`, +4 in the terminal's `read_later` (address and title helpers).
-6. **Still to do:** the Android screens (a separate branch in the Android repo), and read marks for ordinary
-   articles (own switch, not started).
+6. **Done since:** the Android screens (separate repo). Read marks for ordinary articles are the next section.
+
+## Read marks sync (branch `feature/read-marks`, 2026-10-19)
+
+1. **What:** which articles were opened, shared between devices. Own switch (`read_marks = true` in `sync.toml`,
+   off by default), on top of `enabled = true`. Core: migration 011 (`articles.read_at`, table `read_marks`),
+   `sync::read_marks` (the `read:<address>` document, run inside `sync_now`), storage in `read_mark_store.rs`.
+2. **Back up first:** copy `~/.local/share/tuxwire/` before the first run of a build with migration 011. A
+   database that has run this build reports version 11.
+3. **Limits:** only reads from the last 90 days are sent (`MAX_AGE_DAYS`); nothing is deleted from the server;
+   reads cannot be undone. Articles read before the upgrade use their publish date as the guess for "when".
+4. **Try it** (throwaway home as always, two homes to play two devices, same server): put `read_marks = true`
+   under `[sync]` in both `sync.toml` files, open an article in one, run `tuxwire sync` in both, restart the second.
+5. **Tests:** +14 core (4 document checks, 10 storage incl. a real 10-to-11 upgrade), +9 in `sync::read_mark_tests`, +1 terminal (the switch).
+   One run of the terminal tests failed 4 tests once (`feed_sync`, `opml_cli`: they use temp folders); it did not
+   repeat in 30 further runs and no cause was found, so keep an eye on it.

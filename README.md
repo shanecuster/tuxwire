@@ -125,13 +125,20 @@ If you run a CouchDB server, tuxwire can copy your saved articles and notes to
 it so your other devices (the terminal app and the Android app) share them. It
 is **off by default**: with no `sync.toml` it never touches the network for
 this. Saved articles, their notes and your **Read Later** list (links you chose
-to put there) are synced, not read/unread. See
-[`sync.toml` below](#synctoml--optional-couchdb-sync).
+to put there) are synced. Which articles you have opened is not, unless you turn
+on its own switch (below). See [`sync.toml` below](#synctoml--optional-couchdb-sync).
 
 A second, separate switch (`feeds = true`) also mirrors your **feed list**, so a
 feed you add on your phone shows up in the terminal app and the other way round.
 Feeds from other devices are added for you; feeds another device *removed* are
 only offered, and you are asked before anything is taken out.
+
+A third, separate switch (`read_marks = true`) shares **which articles you have
+opened**, so one you read on your phone shows as read here too. It is off by
+default because it records what you read; the address of each opened article goes
+to your server only if you turn it on. Only articles opened in the last 90 days
+are sent, nothing is ever deleted from your server, and an article can be opened
+but never marked unread again.
 
 ### Move your feeds in and out (OPML)
 Other feed readers use OPML files to move a feed list around. From the
@@ -430,6 +437,13 @@ password_file = "~/.config/tuxwire/sync-password"   # optional, see below
   it says "N feed removal(s) waiting - run tuxwire sync". Renames, topic changes
   and Reddit sources are not synced. Back up `~/.local/share/tuxwire/` before the
   first run of a build with this feature (it adds a small table).
+- **Read marks (optional, off by default):** add `read_marks = true` under `[sync]`
+  (it also needs `enabled = true`). `tuxwire sync` then sends the addresses of
+  articles you opened in the last 90 days and marks the ones your other devices
+  opened. An article your other device read that this one has not downloaded yet
+  is marked read when it arrives. Older reads stay as they are on each device.
+  Back up `~/.local/share/tuxwire/` before the first run of a build with this
+  feature (it adds a column and a small table).
 - Un-saving an article syncs as an un-save, so it leaves Saved on your other
   devices too. If two devices change the same article, the later change wins.
 - Keep `sync.toml` out of public repositories: your server's address is private.

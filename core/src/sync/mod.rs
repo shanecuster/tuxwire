@@ -5,10 +5,12 @@
 //! anything while [`SyncConfig::enabled`] is `false`.
 //!
 //! What [`sync_now`] shares: which articles are saved, and their notes, and the
-//! Read Later list (links the person chose to put there; see [`later`]). Nothing
-//! else: not what you have read, not your settings. The feed list can be shared
-//! too, but only through the separate, off-by-default [`feeds`] module (its
-//! own switch, [`SyncConfig::feeds`]).
+//! Read Later list (links the person chose to put there; see [`later`]). Not
+//! your settings. Two more kinds can be shared, each only through its own
+//! separate, off-by-default switch: the feed list ([`feeds`], switch
+//! [`SyncConfig::feeds`]) and which articles you have opened ([`read_marks`],
+//! switch [`SyncConfig::read_marks`], run inside [`sync_now`] but only when
+//! that switch is on).
 //!
 //! How a sync goes (one "cycle"):
 //! 1. **Pull**: ask CouchDB for everything that changed since last time, and
@@ -34,6 +36,9 @@ pub mod feeds;
 pub mod later;
 #[cfg(test)]
 mod later_tests;
+#[cfg(test)]
+mod read_mark_tests;
+pub mod read_marks;
 #[cfg(test)]
 mod tests;
 
@@ -66,6 +71,11 @@ pub struct SyncConfig {
     /// the person turns it on, and it does nothing while [`SyncConfig::enabled`]
     /// is `false`. Set it with [`SyncConfig::with_feeds`].
     pub feeds: bool,
+    /// Whether read marks (which articles were opened) are synced too. A
+    /// separate switch, `false` unless the person turns it on, and it does
+    /// nothing while [`SyncConfig::enabled`] is `false`. Set it with
+    /// [`SyncConfig::with_read_marks`].
+    pub read_marks: bool,
     /// The server address, for example `https://couch.example.ts.net`. No
     /// username or password inside it.
     pub url: String,
@@ -90,6 +100,7 @@ impl SyncConfig {
         SyncConfig {
             enabled,
             feeds: false,
+            read_marks: false,
             url,
             database,
             username,
@@ -102,6 +113,13 @@ impl SyncConfig {
     /// `mut self` takes the config by value so it can be changed and handed back.
     pub fn with_feeds(mut self, on: bool) -> Self {
         self.feeds = on;
+        self
+    }
+
+    /// Returns this config with read-marks sync switched `on` or off. It starts
+    /// off, so a caller that never calls this never sends what was opened.
+    pub fn with_read_marks(mut self, on: bool) -> Self {
+        self.read_marks = on;
         self
     }
 
@@ -174,6 +192,7 @@ impl std::fmt::Debug for SyncConfig {
         f.debug_struct("SyncConfig")
             .field("enabled", &self.enabled)
             .field("feeds", &self.feeds)
+            .field("read_marks", &self.read_marks)
             .field("url", &"<hidden>")
             .field("database", &self.database)
             .field("username", &self.username)
@@ -214,6 +233,16 @@ pub struct SyncReport {
     /// Read Later writes still in conflict after the last round; they are sent
     /// again on the next sync.
     pub later_conflicts_left: usize,
+    /// Read marks sent to the server (articles opened here).
+    pub marks_sent: usize,
+    /// Read marks received that this device had not heard of.
+    pub marks_received: usize,
+    /// Articles on this device that were unread and are now marked read because
+    /// of a received mark.
+    pub marks_applied: usize,
+    /// Read-mark writes still in conflict after the last round; they are sent
+    /// again on the next sync.
+    pub marks_conflicts_left: usize,
 }
 
 impl SyncReport {
@@ -232,6 +261,13 @@ impl SyncReport {
                 self.later_sent, self.later_received
             ));
         }
+        // Likewise read marks: said only when that switch was on and moved something.
+        if self.marks_sent > 0 || self.marks_received > 0 {
+            parts.push(format!(
+                "Read marks: {} sent, {} received",
+                self.marks_sent, self.marks_received
+            ));
+        }
         if self.skipped_newer_version > 0 {
             parts.push(format!(
                 "{} skipped (update tuxwire)",
@@ -241,7 +277,7 @@ impl SyncReport {
         if self.skipped_unreadable > 0 {
             parts.push(format!("{} unreadable", self.skipped_unreadable));
         }
-        let retries = self.conflicts_left + self.later_conflicts_left;
+        let retries = self.conflicts_left + self.later_conflicts_left + self.marks_conflicts_left;
         if retries > 0 {
             parts.push(format!("{retries} to retry next time"));
         }
@@ -298,6 +334,12 @@ pub async fn sync_now(storage: &Mutex<Storage>, config: &SyncConfig) -> anyhow::
 
     // Step 3: the Read Later list, on the same switch (see `later`).
     later::sync_read_later(storage, &client, &mut report).await?;
+
+    // Step 4: which articles were opened, only if that separate switch is on
+    // (see `read_marks`). With it off, nothing about reading leaves this device.
+    if config.read_marks {
+        read_marks::sync_read_marks(storage, &client, &mut report).await?;
+    }
     Ok(report)
 }
 
