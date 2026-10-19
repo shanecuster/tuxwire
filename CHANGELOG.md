@@ -42,6 +42,18 @@ messages — what changed and why, not just what.
 
 ### Added
 
+- **Read Later.** A list of links to come back to, kept apart from Saved (which
+  is a permanent archive with notes). Press `L` to open it, `R` on any article
+  to put it there, and `p` to paste any web address: tuxwire fetches the page's
+  title and asks every time whether to **read it later**, **save it**, or do
+  neither. In the list, `Enter` opens a link and marks it read (it stays, in the
+  usual read colour), `s` saves it permanently, and `x` asks before discarding.
+  The list syncs with your CouchDB on the same switch as saved articles, so it
+  is the same on every device; saving a link syncs as an ordinary saved
+  article. Only web addresses (`http://`, `https://`) are accepted. Adds
+  migration 010 (back up your database first); builds that do not know the list
+  ignore its documents.
+
 - **`tuxwire sync --reset`.** When you point sync at a different server or
   database, run this once first. It asks `[y/N]`, then forgets what sync already
   sent and received so the next sync starts fresh. Saved articles, notes and

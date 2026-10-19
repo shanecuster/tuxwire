@@ -907,7 +907,8 @@ read one line in the README about it, same reasoning as the cuts above).
 
 ## Optional CouchDB sync (decided 2026-10-12, Shane)
 
-Sync shares **saved articles and their notes** between a person's devices
+Sync shares **saved articles and their notes**, and the **Read Later list**
+(see "Read Later" below), between a person's devices
 through a CouchDB server they run themselves. It is **off by default** and
 nothing is ever sent unless the person turns it on and asks for a sync.
 Read state is *not* synced (it would mean a document for every article ever
@@ -993,6 +994,46 @@ connection to the database for core's `sync_now` (which wants a
 `&Mutex<Storage>`), so `ui::run` keeps its plain `&Storage`. They never run
 together because the reader waits for the sync. `c` blocks the screen while it
 runs (up to ~30 s per request) and has no progress line.
+
+### Read Later (decided 2026-10-19, Shane)
+
+A list of links to come back to, **separate from Saved**. Saved is a permanent
+archive with notes; an item on Read Later is meant to be read and then discarded
+or promoted to a saved article. Any web address can go on it (pasted in), not
+only articles from a feed.
+
+- **Table:** migration 010 adds `read_later` (key = the address exactly as
+  written, title, `added_at`, `present`, `read`, `updated_at`, `rev`,
+  `pushed_updated_at`). The table is both the list and its sync record. A
+  removal keeps its row with `present = 0`, like feeds, so other devices can tell
+  "removed later" from "never heard of it". Only `http`/`https` addresses are
+  accepted (`is_syncable_url`), in core and again on every pulled document.
+- **Rules (`core/src/storage/read_later_store.rs`):** adding an address already
+  on the list is a no-op; adding one that was removed brings it back, unread.
+  Opening marks it read and it stays (shown in the usual read colour) until it
+  is discarded or saved. `promote_read_later` and `save_link` share one helper:
+  reuse the article for that address, leave an already-saved one (and its note)
+  alone, or make a new article (source and topic "Read Later") for an address
+  tuxwire has not seen; saving stamps it for the ordinary saved-article sync and
+  takes the link off the list, in one transaction.
+- **Sync (`core/src/sync/later.rs`):** one `later:<address>` document per link,
+  sent as part of `sync_now` on the **same switch as saved articles** (a list
+  the person builds on purpose). Its own pull checkpoint (`sync.later.since`), so
+  a device updated later still reads earlier documents; the newer `updated_at`
+  wins; `reset_sync_state` forgets it too. Builds that do not know `later:` ignore
+  it. Sent: address, title, added time, present, read. Nothing else.
+- **Pasting a link:** `fetchers::link_title::fetch_page_title` downloads with the
+  shared careful download (status, 4 MiB cap, 10 s), searches the first 256 KiB
+  for `<title>`, decodes entities and tidies white space. Failure means "no
+  title": the address is used. The person is **asked each time** whether the
+  link goes to Read Later or to Saved.
+- **Terminal (`tui/src/ui/read_later.rs`):** a popup screen like the `f`/`t`
+  pickers, not a fourth view, so Topic/Saved/History are untouched. Keys: `L`
+  list, `R` add the selected article, `p` paste. In the list: `Enter` open,
+  `s` save, `x` discard (asks), `p` paste, `Esc`/`q`/`L` close.
+- **Not decided yet:** read marks for ordinary articles. They would be their own
+  switch (they show what someone opened), one small `read:<address>` document per
+  *opened* article, with an age limit on a first sync; not built.
 
 ### Optional feed-list sync (decided 2026-10-17, Shane)
 
@@ -1104,7 +1145,7 @@ not merged into master until it's genuinely liked:**
 - Optional sync of saved articles and notes to a user's own CouchDB, off by
   default and tucked away in settings (core built; Android and terminal screens
   to come -- see "Optional CouchDB sync" above). Syncing read state is a possible
-  later, separate switch.
+  later, separate switch, and the Read Later list (built) rides on the sync switch.
 - Offline caching strategy: cache-on-fetch vs. cache-on-save/open
 - Export location/config for Markdown export — likely an `export.toml`
 - Duplicate article detection across sources (same story, multiple sites —

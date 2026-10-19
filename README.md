@@ -124,7 +124,8 @@ post or personal wiki.
 If you run a CouchDB server, tuxwire can copy your saved articles and notes to
 it so your other devices (the terminal app and the Android app) share them. It
 is **off by default**: with no `sync.toml` it never touches the network for
-this. Only saved articles and their notes are synced, not read/unread. See
+this. Saved articles, their notes and your **Read Later** list (links you chose
+to put there) are synced, not read/unread. See
 [`sync.toml` below](#synctoml--optional-couchdb-sync).
 
 A second, separate switch (`feeds = true`) also mirrors your **feed list**, so a
@@ -321,10 +322,13 @@ tuxwire
 | `r` | Refresh the current topic's sources |
 | `S` | View saved articles |
 | `y` | View history (every article ever fetched) |
+| `L` | Open the Read Later list (`Enter` open, `s` save permanently, `x` discard, `p` paste a link, `Esc` close) |
+| `R` | Add the selected article to Read Later |
+| `p` | Paste a web address; asks whether to read it later or save it |
 | `/` | Search titles and notes in the current view |
 | `a` | Add a new source |
 | `E` | Export all saved articles to Markdown (works from the Saved view, `S`) |
-| `c` | Sync saved articles and notes with your CouchDB, once (only if you set it up; see `sync.toml`) |
+| `c` | Sync saved articles, notes and Read Later with your CouchDB, once (only if you set it up; see `sync.toml`) |
 | `i` | Cycle the icon mode (Nerd Font → Unicode → ASCII) |
 | `t` | Open the theme picker (`j`/`k` preview, `Enter` keep, `Esc` cancel) |
 | `f` | Switch feed lists (`j`/`k` choose, `Enter` switch, `Esc` cancel); only with two or more lists in `lists.toml` |
