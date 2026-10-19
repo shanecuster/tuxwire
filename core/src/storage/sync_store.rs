@@ -113,6 +113,8 @@ impl Storage {
             .execute("DELETE FROM settings WHERE key = ?1", params![SINCE_KEY])?;
         // The feed-list sync keeps its own server bookkeeping; forget that too.
         self.reset_feed_sync_state()?;
+        // So does the Read Later sync.
+        self.reset_later_sync_state()?;
         Ok(())
     }
 

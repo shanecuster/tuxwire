@@ -26,6 +26,7 @@
 // not something any other part of the app should ever call directly.
 mod feed_sync_store;
 mod migrations;
+mod read_later_store;
 mod sync_store;
 
 use crate::fetchers::{SourceConfig, SourceType};
@@ -36,6 +37,7 @@ use rusqlite::{Connection, OptionalExtension, Row, params, params_from_iter};
 use std::path::Path;
 
 pub use feed_sync_store::{FeedApplyCounts, FeedEntry, LocalFeedChanges, PendingFeedPush};
+pub use read_later_store::{LaterApplyCounts, PendingLaterPush, ReadLaterItem};
 pub use sync_store::{ApplyCounts, PendingPush};
 
 /// A handle to tuxwire's SQLite database.

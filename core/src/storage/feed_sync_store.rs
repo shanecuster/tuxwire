@@ -105,7 +105,7 @@ struct FeedRow {
 /// A change time later than `previous`, even when two changes land in the same
 /// millisecond or the clock has gone backwards: it is the larger of "one more
 /// than the last stamp" and "now".
-fn next_stamp(previous: i64) -> i64 {
+pub(super) fn next_stamp(previous: i64) -> i64 {
     (previous + 1).max(Utc::now().timestamp_millis())
 }
 
