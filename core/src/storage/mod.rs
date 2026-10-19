@@ -151,8 +151,8 @@ impl Storage {
         // that looks like SQL (an apostrophe in an article title, say)
         // is never mistaken for part of the query itself.
         self.conn.execute(
-            "INSERT INTO articles (title, url, source, topic, timestamp, read, skipped, saved, note, saved_at, noted_at, feed_url, summary)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+            "INSERT INTO articles (title, url, source, topic, timestamp, read, skipped, saved, note, saved_at, noted_at, feed_url, summary, read_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
              ON CONFLICT(url) DO UPDATE SET
                  feed_url = COALESCE(articles.feed_url, excluded.feed_url),
                  summary = COALESCE(articles.summary, excluded.summary)",
@@ -170,6 +170,12 @@ impl Storage {
                 article.noted_at,
                 article.feed_url,
                 article.summary,
+                // An article stored already read counts as opened now; an
+                // unread one has no time (`then` gives `Some(..)` only when
+                // the condition is true).
+                article
+                    .read
+                    .then(|| Utc::now().timestamp_millis()),
             ],
         )?;
 
@@ -426,9 +432,19 @@ impl Storage {
     }
 
     /// Marks an article read -- the `Enter` keybind (open in `$BROWSER`).
+    ///
+    /// The moment it was opened is remembered in `read_at` (milliseconds since
+    /// 1970) the first time only: `CASE WHEN read = 0 ...` keeps the original
+    /// time when an already-read article is opened again. The optional
+    /// read-marks sync uses that time to send only recent reads.
     pub fn mark_read(&self, id: i64) -> anyhow::Result<()> {
-        self.conn
-            .execute("UPDATE articles SET read = 1 WHERE id = ?1", params![id])?;
+        self.conn.execute(
+            "UPDATE articles
+             SET read = 1,
+                 read_at = CASE WHEN read = 0 THEN ?2 ELSE read_at END
+             WHERE id = ?1",
+            params![id, Utc::now().timestamp_millis()],
+        )?;
         Ok(())
     }
 
@@ -478,7 +494,8 @@ impl Storage {
                                  THEN saved_at ELSE ?3 END,
                  sync_updated_at = CASE
                      WHEN saved = 1 AND note IS ?2 THEN sync_updated_at
-                     ELSE MAX(COALESCE(sync_updated_at, 0) + 1, ?4) END
+                     ELSE MAX(COALESCE(sync_updated_at, 0) + 1, ?4) END,
+                 read_at = CASE WHEN read = 0 THEN ?4 ELSE read_at END
              WHERE id = ?1",
             params![id, note, Utc::now(), Utc::now().timestamp_millis()],
         )?;
@@ -1579,7 +1596,7 @@ mod tests {
             .unwrap();
         // 005 ran, and then 006 to 010 after it, so the database ends at the
         // latest version.
-        assert_eq!(version, 10);
+        assert_eq!(version, 11);
     }
 
     /// A fresh database has the `feeds` and `settings` tables (migration 006).

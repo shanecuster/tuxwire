@@ -211,11 +211,12 @@ impl Storage {
 
     /// Replaces the saved/note state of the existing article `id` with the
     /// (normalized) document's. A saved result also marks the article read,
-    /// like saving anywhere else does.
+    /// like saving anywhere else does (and remembers when, for `read_at`).
     fn apply_to_existing(&self, id: i64, doc: &ArticleDoc) -> anyhow::Result<()> {
         self.conn.execute(
             "UPDATE articles
              SET saved = ?2,
+                 read_at = CASE WHEN ?2 = 1 AND read = 0 THEN ?7 ELSE read_at END,
                  read = CASE WHEN ?2 = 1 THEN 1 ELSE read END,
                  saved_at = ?3,
                  note = ?4,
@@ -229,6 +230,8 @@ impl Storage {
                 doc.note,
                 doc.noted_at.and_then(crate::sync::doc::ms_to_utc),
                 doc.updated_at,
+                // When this article counts as opened, if this is what opens it.
+                chrono::Utc::now().timestamp_millis(),
             ],
         )?;
         Ok(())

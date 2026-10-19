@@ -103,6 +103,15 @@ const MIGRATIONS: &[Migration] = &[
         name: "010_add_read_later",
         sql: include_str!("../../migrations/010_add_read_later.sql"),
     },
+    // Version 11: when an article was opened (`articles.read_at`) and the
+    // bookkeeping for the optional read-marks sync (the `read_marks` table).
+    // Existing read articles get their publish date as a best guess. Nothing is
+    // sent anywhere: syncing read marks has its own switch, off by default.
+    Migration {
+        version: 11,
+        name: "011_add_read_marks",
+        sql: include_str!("../../migrations/011_add_read_marks.sql"),
+    },
 ];
 
 /// Brings `conn`'s schema up to date by running every migration whose
