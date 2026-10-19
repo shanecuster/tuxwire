@@ -29,8 +29,15 @@
 
 #![warn(clippy::missing_docs_in_private_items)]
 
+use super::client::CouchClient;
 use super::feeds::is_syncable_url;
+use super::{MAX_ROUNDS, PAGE_SIZE, SyncReport, lock};
+use crate::storage::Storage;
+use anyhow::{Context, bail};
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::sync::Mutex;
 
 /// Every read-mark document's `_id` starts with this, followed by the article's
 /// address exactly as stored (trimmed).
@@ -127,6 +134,151 @@ impl ReadMarkDoc {
             is_syncable_url(&self.url) && self.id == read_doc_id(&self.url) && self.read_at > 0;
         acceptable.then_some(self)
     }
+}
+
+/// Runs the read-marks part of a sync: pull what other devices opened, then send
+/// what was opened here, going round again while writes conflict.
+///
+/// Called by [`super::sync_now`] only when both the main switch and the
+/// read-marks switch are on (it checks nothing itself). Counts go into
+/// `report`. A failed run changes nothing that matters and is simply tried
+/// again next time.
+pub(crate) async fn sync_read_marks(
+    storage: &Mutex<Storage>,
+    client: &CouchClient,
+    report: &mut SyncReport,
+) -> anyhow::Result<()> {
+    // Step 1: pull first, so a mark another device already sent is matched
+    // instead of being sent again.
+    pull_marks(storage, client, report).await?;
+
+    // Step 2: push, and go round again (pull, then push) while writes conflict.
+    // Two devices opening the same article at once is the usual cause; pulling
+    // records the other device's mark, and then there is nothing left to send.
+    for _ in 1..=MAX_ROUNDS {
+        let conflicts = push_marks(storage, client, report).await?;
+        report.marks_conflicts_left = conflicts;
+        if conflicts == 0 {
+            break;
+        }
+        pull_marks(storage, client, report).await?;
+    }
+    Ok(())
+}
+
+/// Reads every page of changes since the read-marks checkpoint and stores the
+/// `read:` documents among them, moving the checkpoint with each page.
+async fn pull_marks(
+    storage: &Mutex<Storage>,
+    client: &CouchClient,
+    report: &mut SyncReport,
+) -> anyhow::Result<()> {
+    // How many read-mark documents have been read in this pull, against the limit.
+    let mut mark_rows = 0usize;
+    loop {
+        // Step 1: where did we get to last time? (A quick, non-waiting step.)
+        let since = lock(storage)?.read_marks_sync_since()?;
+
+        // Step 2: ask the server (the database is unlocked while we wait).
+        let page = client.changes(since.as_deref(), PAGE_SIZE).await?;
+        let row_count = page.rows.len();
+
+        // Step 3: keep the read-mark documents; everything else is not ours here.
+        let mut docs: Vec<ReadMarkDoc> = Vec::new();
+        let storage_guard = lock(storage)?;
+        for row in page.rows {
+            // `strip_prefix` gives the part after `read:`, or `None` for any
+            // other kind of document (which the `else` skips).
+            let Some(key) = row.id.strip_prefix(READ_DOC_PREFIX) else {
+                continue;
+            };
+            mark_rows += 1;
+            if mark_rows > MAX_READ_DOCS {
+                bail!("the server holds more read marks than tuxwire will read");
+            }
+            // Deleted on the server by hand: forget our record of it, so an
+            // article opened here is sent again next push.
+            if row.deleted {
+                storage_guard.forget_read_mark_doc(key)?;
+                continue;
+            }
+            let Some(value) = row.doc else { continue };
+            match serde_json::from_value::<ReadMarkDoc>(value) {
+                Ok(doc) if !doc.is_supported() => report.skipped_newer_version += 1,
+                Ok(doc) => match doc.cleaned() {
+                    Some(doc) => docs.push(doc),
+                    None => report.skipped_unreadable += 1,
+                },
+                Err(_) => report.skipped_unreadable += 1,
+            }
+        }
+
+        // Step 4: store them and move the checkpoint, in one transaction.
+        let counts = storage_guard.apply_remote_read_marks(docs, &page.last_seq)?;
+        drop(storage_guard);
+        report.marks_received += counts.received;
+        report.marks_applied += counts.marked;
+
+        // Step 5: a short page means we have reached the end.
+        if row_count < PAGE_SIZE {
+            return Ok(());
+        }
+    }
+}
+
+/// Sends the read marks of articles opened here in the last [`MAX_AGE_DAYS`]
+/// days that the server does not have yet. Returns how many writes CouchDB
+/// refused as conflicts (they are retried after the next pull).
+async fn push_marks(
+    storage: &Mutex<Storage>,
+    client: &CouchClient,
+    report: &mut SyncReport,
+) -> anyhow::Result<usize> {
+    // Step 1: what needs sending? Only recent reads, and only ordinary web
+    // addresses (anything else would be refused by every other device).
+    // `filter` keeps the matching entries; `collect` gathers them in a `Vec`.
+    let cutoff = oldest_sendable(Utc::now().timestamp_millis());
+    let pending: Vec<_> = lock(storage)?
+        .pending_read_marks(cutoff)?
+        .into_iter()
+        .filter(|mark| is_syncable_url(&mark.url))
+        .collect();
+    let mut conflicts = 0;
+
+    // Step 2: send in batches of at most PAGE_SIZE.
+    for batch in pending.chunks(PAGE_SIZE) {
+        // Build the documents, remembering each one's address and time so we
+        // can record exactly what was sent.
+        let mut docs = Vec::with_capacity(batch.len());
+        let mut sent: HashMap<String, (String, i64)> = HashMap::new();
+        for mark in batch {
+            let doc = ReadMarkDoc::new(&mark.url, mark.read_at);
+            sent.insert(doc.id.clone(), (mark.url.clone(), mark.read_at));
+            docs.push(doc);
+        }
+
+        // Step 3: send (database unlocked while waiting).
+        let results = client.write_batch(&docs).await?;
+
+        // Step 4: record what worked; count what conflicted.
+        let storage_guard = lock(storage)?;
+        for result in results {
+            match (result.rev, result.error) {
+                (Some(rev), None) => {
+                    if let Some((url, read_at)) = sent.get(&result.id) {
+                        storage_guard
+                            .record_read_mark_pushed(url, *read_at, &rev)
+                            .with_context(|| "could not record a sent read mark")?;
+                        report.marks_sent += 1;
+                    }
+                }
+                (_, Some(error)) if error == "conflict" => conflicts += 1,
+                (_, Some(error)) => bail!("the server refused a write ({error})"),
+                (None, None) => {}
+            }
+        }
+    }
+    Ok(conflicts)
 }
 
 #[cfg(test)]

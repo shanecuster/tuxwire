@@ -54,6 +54,15 @@ pub struct Storage {
 }
 
 impl Storage {
+    /// Gives tests in other modules (the sync tests) direct access to the
+    /// connection, to set up or inspect rows the public methods do not expose,
+    /// such as backdating `read_at`. Compiled only for tests, so the real
+    /// program has no way in except the purpose-built methods.
+    #[cfg(test)]
+    pub(crate) fn connection_for_tests(&self) -> &Connection {
+        &self.conn
+    }
+
     /// Opens (creating if necessary) the database file at `path`, and
     /// brings its schema up to date via `migrations::run`.
     ///
