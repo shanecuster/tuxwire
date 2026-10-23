@@ -2611,8 +2611,43 @@ fn handle_add_source_key(
                 if trimmed.is_empty() {
                     return Ok(Mode::AddSource(AddSourceStep::Url {
                         text,
-                        error: Some("enter a feed or page address first".to_string()),
+                        error: Some(
+                            "enter a feed address, a page address, or a file path first"
+                                .to_string(),
+                        ),
                     }));
+                }
+
+                // A local path (`~/Downloads/index.rss`) is a feed saved from
+                // a browser, for sites that block programs. It is read and
+                // parsed right here (no network, so nothing to await); the
+                // parse succeeding is the same proof of a valid feed. The
+                // confirm screen then carries the full path as its `url`,
+                // which is how the save step below knows it is a file.
+                if fetchers::config::looks_like_file_path(trimmed) {
+                    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+                    let loaded = fetchers::config::resolve_file_path(trimmed, home.as_deref())
+                        .map_err(anyhow::Error::msg)
+                        .and_then(|path| {
+                            let feed =
+                                tuxwire_core::fetchers::file::read_feed_file(Path::new(&path))?;
+                            Ok((path, feed))
+                        });
+                    return match loaded {
+                        Ok((path, feed)) => Ok(Mode::AddSource(AddSourceStep::Confirm {
+                            name: guess_source_name(&feed, &path),
+                            note: Some("read from a file on this computer".to_string()),
+                            url: path,
+                            topic: String::new(),
+                            field: ConfirmField::Name,
+                            topic_options: topics.clone(),
+                            error: None,
+                        })),
+                        Err(err) => Ok(Mode::AddSource(AddSourceStep::Url {
+                            text,
+                            error: Some(format!("{err:#}")),
+                        })),
+                    };
                 }
 
                 // `discover_feed` accepts a feed address (used as it is) or a
@@ -2785,10 +2820,16 @@ fn handle_add_source_key(
                     }));
                 }
 
+                // A full path means a feed file; anything else is a web feed.
+                let source_type = if fetchers::config::looks_like_file_path(&url) {
+                    fetchers::config::SourceType::File
+                } else {
+                    fetchers::config::SourceType::Rss
+                };
                 match fetchers::config::add_source_at(
                     list_path,
                     trimmed_name,
-                    fetchers::config::SourceType::Rss,
+                    source_type,
                     &url,
                     trimmed_topic,
                 ) {

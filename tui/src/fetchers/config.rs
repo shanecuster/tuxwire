@@ -139,7 +139,7 @@ impl RawSource {
 /// `raw: &str` and `home: Option<&Path>` are borrowed; the answer is a new
 /// `String` because it may differ from what was typed. The error is a plain
 /// `String` reason that the caller puts after the source's label.
-fn resolve_file_path(raw: &str, home: Option<&Path>) -> Result<String, String> {
+pub fn resolve_file_path(raw: &str, home: Option<&Path>) -> Result<String, String> {
     // Step 1: tidy what was typed and drop a pasted `file://` prefix.
     let trimmed = raw.trim();
     let without_scheme = trimmed.strip_prefix("file://").unwrap_or(trimmed);
@@ -169,6 +169,18 @@ fn resolve_file_path(raw: &str, home: Option<&Path>) -> Result<String, String> {
         .to_str()
         .map(str::to_string)
         .ok_or_else(|| "the file path is not valid text".to_string())
+}
+
+/// True when text typed into the "add a source" box is a place on this
+/// computer rather than a web address: it starts with `/`, `~/`, `./`, `../`
+/// or `file://`. A web address starts with `http`, so the two never collide.
+/// Only the start is looked at; whether the file exists is checked later.
+pub fn looks_like_file_path(text: &str) -> bool {
+    let text = text.trim();
+    // `any` is true if at least one prefix in the list matches the text.
+    ["/", "~/", "./", "../", "file://"]
+        .iter()
+        .any(|prefix| text.starts_with(prefix))
 }
 
 /// The bundled fallback `sources.toml`, embedded into the compiled binary
@@ -664,5 +676,27 @@ topic = "kernel"
             written.contains(r#"url = "/home/someone/Downloads/index.rss""#),
             "{written}"
         );
+    }
+
+    /// Local paths are told apart from web addresses by how they start.
+    #[test]
+    fn paths_are_told_apart_from_web_addresses() {
+        for path in [
+            "/a/b.rss",
+            "~/b.rss",
+            "./b.rss",
+            "../b.rss",
+            "file:///b.rss",
+            "  ~/b.rss",
+        ] {
+            assert!(looks_like_file_path(path), "{path}");
+        }
+        for web in [
+            "https://example.com/feed",
+            "example.com",
+            "http://x.org/a.rss",
+        ] {
+            assert!(!looks_like_file_path(web), "{web}");
+        }
     }
 }

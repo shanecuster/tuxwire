@@ -16,6 +16,14 @@
 # this version. type = "reddit" parses fine (as shown below) but fails
 # clearly, one source at a time, when tuxwire tries to fetch it -- see
 # src/fetchers/reddit.rs.
+#
+# type = "file" reads a feed saved from your browser, for sites that block
+# programs. url is the full path (~/ works), read again on every refresh:
+#   [[source]]
+#   name = "OverTake"
+#   type = "file"
+#   url = "~/Downloads/index.rss"
+#   topic = "motorsport"
 
 [[source]]
 name = "Arch Linux News"

@@ -502,6 +502,25 @@ startup error, like the other config files.
 
 For v1, a single entry point: the in-app `a` keybind.
 
+**Decision (2026-10-23, Shane): a feed can come from a file.** Some sites
+(OverTake.gg, behind a Cloudflare rule) answer 403 to every program but serve
+the feed to a browser, and tuxwire will not pretend to be a browser. So
+`type = "file"` reads a feed the person saved from their browser. The `url`
+field holds the full path (`~/` is expanded by the terminal app when
+`sources.toml` is loaded; relative paths are refused). In the `a` box, text
+starting with `/`, `~/`, `./`, `../` or `file://` is read as a file and saved
+as a file source. Design rules:
+
+- **Core takes bytes, not paths.** `parse_feed_bytes` and `articles_from_feed`
+  in `core/src/fetchers/rss.rs` do everything after the download, so Android
+  can later pass bytes from a file picker to the same code. `FileFetcher` in
+  `core/src/fetchers/file.rs` is only the thin "read the file" wrapper and
+  never looks at `$HOME`.
+- **No migration.** A file source is a `sources.toml` entry; articles record the
+  path as their `feed_url`.
+- **Terminal only for now.** File sources are excluded from OPML export and
+  from feed-list sync (`feed_sync` already syncs only `Rss`).
+
 **Decision (2026-10-10, Shane): feed discovery is now part of adding a
 source.** This reverses the original "no HTML parsing, no autodiscovery"
 rule. Paste a feed address *or* a web page; `core/src/fetchers/discover.rs`
