@@ -78,11 +78,29 @@ impl RawSource {
             .name
             .ok_or_else(|| anyhow!("{label} in sources.toml is missing a required 'name' field"))?;
         let source_type = self.source_type.ok_or_else(|| {
-            anyhow!("{label} in sources.toml is missing a required 'type' field (expected \"rss\" or \"reddit\")")
+            anyhow!("{label} in sources.toml is missing a required 'type' field (expected \"rss\", \"reddit\" or \"file\")")
         })?;
         let url = self
             .url
             .ok_or_else(|| anyhow!("{label} in sources.toml is missing a required 'url' field"))?;
+
+        // A `type = "file"` source's `url` is a path on this computer, not a
+        // web address. Turn a leading `~/` into the home folder and refuse
+        // anything that is not a full path, so every later step (fetching,
+        // remembering which feed an article came from) sees one fixed,
+        // unambiguous path. The file does NOT have to exist yet: a missing
+        // file is reported when that one source is fetched, so the rest of the
+        // app still starts.
+        //
+        // `std::env::var("HOME").ok()` is the home folder if it is set, else
+        // `None` (`.ok()` turns "variable missing" into `None`).
+        let url = if source_type == SourceType::File {
+            let home = std::env::var("HOME").ok().map(PathBuf::from);
+            resolve_file_path(&url, home.as_deref())
+                .map_err(|reason| anyhow!("{label} in sources.toml: {reason}"))?
+        } else {
+            url
+        };
 
         // `topic` gets the most detailed message of the four: it's the
         // one field ARCHITECTURE.md calls out by name as a locked,
@@ -104,6 +122,53 @@ impl RawSource {
             topic,
         })
     }
+}
+
+/// Turns the `url` of a `type = "file"` source into the full path that will be
+/// read, or says why it cannot be used.
+///
+/// - `~/something` becomes `<home>/something` (a shell habit that Rust does not
+///   do for you). `home` is passed in, rather than read here, so the tests can
+///   give any home folder without touching the real environment.
+/// - A `file://` prefix, which some people paste from a browser's address bar,
+///   is dropped.
+/// - The result must be a full path (starting at the root of the file system).
+///   A relative path such as `index.rss` would mean a different file depending
+///   on which folder tuxwire was started from, so it is refused.
+///
+/// `raw: &str` and `home: Option<&Path>` are borrowed; the answer is a new
+/// `String` because it may differ from what was typed. The error is a plain
+/// `String` reason that the caller puts after the source's label.
+fn resolve_file_path(raw: &str, home: Option<&Path>) -> Result<String, String> {
+    // Step 1: tidy what was typed and drop a pasted `file://` prefix.
+    let trimmed = raw.trim();
+    let without_scheme = trimmed.strip_prefix("file://").unwrap_or(trimmed);
+
+    // Step 2: expand a leading `~/` (or a lone `~`).
+    let expanded: PathBuf = if let Some(rest) = without_scheme.strip_prefix("~/") {
+        let home = home.ok_or("can't expand '~' in the file path: HOME is not set")?;
+        home.join(rest)
+    } else if without_scheme == "~" {
+        home.ok_or("can't expand '~' in the file path: HOME is not set")?
+            .to_path_buf()
+    } else {
+        PathBuf::from(without_scheme)
+    };
+
+    // Step 3: it must be a full path.
+    if !expanded.is_absolute() {
+        return Err(format!(
+            "the file path \"{raw}\" is not a full path -- start it with / or ~/ \
+             (for example ~/Downloads/index.rss)"
+        ));
+    }
+
+    // Step 4: hand back text. A path that is not valid text (rare on Linux)
+    // cannot be stored in a config file, so it is refused.
+    expanded
+        .to_str()
+        .map(str::to_string)
+        .ok_or_else(|| "the file path is not valid text".to_string())
 }
 
 /// The bundled fallback `sources.toml`, embedded into the compiled binary
@@ -299,6 +364,7 @@ pub fn append_sources_at(path: &std::path::Path, new: &[SourceConfig]) -> anyhow
         table["type"] = toml_edit::value(match source.source_type {
             SourceType::Rss => "rss",
             SourceType::Reddit => "reddit",
+            SourceType::File => "file",
         });
         table["url"] = toml_edit::value(source.url.as_str());
         table["topic"] = toml_edit::value(source.topic.as_str());
@@ -507,5 +573,96 @@ topic = "kernel"
         let raw: RawSourcesFile = toml::from_str(&written).unwrap();
         assert_eq!(raw.source.len(), 1);
         assert_eq!(raw.source[0].name.as_deref(), Some("Phoronix"));
+    }
+
+    /// `~/` becomes the home folder, a pasted `file://` prefix is dropped, and
+    /// a full path is kept as it is. The home folder is passed in, so this
+    /// touches nothing real.
+    #[test]
+    fn file_paths_are_resolved() {
+        let home = Path::new("/home/someone");
+        assert_eq!(
+            resolve_file_path("~/Downloads/index.rss", Some(home)).unwrap(),
+            "/home/someone/Downloads/index.rss"
+        );
+        assert_eq!(
+            resolve_file_path("file:///tmp/index.rss", Some(home)).unwrap(),
+            "/tmp/index.rss"
+        );
+        assert_eq!(
+            resolve_file_path("  /srv/feeds/a.xml ", None).unwrap(),
+            "/srv/feeds/a.xml"
+        );
+    }
+
+    /// A relative path, or `~` with no home folder to expand it, is refused
+    /// with a reason that says what to do.
+    #[test]
+    fn bad_file_paths_are_refused() {
+        let relative = resolve_file_path("index.rss", Some(Path::new("/home/someone")));
+        assert!(relative.unwrap_err().contains("not a full path"));
+
+        let no_home = resolve_file_path("~/index.rss", None);
+        assert!(no_home.unwrap_err().contains("HOME is not set"));
+    }
+
+    /// A `type = "file"` block loads as a file source, its path unchanged when
+    /// it is already a full path; a relative path fails with the source named.
+    #[test]
+    fn file_sources_load_and_relative_paths_fail() {
+        let good = r#"
+            [[source]]
+            name = "Saved Site"
+            type = "file"
+            url = "/home/someone/Downloads/index.rss"
+            topic = "sports"
+        "#;
+        let raw: RawSourcesFile = toml::from_str(good).unwrap();
+        let source = raw.source.into_iter().next().unwrap().validate(0).unwrap();
+        assert_eq!(source.source_type, SourceType::File);
+        assert_eq!(source.url, "/home/someone/Downloads/index.rss");
+
+        let bad = r#"
+            [[source]]
+            name = "Saved Site"
+            type = "file"
+            url = "index.rss"
+            topic = "sports"
+        "#;
+        let raw: RawSourcesFile = toml::from_str(bad).unwrap();
+        let message = raw
+            .source
+            .into_iter()
+            .next()
+            .unwrap()
+            .validate(0)
+            .unwrap_err()
+            .to_string();
+        assert!(message.contains("Saved Site"), "{message}");
+        assert!(message.contains("not a full path"), "{message}");
+    }
+
+    /// Adding a file source writes `type = "file"` and the path, and leaves the
+    /// comments in the file alone, like any other source.
+    #[test]
+    fn add_source_writes_type_file() {
+        let path = temp_sources_file("# keep me\n");
+        add_source_at(
+            &path,
+            "Saved Site",
+            SourceType::File,
+            "/home/someone/Downloads/index.rss",
+            "sports",
+        )
+        .unwrap();
+        let written = std::fs::read_to_string(&path).unwrap();
+        std::fs::remove_file(&path).ok();
+
+        assert!(written.contains("# keep me"), "{written}");
+        assert!(written.contains(r#"type = "file""#), "{written}");
+        assert!(
+            written.contains(r#"url = "/home/someone/Downloads/index.rss""#),
+            "{written}"
+        );
     }
 }

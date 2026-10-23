@@ -89,14 +89,15 @@ pub trait Fetcher {
 // the TOML loader lives in the `tui` crate and hands this module plain
 // `SourceConfig` values.
 pub mod discover;
+pub mod file;
 pub mod link_title;
 pub mod reddit;
 pub mod rss;
 
 /// Which concrete fetcher a source's `type` names.
 ///
-/// `"rss"` and `"reddit"` are both valid values a user can type in
-/// `sources.toml` today -- but only RSS actually fetches anything yet (see
+/// `"rss"`, `"reddit"` and `"file"` are all valid values a user can type in
+/// `sources.toml` today -- but Reddit doesn't fetch anything yet (see
 /// `fetchers::reddit`). Modeling this as an `enum` rather than leaving
 /// `source_type` a bare `String` means an entry like `type =
 /// "atom-ish-typo"` is caught right at config *parse* time, with serde's own
@@ -120,11 +121,18 @@ pub enum SourceType {
     Rss,
     /// A Reddit subreddit (not implemented yet; see `fetchers::reddit`).
     Reddit,
+    /// A feed saved in a file on this computer (`fetchers::file`). Only the
+    /// terminal app creates these (from `type = "file"` in `sources.toml`);
+    /// the `url` of such a source is the file's full path. They are never
+    /// synced to other devices and never written to an OPML export, because a
+    /// path on one computer means nothing on another.
+    File,
 }
 
 impl SourceType {
     /// The short name stored in the `feeds.source_type` database column:
-    /// `"rss"` or `"reddit"` (the same spellings `sources.toml` uses).
+    /// `"rss"`, `"reddit"` or `"file"` (the same spellings `sources.toml`
+    /// uses).
     ///
     /// Returns `&'static str`, a string baked into the program that lives for
     /// its whole run, so the caller gets it with no allocation and no ownership
@@ -135,6 +143,7 @@ impl SourceType {
         match self {
             SourceType::Rss => "rss",
             SourceType::Reddit => "reddit",
+            SourceType::File => "file",
         }
     }
 
@@ -145,6 +154,7 @@ impl SourceType {
         match text {
             "rss" => Some(SourceType::Rss),
             "reddit" => Some(SourceType::Reddit),
+            "file" => Some(SourceType::File),
             // Anything else is unknown; the caller decides what to do.
             _ => None,
         }
@@ -170,7 +180,8 @@ pub struct SourceConfig {
     pub name: String,
     /// Which fetcher implementation handles this source.
     pub source_type: SourceType,
-    /// The feed URL (or, for Reddit, the subreddit name).
+    /// The feed URL (for Reddit, the subreddit name; for a file source, the
+    /// file's full path).
     pub url: String,
     /// The single topic this source's articles are filed under.
     pub topic: String,
@@ -196,6 +207,8 @@ pub struct SourceConfig {
 pub enum ConfiguredSource {
     Rss(rss::RssFetcher),
     Reddit(reddit::RedditFetcher),
+    /// A feed read from a file on this computer (see `fetchers::file`).
+    File(file::FileFetcher),
 }
 
 impl ConfiguredSource {
@@ -207,6 +220,7 @@ impl ConfiguredSource {
         match self {
             ConfiguredSource::Rss(fetcher) => &fetcher.name,
             ConfiguredSource::Reddit(fetcher) => &fetcher.name,
+            ConfiguredSource::File(fetcher) => &fetcher.name,
         }
     }
 
@@ -217,6 +231,7 @@ impl ConfiguredSource {
         match self {
             ConfiguredSource::Rss(fetcher) => &fetcher.topic,
             ConfiguredSource::Reddit(fetcher) => &fetcher.topic,
+            ConfiguredSource::File(fetcher) => &fetcher.topic,
         }
     }
 
@@ -227,6 +242,8 @@ impl ConfiguredSource {
         match self {
             ConfiguredSource::Rss(fetcher) => &fetcher.url,
             ConfiguredSource::Reddit(fetcher) => &fetcher.url,
+            // For a file source the "address" is the file's path.
+            ConfiguredSource::File(fetcher) => &fetcher.path,
         }
     }
 }
@@ -242,6 +259,7 @@ impl Fetcher for ConfiguredSource {
         match self {
             ConfiguredSource::Rss(fetcher) => fetcher.fetch().await,
             ConfiguredSource::Reddit(fetcher) => fetcher.fetch().await,
+            ConfiguredSource::File(fetcher) => fetcher.fetch().await,
         }
     }
 }
@@ -345,6 +363,13 @@ pub fn configured_sources(sources: Vec<SourceConfig>) -> Vec<ConfiguredSource> {
             SourceType::Reddit => ConfiguredSource::Reddit(reddit::RedditFetcher {
                 name: source.name,
                 url: source.url,
+                topic: source.topic,
+            }),
+            // A file source keeps its path in the `url` field of the config
+            // (one shape for every source); the fetcher calls it what it is.
+            SourceType::File => ConfiguredSource::File(file::FileFetcher {
+                name: source.name,
+                path: source.url,
                 topic: source.topic,
             }),
         })
@@ -479,5 +504,47 @@ mod tests {
             .map(|o| (o.name.as_str(), o.result.is_ok()))
             .collect();
         assert_eq!(results, [("good1", true), ("dead", false), ("good2", true)]);
+    }
+
+    /// Every source type's database name reads back as the same type, so a
+    /// feed stored with `add_feed` is never silently dropped on the way back
+    /// out (including the file type).
+    #[test]
+    fn source_type_names_round_trip() {
+        for kind in [SourceType::Rss, SourceType::Reddit, SourceType::File] {
+            assert_eq!(SourceType::from_db_str(kind.as_str()), Some(kind));
+        }
+        assert_eq!(SourceType::from_db_str("carrier-pigeon"), None);
+    }
+
+    /// A file source built through `configured_sources` reports its path as
+    /// its address and fetches the file's articles.
+    #[tokio::test]
+    async fn a_file_source_is_configured_and_fetched() {
+        // Write a one-item feed to a file in the temporary folder.
+        let path = std::env::temp_dir().join(format!(
+            "tuxwire-configured-file-source-{}.rss",
+            std::process::id()
+        ));
+        std::fs::write(
+            &path,
+            r#"<?xml version="1.0"?><rss version="2.0"><channel><title>T</title><item><title>A</title><link>https://example.com/a</link></item></channel></rss>"#,
+        )
+        .unwrap();
+
+        // Build it the way the apps do, then fetch it with `fetch_one`.
+        let sources = configured_sources(vec![SourceConfig {
+            name: "Saved".to_string(),
+            source_type: SourceType::File,
+            url: path.to_string_lossy().into_owned(),
+            topic: "t".to_string(),
+        }]);
+        assert_eq!(sources[0].url(), path.to_string_lossy());
+        let outcome = fetch_one(&sources[0]).await;
+        let articles = outcome.result.expect("the file should load");
+        assert_eq!(articles.len(), 1);
+        assert_eq!(articles[0].title, "A");
+
+        let _ = std::fs::remove_file(&path);
     }
 }
