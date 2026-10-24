@@ -518,6 +518,13 @@ as a file source. Design rules:
   never looks at `$HOME`.
 - **No migration.** A file source is a `sources.toml` entry; articles record the
   path as their `feed_url`.
+- **Android imports once, from bytes** (decided 2026-10-24). The picker gives
+  bytes, so `feed_import::import_feed_bytes` stores the feed as a
+  `SourceType::File` row whose `url` is a made-up key `import:<slug of the
+  name>` (never a real path). Re-importing a newer copy finds the same key and
+  adds only new articles; the stored name and topic win. `configured_sources`
+  skips these rows, so a refresh never tries to read them. No live re-read: it
+  would mean keeping access to the file between sessions.
 - **Terminal only for now.** File sources are excluded from OPML export and
   from feed-list sync (`feed_sync` already syncs only `Rss`).
 

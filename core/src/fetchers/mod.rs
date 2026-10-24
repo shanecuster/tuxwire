@@ -354,6 +354,13 @@ pub fn configured_sources(sources: Vec<SourceConfig>) -> Vec<ConfiguredSource> {
     // compile error, which is exactly the safety net we want.
     sources
         .into_iter()
+        // A feed imported from a file has a made-up key instead of an address
+        // (see `file::import_key`): there is nothing to download, so it is
+        // left out of every fetch. `filter` keeps only the sources for which
+        // the closure answers `true`.
+        .filter(|source| {
+            !(source.source_type == SourceType::File && file::is_import_key(&source.url))
+        })
         .map(|source| match source.source_type {
             SourceType::Rss => ConfiguredSource::Rss(rss::RssFetcher {
                 name: source.name,

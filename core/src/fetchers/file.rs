@@ -84,17 +84,81 @@ pub fn read_feed_file(path: &Path) -> anyhow::Result<feed_rs::model::Feed> {
     let bytes = std::fs::read(path)
         .with_context(|| format!("can't read the feed file {}", path.display()))?;
 
-    // Step 3: a file with nothing (or only blank space) in it is not a feed.
+    // Step 3: the rest (empty check, parse) is shared with callers that already
+    // hold the bytes, such as the Android file picker.
+    parse_feed_file_bytes(&bytes, &path.display().to_string())
+}
+
+/// Checks and parses the bytes of a feed file that the caller already holds.
+///
+/// This is what the Android app's file picker uses: it has no path to hand
+/// over, only the bytes of the file the person chose. `label` is the file's
+/// name as the person knows it (a path, or the picker's display name); it is
+/// only used to word the error messages.
+///
+/// The checks mirror [`read_feed_file`]: not bigger than `FEED_MAX_BYTES`, not
+/// empty, and parseable as RSS or Atom. `bytes: &[u8]` borrows the bytes
+/// without copying them.
+pub fn parse_feed_file_bytes(bytes: &[u8], label: &str) -> anyhow::Result<feed_rs::model::Feed> {
+    // Step 1: refuse anything over the same size limit a download has. The
+    // path-based reader checks the size before reading; here the bytes are
+    // already in memory, so this guards the parser instead.
+    if bytes.len() > FEED_MAX_BYTES {
+        anyhow::bail!(
+            "{label} is larger than {} MiB; refusing to read it",
+            FEED_MAX_BYTES / (1024 * 1024)
+        );
+    }
+
+    // Step 2: a file with nothing (or only blank space) in it is not a feed.
     // Say so plainly instead of letting the parser report "no root element".
     // `trim_ascii` ignores blank space at both ends.
     if bytes.trim_ascii().is_empty() {
-        anyhow::bail!("{} is empty (no feed in it)", path.display());
+        anyhow::bail!("{label} is empty (no feed in it)");
     }
 
-    // Step 4: parse. If the bytes are not RSS or Atom (a saved web page, say)
+    // Step 3: parse. If the bytes are not RSS or Atom (a saved web page, say)
     // the parser fails and we add which file it was.
-    parse_feed_bytes(&bytes)
-        .with_context(|| format!("{} is not an RSS or Atom feed", path.display()))
+    parse_feed_bytes(bytes).with_context(|| format!("{label} is not an RSS or Atom feed"))
+}
+
+/// The start of the made-up address of a feed that was *imported* from a file
+/// (see [`import_key`]). A real web address never starts this way.
+pub const IMPORT_PREFIX: &str = "import:";
+
+/// True when `url` is the made-up key of an imported feed rather than a real
+/// address or a file path. Refreshing skips these: there is nothing to
+/// download and no path to read, so the person re-imports a newer copy.
+pub fn is_import_key(url: &str) -> bool {
+    url.starts_with(IMPORT_PREFIX)
+}
+
+/// Builds the stable key an imported feed is stored under, from its name:
+/// `import:` plus the name in lower case with every run of characters that are
+/// not letters or digits turned into one `-` ("Over Take!" becomes
+/// `import:over-take`). The same name always gives the same key, which is what
+/// lets a second import of a newer copy update the same feed instead of adding
+/// a duplicate. A name with no letters or digits at all becomes `import:feed`.
+pub fn import_key(name: &str) -> String {
+    // Walk the characters, keeping letters and digits (lower-cased) and
+    // writing at most one `-` for each stretch of anything else.
+    let mut slug = String::new();
+    for ch in name.chars() {
+        if ch.is_alphanumeric() {
+            // `to_lowercase` can yield several characters for one (rare), so
+            // it is appended as a whole.
+            slug.extend(ch.to_lowercase());
+        } else if !slug.is_empty() && !slug.ends_with('-') {
+            slug.push('-');
+        }
+    }
+    // A trailing separator ("name!") would leave a dangling `-`.
+    let slug = slug.trim_end_matches('-');
+    if slug.is_empty() {
+        format!("{IMPORT_PREFIX}feed")
+    } else {
+        format!("{IMPORT_PREFIX}{slug}")
+    }
 }
 
 impl Fetcher for FileFetcher {
@@ -190,5 +254,37 @@ mod tests {
         assert!(message.contains("is not an RSS or Atom feed"), "{message}");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Bytes handed over directly (the picker's case) get the same checks as a
+    /// file on disk, with errors that name the label.
+    #[test]
+    fn bytes_are_checked_like_a_file() {
+        let feed = parse_feed_file_bytes(FEED.as_bytes(), "index.rss").unwrap();
+        assert_eq!(feed.entries.len(), 2);
+
+        let message = format!(
+            "{:#}",
+            parse_feed_file_bytes(b" \n", "empty.rss").unwrap_err()
+        );
+        assert!(message.contains("empty.rss is empty"), "{message}");
+
+        let message = format!(
+            "{:#}",
+            parse_feed_file_bytes(b"<html></html>", "page.html").unwrap_err()
+        );
+        assert!(message.contains("is not an RSS or Atom feed"), "{message}");
+    }
+
+    /// Keys are stable, readable, and recognisable as imports.
+    #[test]
+    fn import_keys_are_stable_slugs() {
+        assert_eq!(import_key("Overtake"), "import:overtake");
+        assert_eq!(import_key("  Over Take!! "), "import:over-take");
+        assert_eq!(import_key("Box This Lap"), import_key("box  this  lap"));
+        assert_eq!(import_key("!!!"), "import:feed");
+        assert!(is_import_key("import:overtake"));
+        assert!(!is_import_key("https://example.com/import:x"));
+        assert!(!is_import_key("/home/me/index.rss"));
     }
 }
