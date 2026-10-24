@@ -167,15 +167,36 @@ pub(crate) async fn fetch_feed_limited(
     // limit, empty reply) live in `fetch_bytes`, which discovery shares.
     let bytes = fetch_bytes(client, url, FEED_MAX_BYTES, timeout).await?;
 
-    // Step 2: parse them. `feed_rs::parser::parse` accepts anything
-    // implementing `std::io::Read`; `&[u8]` (a borrowed run of bytes) does.
-    // Handing it the raw bytes, instead of text we decoded ourselves, lets it
-    // honour the encoding the feed's own `<?xml ... encoding="..."?>` line
-    // declares (older feeds are often ISO-8859-1, not UTF-8). The parser is
-    // the same for RSS and Atom: `feed-rs` detects the format and returns one
-    // unified `Feed` either way.
-    feed_rs::parser::parse(&bytes[..])
-        .with_context(|| format!("failed to parse feed XML from {url}"))
+    // Step 2: parse them with the shared parser (see `parse_feed_bytes`),
+    // naming the address in the error so a failure says which feed it was.
+    parse_feed_bytes(&bytes).with_context(|| format!("failed to parse feed XML from {url}"))
+}
+
+/// Parses the raw bytes of an RSS or Atom feed into a `feed_rs` `Feed`.
+///
+/// This is the one place the bytes-to-feed step lives, so every way of getting
+/// feed bytes shares it: a download ([`fetch_feed_limited`]), discovery
+/// (`fetchers::discover`), and a feed *file* a person already has on disk (the
+/// terminal app's `type = "file"` source and "add a feed from a file"; the
+/// Android app can pass the bytes its file picker gives it). It does no I/O and
+/// never looks at a path, which is why it is safe to live in the shared core
+/// crate: the program decides where the bytes came from.
+///
+/// `bytes: &[u8]` borrows a run of bytes (nothing is copied or consumed).
+/// `feed_rs::parser::parse` accepts anything implementing `std::io::Read`, and
+/// `&[u8]` does. Handing it the raw bytes, instead of text we decoded
+/// ourselves, lets it honour the encoding the feed's own
+/// `<?xml ... encoding="..."?>` line declares (older feeds are often
+/// ISO-8859-1, not UTF-8). The parser is the same for RSS and Atom: `feed-rs`
+/// detects the format and returns one unified `Feed` either way.
+///
+/// The error is the parser's own; callers add context saying which feed or
+/// file it was (the `?` operator and `.with_context` do that without losing the
+/// original message).
+pub fn parse_feed_bytes(bytes: &[u8]) -> anyhow::Result<feed_rs::model::Feed> {
+    // `.map_err(anyhow::Error::from)` turns `feed-rs`'s own error type into
+    // the general `anyhow::Error` this function promises to return.
+    feed_rs::parser::parse(bytes).map_err(anyhow::Error::from)
 }
 
 /// Downloads `url` and returns the body as raw bytes, refusing anything that
@@ -303,81 +324,102 @@ fn clean_feed_text(raw: &str, subtype: &str) -> String {
     }
 }
 
+/// Turns a parsed feed into the app's own `Article`s, one per entry.
+///
+/// This is the pure half of fetching: no network, no files. `RssFetcher::fetch`
+/// downloads a feed and calls it; the terminal app's `type = "file"` source
+/// reads a feed file from disk and calls it; the Android app can call it with
+/// bytes from its file picker (after [`parse_feed_bytes`]). Having one function
+/// means a feed read from a file produces exactly the same articles, summaries
+/// and dates as the same feed downloaded.
+///
+/// - `feed` is taken **by value** (ownership moves in) because each entry's
+///   strings are moved into the new `Article`s instead of copied.
+/// - `name` is the source's display name and `topic` the topic it is filed
+///   under; both are copied onto every article.
+/// - `feed_url` is recorded as each article's `feed_url` (the source's address
+///   in `sources.toml`, or the file's path for a file source), so feed lists
+///   can tell their articles apart.
+pub fn articles_from_feed(
+    feed: feed_rs::model::Feed,
+    name: &str,
+    topic: &str,
+    feed_url: &str,
+) -> Vec<Article> {
+    // Build the `Vec<Article>` we're returning. `feed.entries` is a
+    // `Vec<feed_rs::model::Entry>` — we walk it with `.into_iter()`
+    // (which *consumes* the `Vec`, handing us owned `Entry` values
+    // one at a time instead of borrowed references, since we don't
+    // need `feed` afterwards) and `.map(...)` each `Entry` into our
+    // own `Article` type. `.collect()` gathers the mapped iterator
+    // back into a concrete `Vec<Article>` — Rust knows which container
+    // to build from this function's return type, because `.collect()` is
+    // generic over *many* possible container types, not just `Vec`.
+    feed.entries
+        .into_iter()
+        .map(|entry| {
+            // The summary is worked out first, because it only *borrows*
+            // the entry (`&entry`); the lines below move pieces out of
+            // `entry`, after which it could no longer be borrowed whole.
+            let summary = entry_summary(&entry);
+
+            // `entry.title` is `Option<feed_rs::model::Text>` — a
+            // feed entry isn't guaranteed to have a title. `.map(...)`
+            // on an `Option` transforms the value *if present*
+            // without needing an explicit `if`/`match`; `.unwrap_or_else(...)`
+            // then supplies a fallback if it was `None`. Chaining the
+            // two reads almost like a sentence: "the title's text
+            // content, or '(untitled)' if there wasn't one."
+            let title = entry
+                .title
+                .map(|t| t.content)
+                .unwrap_or_else(|| String::from("(untitled)"));
+
+            // `entry.links` is a `Vec<Link>` — most feeds put exactly
+            // one link on each entry, but the type allows more, so we
+            // take the first one. `.first()` returns `Option<&Link>`
+            // (a reference, since it's borrowing out of the `Vec`
+            // rather than removing from it), hence `.map(|link|
+            // link.href.clone())` to get an owned `String` out of the
+            // borrowed `Link`.
+            let url = entry
+                .links
+                .first()
+                .map(|link| link.href.clone())
+                .unwrap_or_default();
+
+            // Prefer the entry's `published` date; fall back to
+            // `updated` (some feeds only set one or the other); fall
+            // back to "right now" as a last resort so every `Article`
+            // always has *a* timestamp to sort by, even from a feed
+            // that omits dates entirely. `.or(...)` on an `Option`
+            // returns the first `Some`, trying the next `Option` only
+            // if the first was `None` — the same short-circuiting
+            // idea as `||` for booleans, just for `Option`s.
+            let timestamp = entry.published.or(entry.updated).unwrap_or_else(Utc::now);
+
+            // Record which feed this came from (`feed_url` is the
+            // source's address from `sources.toml`), so feed lists can
+            // tell their articles apart. `mut` because the field is set
+            // after construction.
+            let mut article =
+                Article::new(title, url, name.to_string(), topic.to_string(), timestamp);
+            article.feed_url = Some(feed_url.to_string());
+            article.summary = summary;
+            article
+        })
+        .collect()
+}
+
 impl Fetcher for RssFetcher {
     /// Fetches and parses `self.url` (via `fetch_feed` above) and maps
-    /// every entry in the result into an `Article`.
+    /// every entry in the result into an `Article` (via `articles_from_feed`).
     async fn fetch(&self) -> anyhow::Result<Vec<Article>> {
         let feed = fetch_feed(&self.url)
             .await
             .with_context(|| format!("fetching '{}'", self.name))?;
 
-        // Build the `Vec<Article>` we're returning. `feed.entries` is a
-        // `Vec<feed_rs::model::Entry>` — we walk it with `.into_iter()`
-        // (which *consumes* the `Vec`, handing us owned `Entry` values
-        // one at a time instead of borrowed references, since we don't
-        // need `feed` afterwards) and `.map(...)` each `Entry` into our
-        // own `Article` type. `.collect()` gathers the mapped iterator
-        // back into a concrete `Vec<Article>` — Rust needs the `let
-        // articles: Vec<Article> = ...` type annotation (or one inferred
-        // from the function's return type) because `.collect()` is
-        // generic over *many* possible container types, not just `Vec`.
-        let articles: Vec<Article> = feed
-            .entries
-            .into_iter()
-            .map(|entry| {
-                // The summary is worked out first, because it only *borrows*
-                // the entry (`&entry`); the lines below move pieces out of
-                // `entry`, after which it could no longer be borrowed whole.
-                let summary = entry_summary(&entry);
-
-                // `entry.title` is `Option<feed_rs::model::Text>` — a
-                // feed entry isn't guaranteed to have a title. `.map(...)`
-                // on an `Option` transforms the value *if present*
-                // without needing an explicit `if`/`match`; `.unwrap_or_else(...)`
-                // then supplies a fallback if it was `None`. Chaining the
-                // two reads almost like a sentence: "the title's text
-                // content, or '(untitled)' if there wasn't one."
-                let title = entry
-                    .title
-                    .map(|t| t.content)
-                    .unwrap_or_else(|| String::from("(untitled)"));
-
-                // `entry.links` is a `Vec<Link>` — most feeds put exactly
-                // one link on each entry, but the type allows more, so we
-                // take the first one. `.first()` returns `Option<&Link>`
-                // (a reference, since it's borrowing out of the `Vec`
-                // rather than removing from it), hence `.map(|link|
-                // link.href.clone())` to get an owned `String` out of the
-                // borrowed `Link`.
-                let url = entry
-                    .links
-                    .first()
-                    .map(|link| link.href.clone())
-                    .unwrap_or_default();
-
-                // Prefer the entry's `published` date; fall back to
-                // `updated` (some feeds only set one or the other); fall
-                // back to "right now" as a last resort so every `Article`
-                // always has *a* timestamp to sort by, even from a feed
-                // that omits dates entirely. `.or(...)` on an `Option`
-                // returns the first `Some`, trying the next `Option` only
-                // if the first was `None` — the same short-circuiting
-                // idea as `||` for booleans, just for `Option`s.
-                let timestamp = entry.published.or(entry.updated).unwrap_or_else(Utc::now);
-
-                // Record which feed this came from (`self.url` is the
-                // source's feed URL from `sources.toml`), so feed lists can
-                // tell their articles apart. `mut` because the field is set
-                // after construction.
-                let mut article =
-                    Article::new(title, url, self.name.clone(), self.topic.clone(), timestamp);
-                article.feed_url = Some(self.url.clone());
-                article.summary = summary;
-                article
-            })
-            .collect();
-
-        Ok(articles)
+        Ok(articles_from_feed(feed, &self.name, &self.topic, &self.url))
     }
 }
 
@@ -599,5 +641,71 @@ mod tests {
         let summary = first_summary(&xml).unwrap();
         assert!(summary.chars().count() <= SUMMARY_MAX_CHARS);
         assert!(summary.ends_with('.'));
+    }
+
+    /// A feed's bytes become articles without any network: `parse_feed_bytes`
+    /// reads the XML and `articles_from_feed` maps each entry, copying the
+    /// source's name, topic and address onto every article. This is the path a
+    /// feed *file* takes (the terminal app's `type = "file"` source), so the
+    /// test uses the shape of a real site's feed: `CDATA` text, an `<author>`
+    /// that is only a placeholder address, and a `<content:encoded>` body.
+    #[test]
+    fn feed_bytes_become_articles_without_network() {
+        // Step 1: a small RSS feed with two items, written as raw bytes.
+        let xml = br#"<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0" xmlns:dc="http://purl.org/dc/elements/1.1/"
+     xmlns:content="http://purl.org/rss/1.0/modules/content/">
+  <channel>
+    <title>Articles Feed</title>
+    <link>https://example.com/</link>
+    <description>Test feed</description>
+    <item>
+      <title>First &amp; best</title>
+      <pubDate>Sun, 18 Oct 2026 12:33:32 +0000</pubDate>
+      <link>https://example.com/news/first.1/</link>
+      <guid>https://example.com/news/first.1/</guid>
+      <author>invalid@example.com (Some Writer)</author>
+      <dc:creator>Some Writer</dc:creator>
+      <content:encoded><![CDATA[<div><b>Hello</b> world. Second sentence.</div>]]></content:encoded>
+    </item>
+    <item>
+      <title>Second</title>
+      <link>https://example.com/news/second.2/</link>
+    </item>
+  </channel>
+</rss>"#;
+
+        // Step 2: parse and map. `to_string` is not needed: the function takes
+        // `&str` borrows and copies what it keeps.
+        let feed = parse_feed_bytes(xml).expect("the test feed should parse");
+        let title = feed.title.as_ref().map(|t| t.content.clone());
+        let articles = articles_from_feed(feed, "Test Site", "sports", "/home/me/feed.rss");
+
+        // Step 3: the feed's own title is available for guessing a name, and
+        // both entries became articles carrying the source's details.
+        assert_eq!(title.as_deref(), Some("Articles Feed"));
+        assert_eq!(articles.len(), 2);
+        assert_eq!(articles[0].title, "First & best");
+        assert_eq!(articles[0].url, "https://example.com/news/first.1/");
+        assert_eq!(articles[0].source, "Test Site");
+        assert_eq!(articles[0].topic, "sports");
+        assert_eq!(articles[0].feed_url.as_deref(), Some("/home/me/feed.rss"));
+        // The body text, with the HTML removed, becomes the summary.
+        assert!(
+            articles[0]
+                .summary
+                .as_deref()
+                .is_some_and(|s| s.contains("Hello world."))
+        );
+        // An item with no date still gets a timestamp (the current time).
+        assert_eq!(articles[1].title, "Second");
+    }
+
+    /// Bytes that are not a feed are an error (not an empty list of articles),
+    /// so a person who points a file source at the wrong file is told so.
+    #[test]
+    fn non_feed_bytes_are_an_error() {
+        assert!(parse_feed_bytes(b"<html><body>Not a feed</body></html>").is_err());
+        assert!(parse_feed_bytes(b"").is_err());
     }
 }

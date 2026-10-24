@@ -5,6 +5,16 @@ messages — what changed and why, not just what.
 
 ## Unreleased
 
+### Added
+
+- **Feeds from a file (`type = "file"`)**, for sites that block programs but
+  serve the feed to a browser (OverTake.gg answers 403 to tuxwire and curl).
+  Save the feed from your browser, then press `a` and type its path
+  (`~/Downloads/index.rss`), or add the source to `sources.toml` by hand. The
+  file is read on every refresh. Terminal only: left out of OPML export and
+  feed-list sync. The parsing now lives in shared core as bytes-in functions
+  (`parse_feed_bytes`, `articles_from_feed`) so Android can reuse it later.
+
 ### Fixed
 
 - **A newly added feed showed no articles until the next refresh**, which made

@@ -5,6 +5,22 @@ remembering.
 
 ---
 
+## Feed from a file (branch `feature/file-source`, 2026-10-23)
+
+- **Why:** OverTake.gg's Cloudflare rule answers 403 to tuxwire and curl but serves a browser.
+  tuxwire does not spoof a browser; it reads a feed file you saved instead.
+- **What:** `type = "file"` in `sources.toml`, or type a path (`~/Downloads/index.rss`) into the
+  `a` box. Core has `parse_feed_bytes` / `articles_from_feed` (bytes in, no network) and
+  `FileFetcher`; tui expands `~/` and refuses relative paths.
+- **Left out on purpose:** OPML export, feed-list sync, Android (it will use a file picker and
+  `parse_feed_bytes` later). No database migration.
+- **How to test:** save a feed to a file, run the built binary with a throwaway `HOME` (see
+  CLAUDE.md), press `a`, type the path, pick a topic. Articles should appear at once; saving a
+  newer copy over the file and pressing `r` should add the new items.
+- **Worth knowing:** a missing or non-feed file is a per-source fetch error, like a dead URL.
+
+---
+
 ## Core split: `core/` + `tui/` workspace (branch `feature/core-split`, 2026-10-09)
 
 Groundwork for the native Android app. The repo is now a Cargo workspace with two crates, so

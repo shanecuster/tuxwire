@@ -245,12 +245,18 @@ pub fn parse_opml(text: &str) -> anyhow::Result<OpmlImport> {
 /// attribute is escaped (`&`, `<`, `>`, quotes), so any name or address is
 /// safe. A Reddit source has no feed address of its own, so it is written as
 /// its ordinary feed (`https://www.reddit.com/r/NAME/.rss`), which other
-/// readers can use; read back, it becomes a plain RSS feed.
+/// readers can use; read back, it becomes a plain RSS feed. A **file** source
+/// (a feed saved in a file on this computer) is left out: its path means
+/// nothing to another program or computer, and OPML holds web addresses.
 pub fn write_opml(sources: &[SourceConfig]) -> String {
     // Step 1: group the feeds by topic. Each entry is a topic name plus the
     // feeds filed under it. A linear search is fine: there are few topics.
     let mut groups: Vec<(&str, Vec<&SourceConfig>)> = Vec::new();
     for source in sources {
+        // File sources have no web address, so they cannot be exported.
+        if source.source_type == SourceType::File {
+            continue;
+        }
         match groups
             .iter_mut()
             .find(|(topic, _)| *topic == source.topic.as_str())
@@ -285,13 +291,15 @@ pub fn write_opml(sources: &[SourceConfig]) -> String {
 }
 
 /// The web address to write for a source: its own address for an RSS feed,
-/// or the subreddit's ordinary feed address for a Reddit source.
+/// or the subreddit's ordinary feed address for a Reddit source. (A file source
+/// has no web address; [`write_opml`] skips those, so for one this just returns
+/// the stored path, which is only useful for comparing.)
 ///
 /// Public so that the terminal app can tell whether an imported feed is
 /// already in a list by comparing addresses on the same terms the export uses.
 pub fn feed_address(source: &SourceConfig) -> String {
     match source.source_type {
-        SourceType::Rss => source.url.clone(),
+        SourceType::Rss | SourceType::File => source.url.clone(),
         SourceType::Reddit => {
             let stored = source.url.trim();
             // A value that is already a web address is used as it is.
@@ -831,5 +839,27 @@ mod tests {
         )]);
         assert!(!text.contains('\u{1}'));
         assert_eq!(parse_opml(&text).unwrap().feeds[0].name, "ab c");
+    }
+
+    /// A file source (a feed saved on this computer) is left out of an export:
+    /// OPML holds web addresses, and a path on one computer means nothing on
+    /// another. The web feed next to it is still written.
+    #[test]
+    fn file_sources_are_not_exported() {
+        let text = write_opml(&[
+            source("Web", "https://web.example/feed", "Tech", SourceType::Rss),
+            source(
+                "Saved",
+                "/home/me/Downloads/index.rss",
+                "Tech",
+                SourceType::File,
+            ),
+        ]);
+        assert!(text.contains("https://web.example/feed"));
+        assert!(
+            !text.contains("index.rss"),
+            "the file path must not be exported"
+        );
+        assert!(!text.contains("Saved"));
     }
 }

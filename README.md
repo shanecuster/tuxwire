@@ -364,6 +364,23 @@ topic = "linux"
   one interactively. Paste a feed address, or a web page's address: tuxwire
   looks for the page's feed (skipping comment feeds) and validates it before
   saving.
+- **Sites that block programs** (a Cloudflare rule answering "403" to anything
+  but a browser) can still be read: open the feed in your browser, save it
+  (for example to `~/Downloads/index.rss`), then press `a` and type that path,
+  or add a source by hand:
+
+  ```toml
+  [[source]]
+  name = "OverTake"
+  type = "file"
+  url = "~/Downloads/index.rss"
+  topic = "motorsport"
+  ```
+
+  The file is read again on every refresh, so save a fresh copy over it when
+  you want newer articles. `~/` and a pasted `file://` are understood; a
+  relative path is refused. File sources are terminal-only: they are left out of
+  OPML export and feed-list sync, and the Android app never sees them.
 
 ### `theme.toml` — colors
 
