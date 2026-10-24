@@ -36,6 +36,65 @@ pub struct ImportReport {
     pub created: bool,
 }
 
+/// A quick look at a feed file before it is imported: enough for a screen to
+/// show "this is the right feed" and let the person pick a name and topic.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FilePreview {
+    /// The feed's own title, or `"Imported feed"` when it has none. Offered as
+    /// the suggested name.
+    pub title: String,
+    /// The key the feed would be stored under if imported with that title.
+    pub key: String,
+    /// How many entries the file lists.
+    pub entry_count: u32,
+    /// The titles of up to the first five entries, in the file's order
+    /// (`"(untitled)"` for an entry with none).
+    pub latest_titles: Vec<String>,
+}
+
+/// Parses the bytes of a feed file and summarises it, storing nothing.
+///
+/// Exists so the Android app can check a file the moment it is picked, with the
+/// same checks and wording as the import itself, without the app code having
+/// to know the feed parser's types.
+pub fn preview_feed_bytes(bytes: &[u8], label: &str) -> anyhow::Result<FilePreview> {
+    // Step 1: the same checks and parse as the import.
+    let feed = parse_feed_file_bytes(bytes, label)?;
+
+    // Step 2: the title is optional in the feed format. `map` pulls the text
+    // out when present; `filter` treats a blank title as missing; the fallback
+    // is a fixed phrase because there is no address to show for a file.
+    let title = feed
+        .title
+        .as_ref()
+        .map(|title| title.content.trim().to_string())
+        .filter(|title| !title.is_empty())
+        .unwrap_or_else(|| "Imported feed".to_string());
+
+    // Step 3: the first five headlines. `iter().take(5).map(..).collect()` reads
+    // as: walk the entries, stop after five, turn each into its title text, and
+    // gather those into a `Vec`.
+    let latest_titles = feed
+        .entries
+        .iter()
+        .take(5)
+        .map(|entry| {
+            entry
+                .title
+                .as_ref()
+                .map(|title| title.content.clone())
+                .unwrap_or_else(|| "(untitled)".to_string())
+        })
+        .collect();
+
+    Ok(FilePreview {
+        key: import_key(&title),
+        title,
+        entry_count: feed.entries.len() as u32,
+        latest_titles,
+    })
+}
+
 /// Imports the feed in `bytes` as a feed called `name` filed under `topic`.
 ///
 /// - `label` is the file's display name, used only in error messages.
@@ -200,5 +259,18 @@ mod tests {
                 .collect(),
         );
         assert!(sources.is_empty());
+    }
+
+    /// The preview names the feed, counts its entries, and stores nothing.
+    #[test]
+    fn preview_summarises_without_storing() {
+        let preview = preview_feed_bytes(FEED.as_bytes(), "index.rss").unwrap();
+        assert_eq!(preview.title, "Site");
+        assert_eq!(preview.key, "import:site");
+        assert_eq!(preview.entry_count, 2);
+        assert_eq!(preview.latest_titles, vec!["One", "Two"]);
+
+        let err = preview_feed_bytes(b"nope", "x.txt").unwrap_err();
+        assert!(format!("{err:#}").contains("x.txt"));
     }
 }
