@@ -7,6 +7,13 @@ messages — what changed and why, not just what.
 
 ### Added
 
+- **Import a feed from the bytes of a file** (shared core, for the Android app's
+  "Import from file"). `import_feed_bytes` parses the file, stores the feed
+  under a stable key such as `import:overtake`, and stores its articles. A
+  second import of a newer copy updates the same feed and adds only what is
+  new. Imported feeds are skipped by refresh (nothing to download) and, like
+  file sources, are left out of OPML export and feed-list sync.
+
 - **Feeds from a file (`type = "file"`)**, for sites that block programs but
   serve the feed to a browser (OverTake.gg answers 403 to tuxwire and curl).
   Save the feed from your browser, then press `a` and type its path

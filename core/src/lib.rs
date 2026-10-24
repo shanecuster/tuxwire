@@ -26,6 +26,7 @@
 //! `tuxwire_core::name` -- `pub` is what exposes it outside this crate.
 
 pub mod export;
+pub mod feed_import;
 pub mod fetch_report;
 pub mod fetchers;
 pub mod icons;
