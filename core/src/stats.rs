@@ -254,9 +254,42 @@ pub fn compute_stats(
     })
 }
 
+/// Like [`compute_stats`], but the current moment is given as Unix seconds
+/// (seconds since 1970-01-01 UTC) instead of a `chrono` value.
+///
+/// This exists for the Android glue crate, which has no `chrono` of its own
+/// (and may not add one): Kotlin hands over `System.currentTimeMillis() / 1000`
+/// and this turns it into the date type `compute_stats` wants. A number that is
+/// not a valid moment is an error, not a panic.
+pub fn compute_stats_at(
+    storage: &Storage,
+    now_unix_secs: i64,
+    utc_offset_secs: i32,
+    feeds: u32,
+) -> anyhow::Result<Stats> {
+    // `from_timestamp` gives `None` for a number too big to be a date; `ok_or_else`
+    // turns that `None` into an error carrying a readable message.
+    let now = DateTime::<Utc>::from_timestamp(now_unix_secs, 0)
+        .ok_or_else(|| anyhow::anyhow!("{now_unix_secs} is not a valid time"))?;
+    compute_stats(storage, now, utc_offset_secs, feeds)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The Unix-seconds entry point gives the same answer as the `chrono` one,
+    /// and a nonsense time is an error rather than a panic.
+    #[test]
+    fn unix_seconds_entry_point_matches() {
+        let storage = Storage::open_in_memory().unwrap();
+        let now = Utc.with_ymd_and_hms(2026, 10, 25, 12, 0, 0).unwrap();
+        let a = compute_stats(&storage, now, 0, 4).unwrap();
+        let b = compute_stats_at(&storage, now.timestamp(), 0, 4).unwrap();
+        assert_eq!(a, b);
+        assert_eq!(b.feeds, 4);
+        assert!(compute_stats_at(&storage, i64::MAX, 0, 0).is_err());
+    }
 
     /// A UTC moment from a date and time, as milliseconds since 1970.
     fn ms(y: i32, m: u32, d: u32, h: u32) -> i64 {
