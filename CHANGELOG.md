@@ -7,6 +7,14 @@ messages — what changed and why, not just what.
 
 ### Added
 
+- **Stats screen** (`g` in the terminal). Cards for Read, Unread, Feeds (all
+  lists added up), Notes, Saved and the reading streak, a chart of reads per
+  week (12 weeks), and the topics and sources you have read the most. All the
+  numbers come from the shared core (`tuxwire_core::stats::compute_stats`), so
+  the Android app can show the same figures. The chart and streak start from
+  the day real read times began being recorded; older reads still count in the
+  Read total. Reads recorded on another device (read marks) count in the total
+  and chart but not in the top lists, since the article is not on this device.
 - **A marker beside feeds that got new articles** (terminal sidebar). After a
   refresh, each feed with new articles shows the same new-article icon as the
   article list (`Icon::New`), and so does its topic, so you can see at a glance

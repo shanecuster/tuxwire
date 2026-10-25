@@ -28,6 +28,7 @@ mod feed_sync_store;
 mod migrations;
 mod read_later_store;
 mod read_mark_store;
+mod stats_store;
 mod sync_store;
 
 use crate::fetchers::{SourceConfig, SourceType};

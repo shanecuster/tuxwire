@@ -33,6 +33,7 @@ pub mod icons;
 pub mod models;
 pub mod opml;
 pub mod scoring;
+pub mod stats;
 pub mod storage;
 pub mod sync;
 pub mod text;

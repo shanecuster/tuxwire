@@ -140,6 +140,13 @@ to your server only if you turn it on. Only articles opened in the last 90 days
 are sent, nothing is ever deleted from your server, and an article can be opened
 but never marked unread again.
 
+### Stats
+Press `g` for a Stats screen: how many articles you have read (and this week
+and month), unread, feeds across all your lists, notes, saved, your reading
+streak, a chart of reads per week, and the topics and sources you read most.
+`Esc`, `q` or `g` closes it. The chart and streak begin on the day tuxwire
+started recording read times; older reads are only in the Read total.
+
 ### Which feeds have something new
 After a refresh (at startup or with `r`), every feed that got new articles shows
 the new-article marker (✦ with the default icons) after its name in the sidebar,
