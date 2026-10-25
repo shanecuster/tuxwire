@@ -5,6 +5,21 @@ remembering.
 
 ---
 
+## Rename-proof feed rows and the 403 hint (branch `feature/robust-feeds`, 2026-10-25)
+
+- **Rename fix:** a sidebar feed row now loads by the feed's address (looked up from
+  `sources.toml` by topic + name), falling back to the name for old articles with no stored
+  address. Core: `Storage::articles_by_feed_or_name`; TUI: `FeedAddresses`,
+  `feed_addresses_of`, rebuilt wherever `group_sources_by_topic` is.
+- **403 hint:** HTTP 403 now ends with "the feed link is not working for apps like tuxwire.
+  Try saving the feed from your browser and adding it as a file instead". Other statuses are
+  unchanged. Android gets it with the next core pin bump.
+- **How to test:** throwaway HOME, two file feeds, run once, rename one in `sources.toml`,
+  run again, expand the topic and select the renamed row: its old articles show, the other
+  feed's do not.
+
+---
+
 ## Stats (branch `feature/stats`, 2026-10-25)
 
 - **What:** `g` opens a popup with six cards, a 12-week reads chart and top topics/sources

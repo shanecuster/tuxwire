@@ -868,6 +868,14 @@ remember to go look for). Genuinely novel — most readers, terminal or
 GUI, treat "saved" as a one-way archive. Worth building once retrieval
 and search themselves are solid and have seen real use.
 
+### Per-feed view is found by address (decided 2026-10-25, Shane)
+
+The sidebar's feed rows used to filter articles by the feed's *name*, so renaming a
+feed in `sources.toml` stranded its older articles. A row is now looked up by the feed's
+address (`articles.feed_url`), found through `sources.toml`; articles with no stored
+address still match by topic and name. The topic row still filters by topic. Android
+already listed a feed's articles by address.
+
 ### Stats View — priority near-term feature
 
 **Built 2026-10-25 (decided with Shane):** one plain `Stats` struct computed once in

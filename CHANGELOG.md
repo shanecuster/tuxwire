@@ -5,6 +5,16 @@ messages — what changed and why, not just what.
 
 ## Unreleased
 
+### Fixed
+
+- **Renaming a feed no longer hides its older articles.** A feed row in the
+  sidebar is now found by the feed's address, not its name, so changing
+  `name = ...` (or the topic) in `sources.toml` keeps every article that feed
+  ever fetched in its own row. Articles stored before addresses were recorded
+  still match by name. The topic row is unchanged: it filters by topic, as
+  before. Core gains `Storage::articles_by_feed_or_name`. Android already
+  worked this way.
+
 ### Added
 
 - **A 403 now says what to try.** When a site answers HTTP 403 (it turns away

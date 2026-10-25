@@ -620,6 +620,7 @@ pub fn run(
     // `mut`: switching lists (and adding a source to a list) replaces
     // this with the new list's sources.
     let mut sources_by_topic = group_sources_by_topic(sources);
+    let mut feed_addresses = feed_addresses_of(sources);
 
     // `ratatui::run` (see the doc comment on it in the `ratatui` crate)
     // is the "simplest path" helper: it puts the terminal into raw mode +
@@ -635,6 +636,7 @@ pub fn run(
             storage,
             &mut topics,
             &mut sources_by_topic,
+            &mut feed_addresses,
             scope,
             session,
         )
@@ -750,6 +752,26 @@ fn group_sources_by_topic(sources: &[ConfiguredSource]) -> HashMap<String, Vec<S
     grouped
 }
 
+/// Each configured feed's address, keyed by its topic and name -- the pair a
+/// sidebar feed row is known by. Looked up when a feed row is selected so its
+/// articles can be found by address (see `load_articles_for_selection`).
+type FeedAddresses = HashMap<(String, String), String>;
+
+/// Builds the [`FeedAddresses`] lookup from the loaded sources. Rebuilt
+/// wherever `group_sources_by_topic` is, because both describe the same
+/// sidebar and must change together (a list switch, a source added).
+fn feed_addresses_of(sources: &[ConfiguredSource]) -> FeedAddresses {
+    sources
+        .iter()
+        .map(|source| {
+            (
+                (source.topic().to_string(), source.name().to_string()),
+                source.url().to_string(),
+            )
+        })
+        .collect()
+}
+
 /// The actual draw loop: redraw the frame, block for the next terminal
 /// event, act on it, and quit on `q` -- otherwise loop forever. Split out
 /// from `run` so `run` itself stays focused on "load the data, then hand
@@ -780,6 +802,9 @@ fn draw_until_quit(
     // `&mut` so switching lists can replace it with the new list's
     // sources (see the `Mode::ListPicker` handling).
     sources_by_topic: &mut HashMap<String, Vec<String>>,
+    // Each feed's address by (topic, name); kept in step with
+    // `sources_by_topic` and replaced alongside it.
+    feed_addresses: &mut FeedAddresses,
     // What the topic views cover (see `list_scope`). Owned and `mut` for
     // the same reason.
     mut scope: Scope,
@@ -962,6 +987,7 @@ fn draw_until_quit(
                         Switch::Switched { index, loaded } => {
                             active_list = index;
                             *sources_by_topic = group_sources_by_topic(&loaded);
+                            *feed_addresses = feed_addresses_of(&loaded);
                             scope = list_scope(&feed_lists, &loaded);
                             *topics = list_topics(storage, &scope, &feed_lists, &loaded)?;
 
@@ -976,6 +1002,7 @@ fn draw_until_quit(
                             search = None;
                             articles = articles_for_view(
                                 storage,
+                                &*feed_addresses,
                                 &scope,
                                 view,
                                 topics,
@@ -1066,6 +1093,7 @@ fn draw_until_quit(
             if matches!(mode, Mode::Normal) {
                 articles = articles_for_view(
                     storage,
+                    &*feed_addresses,
                     &scope,
                     view,
                     topics,
@@ -1228,6 +1256,7 @@ fn draw_until_quit(
                     match fetchers::configured_sources_at(&feed_lists.lists()[active_list].path) {
                         Ok(sources) => {
                             *sources_by_topic = group_sources_by_topic(&sources);
+                            *feed_addresses = feed_addresses_of(&sources);
                             scope = list_scope(&feed_lists, &sources);
                         }
                         Err(err) => {
@@ -1400,6 +1429,7 @@ fn draw_until_quit(
                     mode = Mode::Normal;
                     articles = articles_for_view(
                         storage,
+                        &*feed_addresses,
                         &scope,
                         view,
                         topics,
@@ -1422,6 +1452,7 @@ fn draw_until_quit(
                         search = None;
                         articles = articles_for_view(
                             storage,
+                            &*feed_addresses,
                             &scope,
                             view,
                             topics,
@@ -1517,6 +1548,7 @@ fn draw_until_quit(
                     );
                     articles = load_articles_for_selection(
                         storage,
+                        &*feed_addresses,
                         &scope,
                         &topics[topic_index],
                         selected_source.as_deref(),
@@ -1534,6 +1566,7 @@ fn draw_until_quit(
                     );
                     articles = load_articles_for_selection(
                         storage,
+                        &*feed_addresses,
                         &scope,
                         &topics[topic_index],
                         selected_source.as_deref(),
@@ -1583,6 +1616,7 @@ fn draw_until_quit(
                     if selected_source.take().is_some() {
                         articles = load_articles_for_selection(
                             storage,
+                            &*feed_addresses,
                             &scope,
                             &topics[topic_index],
                             None,
@@ -1615,8 +1649,15 @@ fn draw_until_quit(
                         view = View::Topic;
                         selected_source = None;
                         search = None;
-                        articles =
-                            articles_for_view(storage, &scope, view, topics, topic_index, None)?;
+                        articles = articles_for_view(
+                            storage,
+                            &*feed_addresses,
+                            &scope,
+                            view,
+                            topics,
+                            topic_index,
+                            None,
+                        )?;
                         article_index = 0;
                     } else if !topics.is_empty() {
                         topic_index = (topic_index + 1).min(topics.len() - 1);
@@ -1635,7 +1676,15 @@ fn draw_until_quit(
                     view = View::Topic;
                     selected_source = None;
                     search = None;
-                    articles = articles_for_view(storage, &scope, view, topics, topic_index, None)?;
+                    articles = articles_for_view(
+                        storage,
+                        &*feed_addresses,
+                        &scope,
+                        view,
+                        topics,
+                        topic_index,
+                        None,
+                    )?;
                     article_index = 0;
                 }
 
@@ -1782,6 +1831,7 @@ fn draw_until_quit(
                     // `let (a, b) = ...` unpacks it into two variables.
                     let (refreshed, report) = refresh_topic(
                         storage,
+                        &*feed_addresses,
                         &scope,
                         &feed_lists.lists()[active_list].path,
                         &topics[topic_index],
@@ -1831,7 +1881,15 @@ fn draw_until_quit(
                     };
                     selected_source = None;
                     search = None;
-                    articles = articles_for_view(storage, &scope, view, topics, topic_index, None)?;
+                    articles = articles_for_view(
+                        storage,
+                        &*feed_addresses,
+                        &scope,
+                        view,
+                        topics,
+                        topic_index,
+                        None,
+                    )?;
                     article_index = 0;
                 }
 
@@ -1859,7 +1917,15 @@ fn draw_until_quit(
                     };
                     selected_source = None;
                     search = None;
-                    articles = articles_for_view(storage, &scope, view, topics, topic_index, None)?;
+                    articles = articles_for_view(
+                        storage,
+                        &*feed_addresses,
+                        &scope,
+                        view,
+                        topics,
+                        topic_index,
+                        None,
+                    )?;
                     article_index = 0;
                 }
 
@@ -2041,6 +2107,7 @@ fn draw_until_quit(
                     });
                     articles = articles_for_view(
                         storage,
+                        &*feed_addresses,
                         &scope,
                         view,
                         topics,
@@ -2275,6 +2342,7 @@ fn open_in_browser(url: &str) -> bool {
 /// fetched here.
 fn refresh_topic(
     storage: &Storage,
+    addresses: &FeedAddresses,
     scope: &Scope,
     list_path: &Path,
     topic: &str,
@@ -2307,7 +2375,7 @@ fn refresh_topic(
     }
 
     Ok((
-        load_articles_for_selection(storage, scope, topic, source)?,
+        load_articles_for_selection(storage, addresses, scope, topic, source)?,
         report,
     ))
 }
@@ -2445,12 +2513,22 @@ fn save_icon_mode_notice(icons: &IconSettings) -> String {
 /// are several lists (see `storage::Scope`).
 fn load_articles_for_selection(
     storage: &Storage,
+    addresses: &FeedAddresses,
     scope: &Scope,
     topic: &str,
     source: Option<&str>,
 ) -> anyhow::Result<Vec<Article>> {
     match source {
-        Some(name) => storage.articles_by_topic_and_source(scope, topic, name),
+        // A feed row is found by the feed's address when `sources.toml` gives
+        // one, so renaming the feed does not strand its older articles (see
+        // `Storage::articles_by_feed_or_name`). A name with no known address
+        // falls back to matching by name alone.
+        Some(name) => {
+            let address = addresses
+                .get(&(topic.to_string(), name.to_string()))
+                .map(String::as_str);
+            storage.articles_by_feed_or_name(scope, topic, name, address)
+        }
         None => storage.articles_by_topic(scope, topic),
     }
 }
@@ -2475,6 +2553,7 @@ fn load_articles_for_selection(
 /// every feed list.
 fn articles_for_view(
     storage: &Storage,
+    addresses: &FeedAddresses,
     scope: &Scope,
     view: View,
     topics: &[String],
@@ -2485,7 +2564,9 @@ fn articles_for_view(
         View::Saved => storage.saved_articles(),
         View::History => storage.all_articles(),
         View::Topic => match topics.get(topic_index) {
-            Some(topic) => load_articles_for_selection(storage, scope, topic, selected_source),
+            Some(topic) => {
+                load_articles_for_selection(storage, addresses, scope, topic, selected_source)
+            }
             None => Ok(Vec::new()),
         },
     }
@@ -4911,6 +4992,47 @@ mod tests {
     /// With several lists, a list's configured topics appear in the sidebar
     /// before anything has been fetched, so `r` has a topic to refresh. With
     /// one list, the topics are exactly what's stored, as before.
+    /// A feed row still shows its older articles after the feed is renamed in
+    /// `sources.toml`, because the row is found by the feed's address.
+    #[test]
+    fn a_renamed_feed_keeps_its_articles() {
+        let storage = Storage::open_in_memory().unwrap();
+        // An article fetched while the feed was still called "Old Name".
+        let mut article = Article::new(
+            "Hello".to_string(),
+            "https://e/1".to_string(),
+            "Old Name".to_string(),
+            "news".to_string(),
+            chrono::Utc::now(),
+        );
+        article.feed_url = Some("https://a/feed".to_string());
+        storage.insert_article(&article).unwrap();
+
+        // `sources.toml` now calls the same address "New Name".
+        let sources = vec![ConfiguredSource::Rss(fetchers::rss::RssFetcher {
+            name: "New Name".to_string(),
+            url: "https://a/feed".to_string(),
+            topic: "news".to_string(),
+        })];
+        let addresses = feed_addresses_of(&sources);
+
+        let shown = load_articles_for_selection(
+            &storage,
+            &addresses,
+            &Scope::All,
+            "news",
+            Some("New Name"),
+        )
+        .unwrap();
+        assert_eq!(shown.len(), 1);
+
+        // A name nobody configured has no address and matches nothing.
+        let none =
+            load_articles_for_selection(&storage, &addresses, &Scope::All, "news", Some("Other"))
+                .unwrap();
+        assert!(none.is_empty());
+    }
+
     #[test]
     fn list_topics_include_configured_topics_only_with_several_lists() {
         let storage = Storage::open_in_memory().unwrap();
