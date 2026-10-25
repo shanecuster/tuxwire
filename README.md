@@ -140,6 +140,14 @@ to your server only if you turn it on. Only articles opened in the last 90 days
 are sent, nothing is ever deleted from your server, and an article can be opened
 but never marked unread again.
 
+### Which feeds have something new
+After a refresh (at startup or with `r`), every feed that got new articles shows
+the new-article marker (✦ with the default icons) after its name in the sidebar,
+and its topic shows it too, so with a long feed list you can see where the new
+articles are without opening each feed. Acting in a feed's article list (`j`,
+`k` or `Enter`) clears its marker; just moving the cursor past it does not.
+Nothing is stored: restarting tuxwire starts without markers.
+
 ### Move your feeds in and out (OPML)
 Other feed readers use OPML files to move a feed list around. From the
 terminal:

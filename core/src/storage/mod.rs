@@ -35,6 +35,7 @@ use crate::models::Article;
 use anyhow::Context;
 use chrono::Utc;
 use rusqlite::{Connection, OptionalExtension, Row, params, params_from_iter};
+use std::collections::HashSet;
 use std::path::Path;
 
 pub use feed_sync_store::{FeedApplyCounts, FeedEntry, LocalFeedChanges, PendingFeedPush};
@@ -258,6 +259,52 @@ impl Storage {
         self.conn
             .query_row("SELECT COUNT(*) FROM articles", [], |row| row.get(0))
             .map_err(Into::into)
+    }
+
+    /// Where the articles with these row IDs came from: each distinct
+    /// (topic, source name, feed address) once, sorted for a stable order.
+    ///
+    /// A refresh reports the IDs of the articles it added
+    /// (`FetchReport::new_article_ids`). The sidebar and the Android feed list
+    /// want the *feeds* those belong to, so a marker can be drawn beside each
+    /// feed (and its topic) that has something new. This is that translation.
+    /// An unknown ID is ignored, and an empty set returns an empty list without
+    /// touching the database.
+    ///
+    /// `ids: &HashSet<i64>` is borrowed because it only needs reading. The IDs
+    /// go to SQLite in chunks of 500 because one query can only carry so many
+    /// `?` placeholders, and a first refresh of many feeds can add thousands.
+    pub fn article_origins(&self, ids: &HashSet<i64>) -> anyhow::Result<Vec<ArticleOrigin>> {
+        // Step 1: nothing to look up.
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Step 2: a set has no order, so copy the IDs into a `Vec` that can be
+        // cut into chunks.
+        let all: Vec<i64> = ids.iter().copied().collect();
+
+        // Step 3: ask for each chunk and collect the distinct origins. A
+        // `BTreeSet` drops duplicates and keeps the results sorted.
+        let mut found = std::collections::BTreeSet::new();
+        for chunk in all.chunks(500) {
+            // One `?` per ID in this chunk: `"?, ?, ?"`.
+            let placeholders = vec!["?"; chunk.len()].join(", ");
+            let mut stmt = self.conn.prepare(&format!(
+                "SELECT DISTINCT topic, source, feed_url FROM articles WHERE id IN ({placeholders})"
+            ))?;
+            let rows = stmt.query_map(params_from_iter(chunk.iter()), |row| {
+                Ok(ArticleOrigin {
+                    topic: row.get(0)?,
+                    source: row.get(1)?,
+                    feed_url: row.get(2)?,
+                })
+            })?;
+            for row in rows {
+                found.insert(row?);
+            }
+        }
+        Ok(found.into_iter().collect())
     }
 
     /// All articles filed under `topic` within `scope`, most recent first
@@ -819,6 +866,23 @@ impl Storage {
         )?;
         Ok(())
     }
+}
+
+/// Where an article came from: the topic and source name it is filed under,
+/// and the address of the feed it was fetched from (`None` for an article
+/// stored before addresses were recorded). See [`Storage::article_origins`].
+///
+/// `Ord` and `PartialOrd` are derived so a set of these sorts by topic, then
+/// source, then address.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ArticleOrigin {
+    /// The topic the article is filed under.
+    pub topic: String,
+    /// The source's display name, as stored on the article.
+    pub source: String,
+    /// The feed's address (or file path, or `import:` key); `None` if the
+    /// article predates feed addresses.
+    pub feed_url: Option<String>,
 }
 
 /// One row of the `feeds` table: a feed the Android app fetches.
@@ -1913,5 +1977,40 @@ mod tests {
         let old = &storage.all_articles().unwrap()[0];
         assert_eq!(old.title, "Old");
         assert_eq!(old.summary, None);
+    }
+
+    /// Origins are the distinct (topic, source, feed) of the given IDs: two
+    /// articles from one feed give one origin, an unknown ID is ignored, and
+    /// an empty set needs no query.
+    #[test]
+    fn article_origins_are_distinct_per_feed() {
+        let storage = test_storage();
+        let mut ids = HashSet::new();
+        for (n, (source, topic, feed)) in [
+            ("Arch", "linux", "https://arch/feed"),
+            ("Arch", "linux", "https://arch/feed"),
+            ("Overtake", "sim-racing", "import:overtake"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut article = Article::new(
+                format!("title {n}"),
+                format!("https://example.com/{n}"),
+                source.to_string(),
+                topic.to_string(),
+                Utc::now(),
+            );
+            article.feed_url = Some(feed.to_string());
+            ids.insert(storage.insert_article(&article).unwrap());
+        }
+        // An ID that does not exist is ignored.
+        ids.insert(9999);
+
+        let origins = storage.article_origins(&ids).unwrap();
+        assert_eq!(origins.len(), 2);
+        assert_eq!(origins[0].source, "Arch");
+        assert_eq!(origins[1].feed_url.as_deref(), Some("import:overtake"));
+        assert!(storage.article_origins(&HashSet::new()).unwrap().is_empty());
     }
 }
