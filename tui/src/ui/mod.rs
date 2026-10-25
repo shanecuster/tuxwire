@@ -93,6 +93,7 @@ use tuxwire_core::models::Article;
 use tuxwire_core::storage::{ReadLaterItem, Scope, Storage};
 
 mod read_later;
+mod stats;
 
 /// Everything else `main.rs` hands `ui::run` from startup: the theme and
 /// icon settings, whether to open with the first-run icon check, and what
@@ -273,7 +274,7 @@ const NOTE_PREVIEW_CHARS: usize = 45;
 /// `i` (cycle the icon mode: Nerd → Unicode → ASCII) and `t` (the theme
 /// picker) are listed here too, since they change the whole app's look
 /// rather than one row.
-const KEY_HINTS: [(&str, &str); 18] = [
+const KEY_HINTS: [(&str, &str); 19] = [
     ("s", "save"),
     ("u", "un-save"),
     ("x", "close"),
@@ -290,6 +291,7 @@ const KEY_HINTS: [(&str, &str); 18] = [
     ("c", "sync (optional)"),
     ("i", "icon mode"),
     ("t", "theme"),
+    ("g", "stats"),
     ("→/l", "expand topic"),
     ("←/h", "collapse topic"),
 ];
@@ -389,6 +391,13 @@ enum Mode {
     ListPicker {
         selected: usize,
         rows: Vec<ListRow>,
+    },
+
+    /// The `g` Stats screen is open. `stats` is the snapshot taken when it
+    /// opened (see `stats.rs`); boxed because it is a large value and `Mode`
+    /// is moved around often.
+    Stats {
+        stats: Box<tuxwire_core::stats::Stats>,
     },
 
     /// The `L` Read Later list is open. `items` is the list as loaded from the
@@ -1014,6 +1023,16 @@ fn draw_until_quit(
         // `mode` without leaving it empty. Afterwards, if the screen is back
         // to normal, the article list is reloaded, because saving a link can
         // have added a saved article.
+        // While the Stats screen is open it owns the keyboard: `Esc`, `q` and `g`
+        // close it, and the handler hands back the next mode (see `stats.rs`).
+        if matches!(mode, Mode::Stats { .. }) {
+            mode = match std::mem::replace(&mut mode, Mode::Normal) {
+                Mode::Stats { stats } => stats::handle_key(key.code, stats),
+                other => other,
+            };
+            continue;
+        }
+
         if matches!(
             mode,
             Mode::ReadLater { .. } | Mode::PasteLink { .. } | Mode::LinkChoice { .. }
@@ -1916,6 +1935,14 @@ fn draw_until_quit(
                     icons.mode = icons.mode.next();
                     notice = Some(save_icon_mode_notice(&icons));
                 }
+
+                // `g` opens the Stats screen (see `stats.rs`). The numbers are
+                // worked out once, here; if that fails the footer says why
+                // instead of the app stopping.
+                KeyCode::Char('g') => match stats::open(storage, &feed_lists) {
+                    Ok(next) => mode = next,
+                    Err(err) => notice = Some(format!("Stats failed: {err}")),
+                },
 
                 // `f` opens the feed list picker, with the active list
                 // highlighted. With only one list there's nothing to pick,
@@ -3129,6 +3156,10 @@ fn render(
     if let Mode::ListPicker { selected, rows } = mode {
         render_list_picker_popup(frame, theme, icons, body, *selected, rows);
     }
+    // The Stats screen (see `stats.rs`).
+    if let Mode::Stats { stats } = mode {
+        stats::render(frame, theme, body, stats);
+    }
     // The Read Later screens (see `read_later.rs`).
     if let Mode::ReadLater { items, selected } = mode {
         read_later::render_list_popup(frame, theme, icons, body, *selected, items);
@@ -4014,6 +4045,7 @@ fn footer_hints(mode: &Mode, view: View) -> &'static str {
         Mode::IconCheck => ICON_CHECK_HINTS,
         Mode::ThemePicker { .. } => THEME_PICKER_HINTS,
         Mode::ListPicker { .. } => LIST_PICKER_HINTS,
+        Mode::Stats { .. } => stats::HINTS,
         Mode::ReadLater { .. } => read_later::LIST_HINTS,
         Mode::PasteLink { .. } => read_later::PASTE_HINTS,
         Mode::LinkChoice { .. } => read_later::CHOICE_HINTS,

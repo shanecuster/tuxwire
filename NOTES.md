@@ -5,6 +5,18 @@ remembering.
 
 ---
 
+## Stats (branch `feature/stats`, 2026-10-25)
+
+- **What:** `g` opens a popup with six cards, a 12-week reads chart and top topics/sources
+  (ranked by articles read). Numbers come from `tuxwire_core::stats::compute_stats` (shared
+  with Android); the terminal only supplies the time zone offset and the total feed count
+  (distinct addresses across all feed lists).
+- **Limits:** no migration. Reads whose time was only guessed (publish time backfill) are
+  ignored by the chart/streak; marks from other devices count in totals but not top lists.
+- **How to test:** throwaway HOME, one `type = "file"` feed, `r`, `Enter`, `j`, then `g`.
+
+---
+
 ## New-feed marker (branch `feature/new-feed-marker`, 2026-10-25)
 
 - **What:** after a refresh, feeds (and their topics) with new articles get the new-article

@@ -870,6 +870,13 @@ and search themselves are solid and have seen real use.
 
 ### Stats View — priority near-term feature
 
+**Built 2026-10-25 (decided with Shane):** one plain `Stats` struct computed once in
+`tuxwire-core::stats` and shared by the terminal (`g` popup, `tui/src/ui/stats.rs`) and
+Android (a Stats tab). Feeds = total across all lists; chart and streak start when real
+read times began (`read_at` rows equal to publish time are backfill and are ignored);
+top topics/sources rank by articles read. The caller passes `now`, the UTC offset and the
+feed count, so core reads no environment. No new tables.
+
 A lightweight self-hosted-analytics-style view, in the same spirit as the
 GoatCounter dashboards and the homelab dashboard already tracking the
 blogs and desktop stats. Explicitly the next build priority among the
