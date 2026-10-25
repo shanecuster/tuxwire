@@ -7,6 +7,11 @@ messages — what changed and why, not just what.
 
 ### Added
 
+- **A 403 now says what to try.** When a site answers HTTP 403 (it turns away
+  programs but lets a browser in), the message adds: "the feed link is not working
+  for apps like tuxwire. Try saving the feed from your browser and adding it as a
+  file instead". Other errors (404, 500, ...) are unchanged. Both apps get it, since
+  the text comes from the shared core.
 - **Stats screen** (`g` in the terminal). Cards for Read, Unread, Feeds (all
   lists added up), Notes, Saved and the reading streak, a chart of reads per
   week (12 weeks), and the topics and sources you have read the most. All the
