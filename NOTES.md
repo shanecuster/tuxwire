@@ -5,6 +5,19 @@ remembering.
 
 ---
 
+## New-feed marker (branch `feature/new-feed-marker`, 2026-10-25)
+
+- **What:** after a refresh, feeds (and their topics) with new articles get the new-article
+  icon in the sidebar. Memory only, nothing stored.
+- **Clears when** you press `j`, `k` or `Enter` with that feed selected (a selected topic
+  clears all its feeds). Moving the cursor past does not clear, so you can scan the list.
+- **Core:** `Storage::article_origins(ids)` maps new article ids to (topic, source, feed
+  address); Android will use it for its own marker.
+- **How to test:** throwaway HOME with two `type = "file"` feeds; run once, add an item to
+  one file, run again: the topic and that feed show the marker, `j` clears it.
+
+---
+
 ## Feed from a file (branch `feature/file-source`, 2026-10-23)
 
 - **Why:** OverTake.gg's Cloudflare rule answers 403 to tuxwire and curl but serves a browser.

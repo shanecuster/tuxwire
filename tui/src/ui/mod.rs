@@ -826,6 +826,14 @@ fn draw_until_quit(
     // was built from it.
     let mut new_article_ids = session.report.new_article_ids;
 
+    // The feeds (as `(topic, source name)`) that got new articles and have not
+    // been looked at yet; the sidebar draws `Icon::New` beside them and beside
+    // their topic. Unlike `new_article_ids` this *shrinks*: a feed leaves the
+    // set once the person acts in its article list (see `clear_fresh_feeds`).
+    // Kept in memory only; nothing is stored, so a restart starts clean.
+    let mut fresh_feeds: HashSet<(String, String)> = HashSet::new();
+    note_fresh_feeds(storage, &new_article_ids, &mut fresh_feeds);
+
     // The feed lists, and which one is active. `active_list` changes when
     // the `f` picker switches; `feed_lists` itself never changes while
     // running (lists are added by editing `lists.toml`).
@@ -880,6 +888,7 @@ fn draw_until_quit(
                 theme,
                 &icons,
                 &new_article_ids,
+                &fresh_feeds,
                 topics.as_slice(),
                 sources_by_topic,
                 &expanded_topics,
@@ -1225,6 +1234,7 @@ fn draw_until_quit(
                     match fetch_added_source(storage, &feed_lists.lists()[active_list].path, &url) {
                         Ok(report) => {
                             new_article_ids.extend(report.new_article_ids.iter().copied());
+                            note_fresh_feeds(storage, &report.new_article_ids, &mut fresh_feeds);
                             notice = fetch_notice(&icons, &report, true);
                         }
                         Err(err) => {
@@ -1446,9 +1456,19 @@ fn draw_until_quit(
                 // `0 - 1` would otherwise panic).
                 KeyCode::Char('j') if !articles.is_empty() => {
                     article_index = (article_index + 1).min(articles.len() - 1);
+                    clear_fresh_feeds(
+                        &mut fresh_feeds,
+                        topics.get(topic_index),
+                        selected_source.as_deref(),
+                    );
                 }
                 KeyCode::Char('k') if !articles.is_empty() => {
                     article_index = article_index.saturating_sub(1);
+                    clear_fresh_feeds(
+                        &mut fresh_feeds,
+                        topics.get(topic_index),
+                        selected_source.as_deref(),
+                    );
                 }
 
                 // `Up`/`Down` move the sidebar cursor through the flattened
@@ -1621,6 +1641,11 @@ fn draw_until_quit(
                 // has actually opened; the `Mode::Error` branch leaves
                 // `read` untouched, since nothing was.
                 KeyCode::Enter => {
+                    clear_fresh_feeds(
+                        &mut fresh_feeds,
+                        topics.get(topic_index),
+                        selected_source.as_deref(),
+                    );
                     if let Some(article) = articles.get_mut(article_index) {
                         if w3m_available() {
                             open_in_w3m(terminal, &article.url)?;
@@ -1750,6 +1775,7 @@ fn draw_until_quit(
                     // another collection; `.iter().copied()` reads the
                     // `i64`s out of `report` without moving the set.
                     new_article_ids.extend(report.new_article_ids.iter().copied());
+                    note_fresh_feeds(storage, &report.new_article_ids, &mut fresh_feeds);
                     notice = fetch_notice(&icons, &report, true);
                 }
 
@@ -2945,6 +2971,9 @@ fn render(
     // Articles new this session, which get `Icon::New` while unread. See
     // `draw_until_quit`'s `new_article_ids`.
     new_article_ids: &HashSet<i64>,
+    // Feeds with new articles not yet looked at; the sidebar marks them. See
+    // `draw_until_quit`'s `fresh_feeds`.
+    fresh_feeds: &HashSet<(String, String)>,
     topics: &[String],
     sources_by_topic: &HashMap<String, Vec<String>>,
     expanded_topics: &HashSet<String>,
@@ -3023,6 +3052,7 @@ fn render(
         expanded_topics,
         selected_topic,
         selected_source,
+        fresh_feeds,
     );
     // What (if anything) `render_articles` should show about search --
     // computed once, here, rather than each of its three call sites (there
@@ -3175,6 +3205,7 @@ fn render_sidebar(
     expanded_topics: &HashSet<String>,
     selected_topic: Option<&str>,
     selected_source: Option<&str>,
+    fresh_feeds: &HashSet<(String, String)>,
 ) {
     let [topics_area, keys_area, colors_area] = Layout::default()
         .direction(Direction::Vertical)
@@ -3195,9 +3226,70 @@ fn render_sidebar(
         expanded_topics,
         selected_topic,
         selected_source,
+        fresh_feeds,
     );
     render_keys_section(frame, theme, keys_area, key_hints);
     render_colors_section(frame, theme, icons, colors_area);
+}
+
+/// The marker drawn after a sidebar row's name when that row has new articles
+/// the person has not looked at: a space and `Icon::New` in the same accent as
+/// the article list's new marker, or nothing at all (an empty `Span`) when the
+/// row is not fresh. No glyph or color is hard-coded: both come from the icon
+/// settings and the theme.
+///
+/// `fresh` is `true` when the row should be marked. A `Span` is one
+/// differently-styled piece of a `Line`.
+fn fresh_marker<'a>(theme: &Theme, icons: &'a IconSettings, fresh: bool) -> Span<'a> {
+    if fresh {
+        Span::styled(
+            format!(" {}", icons.glyph(Icon::New)),
+            Style::new().fg(theme.accent_unread),
+        )
+    } else {
+        Span::raw("")
+    }
+}
+
+/// Records which feeds the just-added articles belong to, so the sidebar can
+/// mark them. Looks the IDs up with `Storage::article_origins` and adds each
+/// `(topic, source name)` to `fresh`. A database error only means no marker is
+/// drawn, so it is ignored rather than interrupting a refresh.
+///
+/// `fresh` is a `&mut` out-parameter: the caller's set is changed in place.
+fn note_fresh_feeds(
+    storage: &Storage,
+    new_ids: &HashSet<i64>,
+    fresh: &mut HashSet<(String, String)>,
+) {
+    // `if let Ok(..)` runs the body only when the lookup succeeded.
+    if let Ok(origins) = storage.article_origins(new_ids) {
+        for origin in origins {
+            fresh.insert((origin.topic, origin.source));
+        }
+    }
+}
+
+/// Removes the marker for what the person is now looking at, once they act in
+/// its article list (`j`, `k` or `Enter`), not merely move the cursor past it:
+/// moving the sidebar cursor shows a feed's articles at once, so clearing on
+/// that would erase the markers while scanning the list for them.
+///
+/// With a feed row selected, only that feed is cleared. With a topic row
+/// selected, the list shows every feed in the topic together, so all of that
+/// topic's feeds are cleared. `topic` is `None` only when there are no topics.
+fn clear_fresh_feeds(
+    fresh: &mut HashSet<(String, String)>,
+    topic: Option<&String>,
+    source: Option<&str>,
+) {
+    let Some(topic) = topic else { return };
+    match source {
+        // `retain` keeps only the entries for which the closure is true, so
+        // this drops exactly the one `(topic, source)` pair.
+        Some(source) => fresh.retain(|(t, s)| !(t == topic && s == source)),
+        None => fresh.retain(|(t, _)| t != topic),
+    }
 }
 
 /// The sidebar's top section: the expandable topic tree
@@ -3235,6 +3327,7 @@ fn render_topics_section(
     expanded_topics: &HashSet<String>,
     selected_topic: Option<&str>,
     selected_source: Option<&str>,
+    fresh_feeds: &HashSet<(String, String)>,
 ) {
     let block = Block::new()
         .title(" Topics ")
@@ -3278,7 +3371,18 @@ fn render_topics_section(
                 // entry, a built-in one, or the generic folder (see
                 // `IconSettings::category_glyph`).
                 let category = icons.category_glyph(topic);
-                ListItem::new(format!("{indicator} {category} {topic}"))
+                // A topic is marked while any of its feeds is fresh.
+                let marker = fresh_marker(
+                    theme,
+                    icons,
+                    fresh_feeds
+                        .iter()
+                        .any(|(fresh_topic, _)| fresh_topic == topic),
+                );
+                ListItem::new(Line::from(vec![
+                    Span::raw(format!("{indicator} {category} {topic}")),
+                    marker,
+                ]))
             }
             SidebarRow::Source(topic_index, name) => {
                 if Some(topics[topic_index].as_str()) == selected_topic
@@ -3289,7 +3393,12 @@ fn render_topics_section(
                 // Four spaces: the marker, a space, the category icon, and
                 // a space above (all one cell each), so a source name lines
                 // up under its topic's name.
-                ListItem::new(format!("    {name}"))
+                let marker = fresh_marker(
+                    theme,
+                    icons,
+                    fresh_feeds.contains(&(topics[topic_index].clone(), name.to_string())),
+                );
+                ListItem::new(Line::from(vec![Span::raw(format!("    {name}")), marker]))
             }
         })
         .collect();
@@ -4890,5 +4999,60 @@ mod tests {
         // An address that is not in the file: nothing is attempted.
         let none = fetch_added_source(&storage, &path, "http://127.0.0.1:9/other").unwrap();
         assert_eq!(none.attempted, 0);
+    }
+
+    /// Clearing a feed removes only that feed's marker; clearing a topic row
+    /// removes every marker under that topic; other topics are untouched; no
+    /// topic means nothing happens.
+    #[test]
+    fn fresh_markers_clear_by_feed_or_topic() {
+        let make = || {
+            HashSet::from([
+                ("linux".to_string(), "Arch".to_string()),
+                ("linux".to_string(), "LWN".to_string()),
+                ("sim-racing".to_string(), "Overtake".to_string()),
+            ])
+        };
+
+        let mut fresh = make();
+        clear_fresh_feeds(&mut fresh, Some(&"linux".to_string()), Some("Arch"));
+        assert_eq!(fresh.len(), 2);
+        assert!(fresh.contains(&("linux".to_string(), "LWN".to_string())));
+
+        let mut fresh = make();
+        clear_fresh_feeds(&mut fresh, Some(&"linux".to_string()), None);
+        assert_eq!(fresh.len(), 1);
+        assert!(fresh.contains(&("sim-racing".to_string(), "Overtake".to_string())));
+
+        let mut fresh = make();
+        clear_fresh_feeds(&mut fresh, None, None);
+        assert_eq!(fresh.len(), 3);
+    }
+
+    /// Articles added by a refresh mark the feed they came from, by topic and
+    /// source name, and an empty refresh marks nothing.
+    #[test]
+    fn new_articles_mark_their_feed() {
+        let storage = Storage::open_in_memory().unwrap();
+        let mut article = Article::new(
+            "Hello".to_string(),
+            "https://example.com/hello".to_string(),
+            "Overtake".to_string(),
+            "sim-racing".to_string(),
+            chrono::Utc::now(),
+        );
+        article.feed_url = Some("import:overtake".to_string());
+        let id = storage.insert_article(&article).unwrap();
+
+        let mut fresh = HashSet::new();
+        note_fresh_feeds(&storage, &HashSet::from([id]), &mut fresh);
+        assert_eq!(
+            fresh,
+            HashSet::from([("sim-racing".to_string(), "Overtake".to_string())])
+        );
+
+        let mut none = HashSet::new();
+        note_fresh_feeds(&storage, &HashSet::new(), &mut none);
+        assert!(none.is_empty());
     }
 }

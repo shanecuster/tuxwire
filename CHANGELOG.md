@@ -7,6 +7,17 @@ messages — what changed and why, not just what.
 
 ### Added
 
+- **A marker beside feeds that got new articles** (terminal sidebar). After a
+  refresh, each feed with new articles shows the same new-article icon as the
+  article list (`Icon::New`), and so does its topic, so you can see at a glance
+  which of a long feed list has something new. The marker clears when you act
+  in that feed's article list (`j`, `k` or `Enter`), whether or not you read
+  anything; moving the cursor past a feed does not clear it, so you can scroll
+  the list looking for markers. With a topic selected, acting clears all of its
+  feeds. It lives in memory only, so a restart starts clean. Core gains
+  `Storage::article_origins` (new article IDs to their topic, source and feed
+  address) for the Android app to use too.
+
 - **Import a feed from the bytes of a file** (shared core, for the Android app's
   "Import from file"). `import_feed_bytes` parses the file, stores the feed
   under a stable key such as `import:overtake`, and stores its articles. A
