@@ -5,8 +5,23 @@ messages — what changed and why, not just what.
 
 ## Unreleased
 
+### Fixed
+
+- **Renaming a feed no longer hides its older articles.** A feed row in the
+  sidebar is now found by the feed's address, not its name, so changing
+  `name = ...` (or the topic) in `sources.toml` keeps every article that feed
+  ever fetched in its own row. Articles stored before addresses were recorded
+  still match by name. The topic row is unchanged: it filters by topic, as
+  before. Core gains `Storage::articles_by_feed_or_name`. Android already
+  worked this way.
+
 ### Added
 
+- **A 403 now says what to try.** When a site answers HTTP 403 (it turns away
+  programs but lets a browser in), the message adds: "the feed link is not working
+  for apps like tuxwire. Try saving the feed from your browser and adding it as a
+  file instead". Other errors (404, 500, ...) are unchanged. Both apps get it, since
+  the text comes from the shared core.
 - **Stats screen** (`g` in the terminal). Cards for Read, Unread, Feeds (all
   lists added up), Notes, Saved and the reading streak, a chart of reads per
   week (12 weeks), and the topics and sources you have read the most. All the

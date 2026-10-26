@@ -241,6 +241,17 @@ pub(crate) async fn fetch_bytes(
     // right away, like `?` does.
     let status = response.status();
     if !status.is_success() {
+        // A 403 ("Forbidden") usually means the site turns programs away while
+        // letting a browser in (a "checking your browser" page, for one). Every
+        // other failure keeps the plain message, because a 404 or a 500 says
+        // nothing about being refused. The hint names what works: a file saved
+        // from the browser.
+        if status == reqwest::StatusCode::FORBIDDEN {
+            anyhow::bail!(
+                "{url} answered HTTP {status}: the feed link is not working for apps like \
+                 tuxwire. Try saving the feed from your browser and adding it as a file instead"
+            );
+        }
         anyhow::bail!("{url} answered HTTP {status}");
     }
 
@@ -520,6 +531,31 @@ mod tests {
             .to_string();
         assert!(error.contains("403"), "error was: {error}");
         assert!(!error.contains("parse"), "error was: {error}");
+    }
+
+    /// Only a 403 gets the "add it as a file" hint; a 404 keeps the plain
+    /// message, since it does not mean the site is refusing programs.
+    #[tokio::test]
+    async fn only_a_403_suggests_adding_a_file() {
+        let (url, _seen) =
+            serve_once("HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        let forbidden = fetch_feed_with(&build_client(Duration::from_secs(5)), &url)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            forbidden.contains("adding it as a file"),
+            "error was: {forbidden}"
+        );
+
+        let (url, _seen) =
+            serve_once("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        let missing = fetch_feed_with(&build_client(Duration::from_secs(5)), &url)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(missing.contains("404"), "error was: {missing}");
+        assert!(!missing.contains("as a file"), "error was: {missing}");
     }
 
     /// A "200 OK" with nothing in it says the reply was empty.

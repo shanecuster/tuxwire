@@ -382,6 +382,54 @@ impl Storage {
             .map_err(Into::into)
     }
 
+    /// The articles of one feed row in the sidebar, most recent first, found
+    /// by the feed's **address** so that renaming the feed (or filing it under
+    /// another topic) in `sources.toml` does not hide its older articles.
+    ///
+    /// - With `feed_url` known, an article matches when its stored `feed_url`
+    ///   is that address, whatever name or topic it was fetched under.
+    /// - Articles stored before addresses were recorded have no `feed_url`;
+    ///   those still match the old way, by `topic` and `source` name, so
+    ///   nothing that used to show disappears.
+    /// - With `feed_url` `None` (the row has no known address) only the name
+    ///   match applies, exactly as `articles_by_topic_and_source`.
+    ///
+    /// `scope` works as in `articles_by_topic`.
+    pub fn articles_by_feed_or_name(
+        &self,
+        scope: &Scope,
+        topic: &str,
+        source: &str,
+        feed_url: Option<&str>,
+    ) -> anyhow::Result<Vec<Article>> {
+        // `feed_url = NULL` is never true in SQL, so a missing address simply
+        // matches nothing in the first half of the `OR`.
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT id, title, url, source, topic, timestamp, read, skipped, saved, note, saved_at, noted_at, feed_url, summary
+             FROM articles
+             WHERE (feed_url = ? OR (feed_url IS NULL AND topic = ? AND source = ?)){} ORDER BY timestamp DESC",
+            scope.clause()
+        ))?;
+
+        // The placeholders in order: address, topic, source, then the scope's
+        // feed URLs. An absent address is passed as SQL NULL.
+        let address = feed_url.map(str::to_string);
+        let rows = stmt.query_map(
+            params_from_iter(
+                [
+                    rusqlite::types::Value::from(address),
+                    topic.to_string().into(),
+                    source.to_string().into(),
+                ]
+                .into_iter()
+                .chain(scope.feed_urls().map(|url| url.to_string().into())),
+            ),
+            row_to_article,
+        )?;
+        rows.collect::<rusqlite::Result<Vec<Article>>>()
+            .map_err(Into::into)
+    }
+
     /// Every saved article, across all topics, most recent first -- backs
     /// the dedicated "Saved" view described in ARCHITECTURE.md, which is
     /// explicitly independent of the topic sidebar.
@@ -1770,6 +1818,45 @@ mod tests {
 
     /// `articles_by_feed` returns only that feed's articles, whatever topic
     /// they were filed under.
+    /// A renamed or re-filed feed still shows its old articles when found by
+    /// address; articles with no stored address still match by name; another
+    /// feed's articles never leak in.
+    #[test]
+    fn a_feed_row_is_found_by_address_not_name() {
+        let storage = test_storage();
+        // Two articles fetched under the old name and topic.
+        storage
+            .insert_article(&from_feed("https://e/1", "old-topic", "https://a/feed"))
+            .unwrap();
+        storage
+            .insert_article(&from_feed("https://e/2", "old-topic", "https://a/feed"))
+            .unwrap();
+        // Another feed that happens to share the new name.
+        storage
+            .insert_article(&from_feed("https://e/3", "new-topic", "https://b/feed"))
+            .unwrap();
+        // An old article from before addresses were recorded.
+        let mut old = from_feed("https://e/4", "new-topic", "https://zzz");
+        old.feed_url = None;
+        old.source = "New Name".to_string();
+        storage.insert_article(&old).unwrap();
+
+        // The row now called "New Name" in "new-topic", whose feed is a/feed:
+        // both old articles show, plus the one that matches by name.
+        let shown = storage
+            .articles_by_feed_or_name(&Scope::All, "new-topic", "New Name", Some("https://a/feed"))
+            .unwrap();
+        assert_eq!(shown.len(), 3);
+        // The other feed's article is not among them.
+        assert!(shown.iter().all(|a| a.url != "https://e/3"));
+
+        // With no known address only the name match applies.
+        let by_name = storage
+            .articles_by_feed_or_name(&Scope::All, "new-topic", "New Name", None)
+            .unwrap();
+        assert_eq!(by_name.len(), 1);
+    }
+
     #[test]
     fn articles_by_feed_ignores_topic() {
         let storage = test_storage();
