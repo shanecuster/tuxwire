@@ -10,6 +10,8 @@ remembering.
 - **What:** `N` fetches every feed in the active list (all topics) at once, then reloads the
   list you were looking at. `r` is unchanged (selected topic only). Other feed lists are not
   touched.
+- **Messages:** the footer shows "Refreshing N feed(s)..." first (the refresh starts after that
+  frame is drawn, via `refresh_all_pending`), then "Refreshed N feed(s) · M new" or "nothing new".
 - **How:** `refresh_all` in `tui/src/ui/mod.rs`, using core's concurrent `fetch_all` and the
   same markers/notice as `r`.
 - **How to test:** throwaway HOME, two file feeds in different topics, run, add an item to
