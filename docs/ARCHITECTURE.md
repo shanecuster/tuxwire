@@ -248,7 +248,8 @@ underneath.
 | `s`       | save article (auto-marks as read) |
 | `u`       | un-save the selected article, after a yes/no question (an article with a note loses the note too -- see "Un-save and the note lock") |
 | `n`       | write or edit a note (a real note also saves the article; emptying the box asks before deleting an existing note) |
-| `r`       | refresh all sources               |
+| `r`       | refresh the selected topic        |
+| `N`       | refresh every feed in the active list (decided 2026-10-30; downloads run a few at a time via `fetch_all`) |
 | `S`       | view saved articles               |
 | `y`       | view history (every article ever fetched) |
 | `/`       | search titles/notes across the current view |

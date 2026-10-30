@@ -274,7 +274,7 @@ const NOTE_PREVIEW_CHARS: usize = 45;
 /// `i` (cycle the icon mode: Nerd → Unicode → ASCII) and `t` (the theme
 /// picker) are listed here too, since they change the whole app's look
 /// rather than one row.
-const KEY_HINTS: [(&str, &str); 19] = [
+const KEY_HINTS: [(&str, &str); 20] = [
     ("s", "save"),
     ("u", "un-save"),
     ("x", "close"),
@@ -285,7 +285,8 @@ const KEY_HINTS: [(&str, &str); 19] = [
     ("p", "paste a link"),
     ("y", "history"),
     ("/", "search"),
-    ("r", "refresh"),
+    ("r", "refresh topic"),
+    ("N", "refresh all"),
     ("a", "add source"),
     ("E", "export (S view)"),
     ("c", "sync (optional)"),
@@ -1848,6 +1849,26 @@ fn draw_until_quit(
                     notice = fetch_notice(&icons, &report, true);
                 }
 
+                // `N` refreshes every feed in the active list at once (`r` only
+                // does the selected topic). It works like `r` otherwise: the
+                // new articles get the `Icon::New` marker and their feeds the
+                // fresh-feed marker, and the footer says how it went.
+                KeyCode::Char('N') if view == View::Topic && !topics.is_empty() => {
+                    let (refreshed, report) = refresh_all(
+                        storage,
+                        &*feed_addresses,
+                        &scope,
+                        &feed_lists.lists()[active_list].path,
+                        &topics[topic_index],
+                        selected_source.as_deref(),
+                    )?;
+                    articles = refreshed;
+                    article_index = article_index.min(articles.len().saturating_sub(1));
+                    new_article_ids.extend(report.new_article_ids.iter().copied());
+                    note_fresh_feeds(storage, &report.new_article_ids, &mut fresh_feeds);
+                    notice = fetch_notice(&icons, &report, true);
+                }
+
                 // `S` toggles `View::Saved` on/off: pressing it while
                 // already in `View::Saved` returns to `View::Topic`;
                 // pressing it from `View::Topic` *or* `View::History`
@@ -2308,6 +2329,59 @@ fn open_in_browser(url: &str) -> bool {
     }
 
     spawn("xdg-open")
+}
+
+/// Re-fetches **every** source in the active feed list, all topics at once --
+/// the `N` keybind, the terminal's version of the Android app's "refresh all".
+/// Where [`refresh_topic`] only fetches the sources filed under one topic, this
+/// fetches the whole list, then reloads the article list for the current
+/// selection (`topic` and `source`, exactly as `refresh_topic` does) and returns
+/// a [`FetchReport`] covering the whole refresh.
+///
+/// The downloads run at the same time, a few at once (`fetchers::fetch_all`,
+/// the same function the Android app uses), so a long list is much quicker than
+/// fetching one feed after another. `fetch_all` hands the results back in the
+/// order of the sources, so what is stored and marked new does not depend on
+/// which download finished first.
+///
+/// `list_path` is the active feed list's file, re-read each time like in
+/// `refresh_topic`. `addresses` and `scope` are used only to reload the list.
+fn refresh_all(
+    storage: &Storage,
+    addresses: &FeedAddresses,
+    scope: &Scope,
+    list_path: &Path,
+    topic: &str,
+    source: Option<&str>,
+) -> anyhow::Result<(Vec<Article>, FetchReport)> {
+    let mut report = FetchReport::default();
+
+    // Step 1: every source in the list. `configured_sources_at` already leaves
+    // out feeds imported from a file, which have nothing to download.
+    let sources = fetchers::configured_sources_at(list_path)?;
+
+    // Step 2: fetch them all. This function is not `async` (the draw loop is
+    // plain blocking code), so, as in `refresh_topic`, `block_in_place` lets
+    // this thread wait while tokio's other workers keep running, and `block_on`
+    // drives the `async` fetch to its end.
+    let outcomes = tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::current().block_on(fetchers::fetch_all(&sources))
+    });
+
+    // Step 3: store each outcome. A failed feed is counted in the report, not
+    // raised, so one dead feed never stops the rest (same rule as `r`).
+    for outcome in outcomes {
+        if let Err(err) = &outcome.result {
+            eprintln!("skipped {}: {err:#}", outcome.name);
+        }
+        report.record_outcome(storage, outcome)?;
+    }
+
+    // Step 4: show the list the person was looking at, now with the new articles.
+    Ok((
+        load_articles_for_selection(storage, addresses, scope, topic, source)?,
+        report,
+    ))
 }
 
 /// Re-fetches every source in `fetchers::configured_sources` filed under
@@ -5185,6 +5259,67 @@ mod tests {
 
     /// Articles added by a refresh mark the feed they came from, by topic and
     /// source name, and an empty refresh marks nothing.
+    /// `N` fetches every topic's feeds, not just the selected one: two file
+    /// feeds in different topics both arrive, and a second run finds nothing new.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn refresh_all_fetches_every_topic() {
+        // A unique folder with two feed files and a sources.toml naming them.
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "tuxwire-refresh-all-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut toml = String::new();
+        for (name, topic) in [("One", "alpha"), ("Two", "beta")] {
+            let file = dir.join(format!("{name}.xml"));
+            std::fs::write(
+                &file,
+                format!(
+                    "<?xml version=\"1.0\"?><rss version=\"2.0\"><channel><title>{name}</title>\
+                     <link>http://x</link><description>d</description>\
+                     <item><title>{name} story</title><link>http://x/{name}</link>\
+                     <guid>{name}</guid></item></channel></rss>"
+                ),
+            )
+            .unwrap();
+            toml.push_str(&format!(
+                "[[source]]\nname = \"{name}\"\ntype = \"file\"\nurl = \"{}\"\ntopic = \"{topic}\"\n\n",
+                file.display()
+            ));
+        }
+        let list = dir.join("sources.toml");
+        std::fs::write(&list, toml).unwrap();
+
+        let storage = Storage::open_in_memory().unwrap();
+        let sources = fetchers::configured_sources_at(&list).unwrap();
+        let addresses = feed_addresses_of(&sources);
+
+        // Refreshing while looking at topic "alpha" still fetches "beta" too.
+        let (shown, report) =
+            refresh_all(&storage, &addresses, &Scope::All, &list, "alpha", None).unwrap();
+        assert_eq!(report.attempted, 2);
+        assert_eq!(report.new_article_ids.len(), 2);
+        // The list on screen is the selected topic's.
+        assert_eq!(shown.len(), 1);
+        assert_eq!(
+            storage
+                .articles_by_topic(&Scope::All, "beta")
+                .unwrap()
+                .len(),
+            1
+        );
+
+        // Nothing changed in the files, so a second refresh finds nothing new.
+        let (_, again) =
+            refresh_all(&storage, &addresses, &Scope::All, &list, "alpha", None).unwrap();
+        assert_eq!(again.attempted, 2);
+        assert!(again.new_article_ids.is_empty());
+    }
+
     #[test]
     fn new_articles_mark_their_feed() {
         let storage = Storage::open_in_memory().unwrap();

@@ -5,6 +5,18 @@ remembering.
 
 ---
 
+## Refresh all, `N` (branch `feature/refresh-all`, 2026-10-30)
+
+- **What:** `N` fetches every feed in the active list (all topics) at once, then reloads the
+  list you were looking at. `r` is unchanged (selected topic only). Other feed lists are not
+  touched.
+- **How:** `refresh_all` in `tui/src/ui/mod.rs`, using core's concurrent `fetch_all` and the
+  same markers/notice as `r`.
+- **How to test:** throwaway HOME, two file feeds in different topics, run, add an item to
+  both files, press `N`: both topics show the marker.
+
+---
+
 ## Rename-proof feed rows and the 403 hint (branch `feature/robust-feeds`, 2026-10-25)
 
 - **Rename fix:** a sidebar feed row now loads by the feed's address (looked up from
