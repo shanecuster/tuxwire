@@ -897,6 +897,12 @@ fn draw_until_quit(
     // filtering it."
     let mut search: Option<String> = None;
 
+    // Set by `N` and acted on right after the next frame is drawn, so the
+    // footer can say "Refreshing..." *before* the screen goes quiet for the
+    // download (the draw loop is plain blocking code, so nothing is painted
+    // while a fetch runs). See the `N` arm and the check after `terminal.draw`.
+    let mut refresh_all_pending = false;
+
     loop {
         // A short-lived borrow of this frame's colors, named `theme` so the
         // `render(frame, theme, ...)` call below reads as it always has.
@@ -939,6 +945,29 @@ fn draw_until_quit(
                 !feed_lists.is_single(),
             )
         })?;
+
+        // `N` was pressed on the previous pass: the frame just drawn shows
+        // "Refreshing...", so the (slow) download can start now. When it ends,
+        // `continue` goes round again to draw the result before waiting for a
+        // key. `view == View::Topic` and a non-empty `topics` were checked when
+        // `N` was pressed, and nothing changes them in between.
+        if refresh_all_pending {
+            refresh_all_pending = false;
+            let (refreshed, report) = refresh_all(
+                storage,
+                &*feed_addresses,
+                &scope,
+                &feed_lists.lists()[active_list].path,
+                &topics[topic_index],
+                selected_source.as_deref(),
+            )?;
+            articles = refreshed;
+            article_index = article_index.min(articles.len().saturating_sub(1));
+            new_article_ids.extend(report.new_article_ids.iter().copied());
+            note_fresh_feeds(storage, &report.new_article_ids, &mut fresh_feeds);
+            notice = refresh_all_notice(&icons, &report);
+            continue;
+        }
 
         // `event::read()` blocks until the next terminal event -- no
         // polling loop or timer needed, since nothing here animates or
@@ -1854,19 +1883,16 @@ fn draw_until_quit(
                 // new articles get the `Icon::New` marker and their feeds the
                 // fresh-feed marker, and the footer says how it went.
                 KeyCode::Char('N') if view == View::Topic && !topics.is_empty() => {
-                    let (refreshed, report) = refresh_all(
-                        storage,
-                        &*feed_addresses,
-                        &scope,
-                        &feed_lists.lists()[active_list].path,
-                        &topics[topic_index],
-                        selected_source.as_deref(),
-                    )?;
-                    articles = refreshed;
-                    article_index = article_index.min(articles.len().saturating_sub(1));
-                    new_article_ids.extend(report.new_article_ids.iter().copied());
-                    note_fresh_feeds(storage, &report.new_article_ids, &mut fresh_feeds);
-                    notice = fetch_notice(&icons, &report, true);
+                    // Say what is about to happen, and ask for the refresh to
+                    // run after this message has been drawn (see the check
+                    // after `terminal.draw`). The count is every source in the
+                    // active list, from the sidebar's own grouping.
+                    let feeds: usize = sources_by_topic.values().map(Vec::len).sum();
+                    notice = Some(format!(
+                        "{} Refreshing {feeds} feed(s)...",
+                        icons.glyph(Icon::Refresh)
+                    ));
+                    refresh_all_pending = true;
                 }
 
                 // `S` toggles `View::Saved` on/off: pressing it while
@@ -2549,6 +2575,39 @@ fn fetch_notice(icons: &IconSettings, report: &FetchReport, after_refresh: bool)
         "{} Up to date, nothing new",
         icons.glyph(Icon::Refresh)
     ))
+}
+
+/// The footer message when `N` (refresh all) has finished: it names how many
+/// feeds were refreshed, so a quiet result is still clearly "done". Failures
+/// and being offline keep [`fetch_notice`]'s wording, which already says what
+/// went wrong.
+fn refresh_all_notice(icons: &IconSettings, report: &FetchReport) -> Option<String> {
+    let new = report.new_article_ids.len();
+    // Offline, or some feeds failed: the shared wording covers both.
+    if report.is_offline() || report.failed > 0 {
+        return fetch_notice(icons, report, true);
+    }
+    // No feeds in the list at all.
+    if report.attempted == 0 {
+        return Some(format!(
+            "{} No feeds to refresh",
+            icons.glyph(Icon::Refresh)
+        ));
+    }
+    // Everything fetched: say how many, and what was new.
+    if new > 0 {
+        Some(format!(
+            "{} Refreshed {} feed(s) \u{b7} {new} new article(s)",
+            icons.glyph(Icon::New),
+            report.attempted
+        ))
+    } else {
+        Some(format!(
+            "{} Refreshed {} feed(s), nothing new",
+            icons.glyph(Icon::Refresh),
+            report.attempted
+        ))
+    }
 }
 
 /// Saves `icons.mode` to `icons.toml` and returns the footer message to
@@ -5318,6 +5377,44 @@ mod tests {
             refresh_all(&storage, &addresses, &Scope::All, &list, "alpha", None).unwrap();
         assert_eq!(again.attempted, 2);
         assert!(again.new_article_ids.is_empty());
+    }
+
+    /// The "refresh all" result names how many feeds were refreshed, whether
+    /// or not anything was new; failures keep the shared wording.
+    #[test]
+    fn refresh_all_says_how_many_it_refreshed() {
+        let icons = IconSettings::new(IconMode::Ascii, HashMap::new());
+        let quiet = FetchReport {
+            attempted: 3,
+            ..FetchReport::default()
+        };
+        assert_eq!(
+            refresh_all_notice(&icons, &quiet).as_deref(),
+            Some("@ Refreshed 3 feed(s), nothing new")
+        );
+        let fresh = FetchReport {
+            attempted: 3,
+            new_article_ids: HashSet::from([1, 2]),
+            ..FetchReport::default()
+        };
+        assert_eq!(
+            refresh_all_notice(&icons, &fresh).as_deref(),
+            Some("+ Refreshed 3 feed(s) \u{b7} 2 new article(s)")
+        );
+        let none = FetchReport::default();
+        assert_eq!(
+            refresh_all_notice(&icons, &none).as_deref(),
+            Some("@ No feeds to refresh")
+        );
+        let failed = FetchReport {
+            attempted: 3,
+            failed: 1,
+            ..FetchReport::default()
+        };
+        assert_eq!(
+            refresh_all_notice(&icons, &failed),
+            fetch_notice(&icons, &failed, true)
+        );
     }
 
     #[test]

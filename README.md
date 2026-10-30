@@ -342,7 +342,7 @@ tuxwire
 | `n` | Add or edit a note on a saved article |
 | `x` | Mark an article as skipped |
 | `r` | Refresh the current topic's sources |
-| `N` | Refresh every feed in the active list, all topics at once |
+| `N` | Refresh every feed in the active list, all topics at once (the footer shows "Refreshing...", then the result) |
 | `S` | View saved articles |
 | `y` | View history (every article ever fetched) |
 | `L` | Open the Read Later list (`Enter` open, `s` save permanently, `x` discard, `p` paste a link, `Esc` close) |
