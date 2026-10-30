@@ -148,7 +148,7 @@ streak, a chart of reads per week, and the topics and sources you read most.
 started recording read times; older reads are only in the Read total.
 
 ### Which feeds have something new
-After a refresh (at startup or with `r`), every feed that got new articles shows
+After a refresh (at startup, with `r`, or with `N`), every feed that got new articles shows
 the new-article marker (✦ with the default icons) after its name in the sidebar,
 and its topic shows it too, so with a long feed list you can see where the new
 articles are without opening each feed. Acting in a feed's article list (`j`,
@@ -342,6 +342,7 @@ tuxwire
 | `n` | Add or edit a note on a saved article |
 | `x` | Mark an article as skipped |
 | `r` | Refresh the current topic's sources |
+| `N` | Refresh every feed in the active list, all topics at once |
 | `S` | View saved articles |
 | `y` | View history (every article ever fetched) |
 | `L` | Open the Read Later list (`Enter` open, `s` save permanently, `x` discard, `p` paste a link, `Esc` close) |

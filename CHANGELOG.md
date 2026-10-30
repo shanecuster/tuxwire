@@ -17,6 +17,11 @@ messages — what changed and why, not just what.
 
 ### Added
 
+- **`N` refreshes every feed at once** (terminal). `r` still refreshes only the
+  selected topic; `N` fetches every feed in the active list, all topics, like the
+  Android app's "refresh all". Downloads run a few at a time (the shared
+  `fetch_all`), new articles and feeds get their markers, and the footer reports
+  failures as with `r`.
 - **A 403 now says what to try.** When a site answers HTTP 403 (it turns away
   programs but lets a browser in), the message adds: "the feed link is not working
   for apps like tuxwire. Try saving the feed from your browser and adding it as a
