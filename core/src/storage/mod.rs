@@ -809,6 +809,29 @@ impl Storage {
         Ok(changed > 0)
     }
 
+    /// Changes the name and topic of the feed with this `id`, and returns
+    /// whether a feed was actually updated (`false` if no such ID existed).
+    ///
+    /// The address is deliberately not editable here. A feed's articles are
+    /// found by its address, so changing it would strand every article
+    /// already fetched, and the optional feed-list sync treats the address
+    /// as the feed's identity. A wrong address is fixed by removing the feed
+    /// and adding it again. The name and topic are only labels, so changing
+    /// them is safe.
+    ///
+    /// Callers are expected to have trimmed the values and rejected empty
+    /// ones, the same as for [`Storage::add_feed`].
+    pub fn update_feed(&self, id: i64, name: &str, topic: &str) -> anyhow::Result<bool> {
+        // The values are bound with `params!`, never pasted into the SQL, as
+        // everywhere else in this module. `execute` returns how many rows
+        // changed, so `0` means no feed has this ID.
+        let changed = self.conn.execute(
+            "UPDATE feeds SET name = ?1, topic = ?2 WHERE id = ?3",
+            params![name, topic, id],
+        )?;
+        Ok(changed > 0)
+    }
+
     /// Every feed, grouped by topic and then by name (both
     /// case-insensitive), so a screen can list them in a stable order.
     ///
@@ -1773,6 +1796,35 @@ mod tests {
         assert_eq!(storage.list_feeds().unwrap().len(), 2);
         // Removing it again finds nothing to remove.
         assert!(!storage.remove_feed(lwn).unwrap());
+    }
+
+    /// A feed's name and topic can be changed; its address and its place in
+    /// the list of feeds (by ID) stay put, and an unknown ID changes nothing.
+    #[test]
+    fn updating_a_feed_changes_name_and_topic_only() {
+        let storage = test_storage();
+        let id = storage
+            .add_feed(
+                "Arch Linxu News",
+                "https://arch/feed",
+                "linxu",
+                SourceType::Rss,
+            )
+            .unwrap();
+
+        // Fix the typos in both the name and the topic.
+        assert!(storage.update_feed(id, "Arch Linux News", "linux").unwrap());
+
+        let feeds = storage.list_feeds().unwrap();
+        assert_eq!(feeds.len(), 1);
+        assert_eq!(feeds[0].id, id);
+        assert_eq!(feeds[0].name, "Arch Linux News");
+        assert_eq!(feeds[0].topic, "linux");
+        // The address is untouched, so its articles are still found.
+        assert_eq!(feeds[0].url, "https://arch/feed");
+
+        // An ID that does not exist is reported as "nothing updated".
+        assert!(!storage.update_feed(id + 1000, "x", "y").unwrap());
     }
 
     /// Adding the same URL twice fails with a clear message and does not
