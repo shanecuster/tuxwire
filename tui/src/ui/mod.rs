@@ -672,7 +672,7 @@ fn list_scope(lists: &FeedLists, sources: &[ConfiguredSource]) -> Scope {
 /// to fetch it without restarting. An empty topic shows "No articles yet",
 /// and `r` on it fetches that topic's sources.
 ///
-/// `extend` adds each configured topic, then `sort` + `dedup` (which
+/// `extend` adds each configured topic, then `sort_names` + `dedup` (which
 /// removes *adjacent* duplicates, hence sorting first) keep the list
 /// alphabetical with no repeats, matching `Storage::topics`'s own order.
 fn list_topics(
@@ -684,10 +684,30 @@ fn list_topics(
     let mut topics = storage.topics(scope)?;
     if !lists.is_single() {
         topics.extend(sources.iter().map(|source| source.topic().to_string()));
-        topics.sort();
-        topics.dedup();
     }
+    // Always re-sort here, even with one list: the database sorts by raw
+    // bytes (every capital letter before any lowercase one), but the
+    // sidebar wants a plain A-Z order that ignores case.
+    sort_names(&mut topics);
+    topics.dedup();
     Ok(topics)
+}
+
+/// Sorts `names` A-Z ignoring upper/lower case, so "gaming" comes before
+/// "Linux" instead of after it (a plain `sort()` puts every capital letter
+/// before every lowercase one). Names that differ only by case fall back to
+/// a plain comparison, which keeps equal names next to each other so a
+/// following `dedup()` (which only removes *adjacent* repeats) works.
+///
+/// `names` is `&mut`: the caller's `Vec` is reordered in place.
+fn sort_names(names: &mut [String]) {
+    // `sort_by` takes a closure that compares two items. `then` only runs
+    // its second comparison when the first says they're equal.
+    names.sort_by(|a, b| {
+        a.to_lowercase()
+            .cmp(&b.to_lowercase())
+            .then_with(|| a.cmp(b))
+    });
 }
 
 /// The `f` picker's rows, one per feed list in `lists.toml` order: name,
@@ -739,9 +759,9 @@ fn list_picker_rows(
 /// (`sources.toml`'s "exactly one topic per source" rule -- see
 /// ARCHITECTURE.md's Configuration section), built once from the
 /// `ConfiguredSource` list `main` already loaded at startup. Source names
-/// within a topic keep `sources.toml`'s own order (the order they appear
-/// in the file / the order `sources` iterates in), not re-sorted -- there's
-/// no natural reason to alphabetize them over just matching the config.
+/// within a topic are sorted A-Z ignoring case (`sort_names`), so the
+/// sidebar is easy to scan. This only changes what the sidebar shows;
+/// `sources.toml` itself keeps whatever order the person wrote.
 fn group_sources_by_topic(sources: &[ConfiguredSource]) -> HashMap<String, Vec<String>> {
     let mut grouped: HashMap<String, Vec<String>> = HashMap::new();
     for source in sources {
@@ -749,6 +769,11 @@ fn group_sources_by_topic(sources: &[ConfiguredSource]) -> HashMap<String, Vec<S
             .entry(source.topic().to_string())
             .or_default()
             .push(source.name().to_string());
+    }
+    // Sort each topic's feed names A-Z. `values_mut` hands out a mutable
+    // reference to every `Vec` in the map, so each is reordered in place.
+    for names in grouped.values_mut() {
+        sort_names(names);
     }
     grouped
 }
@@ -786,10 +811,12 @@ fn feed_addresses_of(sources: &[ConfiguredSource]) -> FeedAddresses {
 /// switching topics always reflects whatever's actually in the database
 /// for that topic.
 ///
-/// Also owns the sidebar tree's own state: `expanded_topics` (which topics
-/// currently show their nested source rows) and `selected_source` (`Some`
+/// Also owns the sidebar tree's own state: `collapsed_topics` (which topics
+/// the person has folded *shut* with `Left`/`h`; every other topic shows its
+/// nested source rows, so all topics start open and a brand-new one opens
+/// itself) and `selected_source` (`Some`
 /// when the cursor is actually sitting on one of those source rows rather
-/// than the topic row itself). `expanded_topics` is a `HashSet<String>`
+/// than the topic row itself). `collapsed_topics` is a `HashSet<String>`
 /// keyed by topic *name*, not a `Vec<bool>` parallel to `topics` keyed by
 /// *index* -- the `a` add-source flow can insert a brand-new topic into
 /// `topics` and re-sort the whole `Vec` (see the block handling
@@ -883,7 +910,7 @@ fn draw_until_quit(
     // than on every frame.
     let mut feed_list_display =
         crate::paths::abbreviate_home(&feed_lists.lists()[active_list].path, home.as_deref());
-    let mut expanded_topics: HashSet<String> = HashSet::new();
+    let mut collapsed_topics: HashSet<String> = HashSet::new();
     let mut selected_source: Option<String> = None;
 
     // The *committed* search filter, if any -- `Some(query)` once `/` +
@@ -932,7 +959,7 @@ fn draw_until_quit(
                 &fresh_feeds,
                 topics.as_slice(),
                 sources_by_topic,
-                &expanded_topics,
+                &collapsed_topics,
                 selected_topic,
                 selected_source.as_deref(),
                 &articles,
@@ -1027,7 +1054,7 @@ fn draw_until_quit(
                             // view shows the switch happened.
                             topic_index = 0;
                             selected_source = None;
-                            expanded_topics.clear();
+                            collapsed_topics.clear();
                             view = View::Topic;
                             search = None;
                             articles = articles_for_view(
@@ -1553,7 +1580,7 @@ fn draw_until_quit(
 
                 // `Up`/`Down` move the sidebar cursor through the flattened
                 // topic tree -- every topic row, plus (for whichever topics
-                // are in `expanded_topics`) their nested source rows right
+                // are *not* in `collapsed_topics`) their nested source rows right
                 // underneath, in the same order `render_topics_section`
                 // draws them -- clamping at either end (same as `j`/`k`
                 // above) rather than wrapping. `move_sidebar_selection`
@@ -1572,7 +1599,7 @@ fn draw_until_quit(
                         -1,
                         topics,
                         sources_by_topic,
-                        &expanded_topics,
+                        &collapsed_topics,
                         &mut topic_index,
                         &mut selected_source,
                     );
@@ -1590,7 +1617,7 @@ fn draw_until_quit(
                         1,
                         topics,
                         sources_by_topic,
-                        &expanded_topics,
+                        &collapsed_topics,
                         &mut topic_index,
                         &mut selected_source,
                     );
@@ -1615,10 +1642,10 @@ fn draw_until_quit(
                 // from one of its source rows, so the cursor being on one
                 // makes this a no-op (falls through to `_ => {}` below). A
                 // topic with no configured sources also has nothing to
-                // reveal, so `expanded_topics` is only touched when
-                // `sources_by_topic` actually has a non-empty entry for it
-                // -- otherwise the indicator in `render_topics_section`
-                // would flip to "expanded" over an empty nested list.
+                // reveal, so `collapsed_topics` is only touched when
+                // `sources_by_topic` actually has a non-empty entry for it.
+                // "Expanding" means taking the topic back *out* of
+                // `collapsed_topics` (topics start open).
                 KeyCode::Right | KeyCode::Char('l')
                     if view == View::Topic && selected_source.is_none() && !topics.is_empty() =>
                 {
@@ -1627,21 +1654,22 @@ fn draw_until_quit(
                             .get(topic)
                             .is_some_and(|sources| !sources.is_empty())
                     {
-                        expanded_topics.insert(topic.clone());
+                        collapsed_topics.remove(topic);
                     }
                 }
 
-                // `Left`/`h` collapses the currently selected topic. From a
+                // `Left`/`h` collapses the currently selected topic (adds its name to
+                // `collapsed_topics`). From a
                 // source row, this first jumps the cursor back up to its
                 // parent topic row (clearing `selected_source` and
                 // reloading the unfiltered per-topic article list) rather
                 // than requiring a separate `Up` press first -- the same
                 // "collapse jumps to parent" convention most file-tree UIs
-                // use. From an already-collapsed topic row, removing a name
-                // that was never in `expanded_topics` is a harmless no-op.
+                // use. From an already-collapsed topic row, inserting a name
+                // that is already in the set is a harmless no-op.
                 KeyCode::Left | KeyCode::Char('h') if view == View::Topic && !topics.is_empty() => {
                     if let Some(topic) = topics.get(topic_index) {
-                        expanded_topics.remove(topic);
+                        collapsed_topics.insert(topic.clone());
                     }
                     if selected_source.take().is_some() {
                         articles = load_articles_for_selection(
@@ -2726,20 +2754,20 @@ enum SidebarRow<'a> {
 
 /// Builds the sidebar's full flattened row order: every topic in `topics`,
 /// each immediately followed by its source rows (in `sources_by_topic`'s
-/// own order -- `sources.toml`'s order, see `group_sources_by_topic`)
-/// whenever that topic's name is present in `expanded_topics`. A topic
+/// own A-Z order, see `group_sources_by_topic`)
+/// unless that topic's name is present in `collapsed_topics`. A topic
 /// with no entry in `sources_by_topic` at all (nothing configured under
 /// it, or its only sources are of a type still unfetchable) simply
-/// contributes no source rows, expanded or not.
+/// contributes no source rows, collapsed or not.
 fn sidebar_rows<'a>(
     topics: &[String],
     sources_by_topic: &'a HashMap<String, Vec<String>>,
-    expanded_topics: &HashSet<String>,
+    collapsed_topics: &HashSet<String>,
 ) -> Vec<SidebarRow<'a>> {
     let mut rows = Vec::new();
     for (index, topic) in topics.iter().enumerate() {
         rows.push(SidebarRow::Topic(index));
-        if expanded_topics.contains(topic)
+        if !collapsed_topics.contains(topic)
             && let Some(sources) = sources_by_topic.get(topic)
         {
             rows.extend(
@@ -2772,11 +2800,11 @@ fn move_sidebar_selection(
     direction: i32,
     topics: &[String],
     sources_by_topic: &HashMap<String, Vec<String>>,
-    expanded_topics: &HashSet<String>,
+    collapsed_topics: &HashSet<String>,
     topic_index: &mut usize,
     selected_source: &mut Option<String>,
 ) {
-    let rows = sidebar_rows(topics, sources_by_topic, expanded_topics);
+    let rows = sidebar_rows(topics, sources_by_topic, collapsed_topics);
     if rows.is_empty() {
         return;
     }
@@ -3103,7 +3131,7 @@ fn handle_add_source_key(
                     Ok(()) => {
                         if !topics.iter().any(|existing| existing == trimmed_topic) {
                             topics.push(trimmed_topic.to_string());
-                            topics.sort();
+                            sort_names(topics);
                         }
                         // Tell the caller which feed was just saved (through
                         // the `&mut` out-parameter), so it can fetch that
@@ -3195,7 +3223,7 @@ fn found_note(found_by: fetchers::discover::FoundBy) -> Option<String> {
 /// based on `view` -- see the note on `selected_topic` in `draw_until_quit`
 /// for why it keeps showing the last topic selection either way.
 ///
-/// `view` (and now the sidebar tree's `sources_by_topic`/`expanded_topics`/
+/// `view` (and now the sidebar tree's `sources_by_topic`/`collapsed_topics`/
 /// `selected_source`) pushes this well past clippy's default 7-argument
 /// threshold for `too_many_arguments`. Bundling these into a params struct
 /// just to quiet the lint would be an abstraction with no other caller and
@@ -3217,7 +3245,7 @@ fn render(
     fresh_feeds: &HashSet<(String, String)>,
     topics: &[String],
     sources_by_topic: &HashMap<String, Vec<String>>,
-    expanded_topics: &HashSet<String>,
+    collapsed_topics: &HashSet<String>,
     selected_topic: Option<&str>,
     selected_source: Option<&str>,
     articles: &[Article],
@@ -3290,7 +3318,7 @@ fn render(
         sidebar_area,
         topics,
         sources_by_topic,
-        expanded_topics,
+        collapsed_topics,
         selected_topic,
         selected_source,
         fresh_feeds,
@@ -3432,7 +3460,7 @@ fn render_banner(frame: &mut Frame, theme: &Theme, area: Rect) {
 /// there's no reason to let them grow. `Constraint::Min(0)` on the topics
 /// list is what then makes *it* absorb every leftover row instead.
 ///
-/// The sidebar tree's `sources_by_topic`/`expanded_topics`/
+/// The sidebar tree's `sources_by_topic`/`collapsed_topics`/
 /// `selected_source`, plus `icons`, push this to 9 arguments, past clippy's default
 /// 7-argument threshold -- same reasoning as the `#[allow]` on `render`
 /// itself (its one call site, `render`, already threads these straight
@@ -3447,7 +3475,7 @@ fn render_sidebar(
     area: Rect,
     topics: &[String],
     sources_by_topic: &HashMap<String, Vec<String>>,
-    expanded_topics: &HashSet<String>,
+    collapsed_topics: &HashSet<String>,
     selected_topic: Option<&str>,
     selected_source: Option<&str>,
     fresh_feeds: &HashSet<(String, String)>,
@@ -3468,7 +3496,7 @@ fn render_sidebar(
         topics_area,
         topics,
         sources_by_topic,
-        expanded_topics,
+        collapsed_topics,
         selected_topic,
         selected_source,
         fresh_feeds,
@@ -3540,11 +3568,11 @@ fn clear_fresh_feeds(
 /// The sidebar's top section: the expandable topic tree
 /// (`docs/ARCHITECTURE.md`'s "an expandable tree, not a flat list") -- every
 /// topic in `topics`, each prefixed with `Icon::Collapsed` or
-/// `Icon::Expanded` (per `expanded_topics`) when it actually has configured
+/// `Icon::Expanded` (`Expanded` unless the topic is in `collapsed_topics`) when it actually has configured
 /// sources to show, or a blank cell when it doesn't (nothing to expand
 /// into, so no indicator implying otherwise), then the topic's category
-/// icon (`IconSettings::category_glyph`). Whichever topic is in
-/// `expanded_topics` gets its source names -- from `sources_by_topic`,
+/// icon (`IconSettings::category_glyph`). Every topic *not* in
+/// `collapsed_topics` gets its source names -- from `sources_by_topic`,
 /// indented four cells so they line up under the topic name -- inserted
 /// directly beneath it, and the currently selected row (a
 /// topic, per `selected_topic`, or one of its nested sources, per
@@ -3569,7 +3597,7 @@ fn render_topics_section(
     area: Rect,
     topics: &[String],
     sources_by_topic: &HashMap<String, Vec<String>>,
-    expanded_topics: &HashSet<String>,
+    collapsed_topics: &HashSet<String>,
     selected_topic: Option<&str>,
     selected_source: Option<&str>,
     fresh_feeds: &HashSet<(String, String)>,
@@ -3580,7 +3608,7 @@ fn render_topics_section(
         .style(Style::new().bg(theme.background).fg(theme.text_primary))
         .border_style(Style::new().fg(theme.panel_border));
 
-    let rows = sidebar_rows(topics, sources_by_topic, expanded_topics);
+    let rows = sidebar_rows(topics, sources_by_topic, collapsed_topics);
 
     // Built alongside `items` below rather than searched for afterward --
     // each row already knows whether it's the selected one as it's turned
@@ -3607,7 +3635,7 @@ fn render_topics_section(
                 // topic's icon and name start in the same column.
                 let indicator = if !has_sources {
                     " "
-                } else if expanded_topics.contains(topic) {
+                } else if !collapsed_topics.contains(topic) {
                     icons.glyph(Icon::Expanded)
                 } else {
                     icons.glyph(Icon::Collapsed)
@@ -4879,6 +4907,37 @@ fn centered_rect(area: Rect, width_percent: u16, height: u16) -> Rect {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Names sort A-Z ignoring case, so a lowercase name is not pushed
+    /// behind every capitalized one, and names that differ only by case
+    /// stay next to each other (so `dedup` can remove exact repeats).
+    #[test]
+    fn sort_names_ignores_case_and_keeps_repeats_adjacent() {
+        // `to_string` turns each `&str` literal into an owned `String`.
+        let mut names: Vec<String> = ["Zed", "apple", "Banana", "apple", "Apple"]
+            .iter()
+            .map(|name| name.to_string())
+            .collect();
+        sort_names(&mut names);
+        assert_eq!(names, ["Apple", "apple", "apple", "Banana", "Zed"]);
+        names.dedup();
+        assert_eq!(names, ["Apple", "apple", "Banana", "Zed"]);
+    }
+
+    /// Topics start open: a topic is hidden only when it is in the
+    /// collapsed set, and its feeds then disappear from the row list.
+    #[test]
+    fn topics_are_open_unless_collapsed() {
+        let topics = vec!["linux".to_string()];
+        let mut sources = HashMap::new();
+        sources.insert("linux".to_string(), vec!["LWN".to_string()]);
+        let mut collapsed = HashSet::new();
+        // One topic row plus one feed row while open.
+        assert_eq!(sidebar_rows(&topics, &sources, &collapsed).len(), 2);
+        // Collapsing it leaves just the topic row.
+        collapsed.insert("linux".to_string());
+        assert_eq!(sidebar_rows(&topics, &sources, &collapsed).len(), 1);
+    }
 
     /// Text shorter than the limit comes back untouched, with no `…`
     /// appended -- there was nothing to cut off.
