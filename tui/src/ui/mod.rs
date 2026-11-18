@@ -3833,7 +3833,7 @@ fn render_colors_section(frame: &mut Frame, theme: &Theme, icons: &IconSettings,
     // row added here without the height growing to fit it.
     let states: [(&str, Icon, Color); LEGEND_ROWS] = [
         ("unread", Icon::Unread, theme.accent_unread),
-        ("new", Icon::New, theme.accent_unread),
+        ("new", Icon::New, theme.accent_new),
         ("read", Icon::Read, theme.accent_read),
         ("saved", Icon::Starred, theme.accent_saved),
         ("skipped", Icon::Skipped, theme.accent_skipped),
@@ -4028,15 +4028,7 @@ fn article_item<'a>(
     // `saved`/`skipped` are checked first -- they're the more specific,
     // more deliberate states, and should win visually over the more
     // general "read" fade-out.
-    let title_color = if article.skipped {
-        theme.accent_skipped
-    } else if article.saved {
-        theme.accent_saved
-    } else if article.read {
-        theme.accent_read
-    } else {
-        theme.accent_unread
-    };
+    let title_color = article_title_color(theme, article, new_article_ids);
 
     // The state icon in front of the title, in the same color. It's one
     // cell plus a space, so the meta line's two-space indent below still
@@ -4092,6 +4084,26 @@ fn article_item<'a>(
     }
 
     ListItem::new(lines)
+}
+
+/// The color of an article's title and state icon, by state, in the same
+/// priority as `article_state_icon`: skipped, then saved, then read, then
+/// new (unread and fetched this session, in `new_article_ids`, drawn in the
+/// blue `accent_new` so fresh articles stand out), otherwise plain unread.
+///
+/// Returns a `Color` (a small `Copy` value), so nothing here is borrowed.
+fn article_title_color(theme: &Theme, article: &Article, new_article_ids: &HashSet<i64>) -> Color {
+    if article.skipped {
+        theme.accent_skipped
+    } else if article.saved {
+        theme.accent_saved
+    } else if article.read {
+        theme.accent_read
+    } else if new_article_ids.contains(&article.id) {
+        theme.accent_new
+    } else {
+        theme.accent_unread
+    }
 }
 
 /// Which state icon an article gets in the list. Same priority order as
@@ -5181,6 +5193,31 @@ mod tests {
         );
         article.id = id;
         article
+    }
+
+    /// A new article's title is blue, an ordinary unread one is the unread
+    /// color, and reading, saving or skipping a new article takes the blue
+    /// away (the same priority as the state icon).
+    #[test]
+    fn new_articles_are_blue_until_read() {
+        let theme = crate::theme::ThemeSettings::default().resolve();
+        let new_ids = HashSet::from([1]);
+
+        let mut article = test_article(1);
+        assert_eq!(
+            article_title_color(&theme, &article, &new_ids),
+            theme.accent_new
+        );
+        assert_eq!(
+            article_title_color(&theme, &test_article(2), &new_ids),
+            theme.accent_unread
+        );
+
+        article.read = true;
+        assert_eq!(
+            article_title_color(&theme, &article, &new_ids),
+            theme.accent_read
+        );
     }
 
     /// The state icon follows the same priority as the title color
