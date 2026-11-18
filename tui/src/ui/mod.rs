@@ -92,6 +92,7 @@ use tuxwire_core::fetch_report::FetchReport;
 use tuxwire_core::models::Article;
 use tuxwire_core::storage::{ReadLaterItem, Scope, Storage};
 
+mod help;
 mod read_later;
 mod stats;
 
@@ -392,6 +393,13 @@ enum Mode {
     ListPicker {
         selected: usize,
         rows: Vec<ListRow>,
+    },
+
+    /// The `?` Help popup is open, listing every key. `scroll` is how many
+    /// lines it is scrolled down (for short terminals). Its keys are handled
+    /// in `help.rs`.
+    Help {
+        scroll: u16,
     },
 
     /// The `g` Stats screen is open. `stats` is the snapshot taken when it
@@ -1458,6 +1466,17 @@ fn draw_until_quit(
             continue;
         }
 
+        // While the Help popup is open, its own handler decides what each key
+        // does (scroll or close) and hands back the next mode. `terminal.size()`
+        // gives the screen size so scrolling stops when the last line shows;
+        // the 2 border rows and the banner/footer rows are subtracted.
+        if let Mode::Help { scroll } = mode {
+            let screen_rows = terminal.size()?.height;
+            let visible = screen_rows.saturating_sub(BANNER.len() as u16 + 2 + 2);
+            mode = help::handle_key(key.code, scroll, !feed_lists.is_single(), visible);
+            continue;
+        }
+
         // While the error popup is open, every keypress dismisses it back
         // to `Mode::Normal` -- there's no text to type or field to navigate,
         // so unlike the note/add-source popups this doesn't need to inspect
@@ -2080,6 +2099,9 @@ fn draw_until_quit(
                 // `g` opens the Stats screen (see `stats.rs`). The numbers are
                 // worked out once, here; if that fails the footer says why
                 // instead of the app stopping.
+                // `?` opens the Help popup with every key (see `help.rs`).
+                KeyCode::Char('?') => mode = Mode::Help { scroll: 0 },
+
                 KeyCode::Char('g') => match stats::open(storage, &feed_lists) {
                     Ok(next) => mode = next,
                     Err(err) => notice = Some(format!("Stats failed: {err}")),
@@ -3402,6 +3424,10 @@ fn render(
     if let Mode::Stats { stats } = mode {
         stats::render(frame, theme, body, stats);
     }
+    // The Help popup (see `help.rs`).
+    if let Mode::Help { scroll } = mode {
+        help::render(frame, theme, body, *scroll, show_list_key);
+    }
     // The Read Later screens (see `read_later.rs`).
     if let Mode::ReadLater { items, selected } = mode {
         read_later::render_list_popup(frame, theme, icons, body, *selected, items);
@@ -4288,6 +4314,7 @@ fn footer_hints(mode: &Mode, view: View) -> &'static str {
         Mode::ThemePicker { .. } => THEME_PICKER_HINTS,
         Mode::ListPicker { .. } => LIST_PICKER_HINTS,
         Mode::Stats { .. } => stats::HINTS,
+        Mode::Help { .. } => help::HINTS,
         Mode::ReadLater { .. } => read_later::LIST_HINTS,
         Mode::PasteLink { .. } => read_later::PASTE_HINTS,
         Mode::LinkChoice { .. } => read_later::CHOICE_HINTS,
