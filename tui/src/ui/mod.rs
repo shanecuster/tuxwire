@@ -92,6 +92,7 @@ use tuxwire_core::fetch_report::FetchReport;
 use tuxwire_core::models::Article;
 use tuxwire_core::storage::{ReadLaterItem, Scope, Storage};
 
+mod help;
 mod read_later;
 mod stats;
 
@@ -144,11 +145,6 @@ const FOOTER_GAP: u16 = 2;
 /// (`Mode::ListPicker`) is open.
 const LIST_PICKER_HINTS: &str = "j/k or ↑/↓ choose · Enter switch · Esc cancel";
 
-/// The sidebar Keys entry for `f`, shown only when there's more than one
-/// feed list. With a single list, the Keys section looks exactly as it did
-/// before lists existed. Kept out of `KEY_HINTS` for that reason.
-const FEED_LIST_KEY_HINT: (&str, &str) = ("f", "feed lists");
-
 /// The footer hint line shown while the `t` theme picker
 /// (`Mode::ThemePicker`) is open.
 const THEME_PICKER_HINTS: &str = "j/k or ↑/↓ preview · Enter keep · Esc cancel";
@@ -158,41 +154,28 @@ const THEME_PICKER_HINTS: &str = "j/k or ↑/↓ preview · Enter keep · Esc ca
 const ICON_CHECK_HINTS: &str =
     "y yes, use Nerd Font icons · n no, use plain symbols · Esc ask next time";
 
-/// Keybind hints for the footer, for the normal (not editing-a-note,
-/// not adding-a-source) state while `View::Topic` is showing -- see
-/// `SAVED_HINTS` below for the saved view's own hint line,
-/// `EDITING_NOTE_HINTS` for the note popup's, and
-/// `ADD_SOURCE_URL_HINTS`/`ADD_SOURCE_CONFIRM_HINTS` for the add-source
-/// flow's. Kept as one `const` (rather than inlined into `render_footer`
-/// below) so there's exactly one place this has to stay in sync with the
-/// `Mode::Normal` match arm in `draw_until_quit` below.
+/// Keybind hints for the footer's upper line, for the normal (not
+/// editing-a-note, not adding-a-source) state while `View::Topic` is
+/// showing. Kept as one `const` (rather than inlined into `footer_hints`)
+/// so there is exactly one place to keep in sync with the `Mode::Normal`
+/// match arms in `draw_until_quit`.
 ///
-/// Deliberately drops `x`/`s`/`n`/`r`/`S`/`a`/`Right`+`l`/`Left`+`h` --
-/// those now have a permanent home in the sidebar's own "Keys" section
-/// (see `render_keys_section`), which is on screen at all times rather
-/// than only in the footer, so repeating them here would just be the same
-/// reference living in two places. What's left is exactly the keys the
-/// Keys section *doesn't* cover: raw navigation (`j`/`k`, `↑`/`↓`/`Tab`,
-/// `Enter`) and `q` to quit.
-const KEYBIND_HINTS: &str = "j/k move · ↑/↓/Tab topic · Enter open · q quit";
+/// This is the short list of everyday keys. The full list (including rarer
+/// ones like `i` for icon mode and `t` for the theme) is in the `?` Help
+/// popup (`help.rs`), which is why `? help` comes first: if the terminal is
+/// too narrow for the whole line, the end is cut off, and the way to the
+/// full list must never be the part that disappears.
+const KEYBIND_HINTS: &str = "? help · Enter open · s save · x close · n note · r refresh · a add · p paste · / search · S saved · c sync · q quit";
 
 /// The footer hint line shown while `View::Saved` or `View::History` is
 /// showing (and no popup is open) -- both non-`Topic` views share this one
-/// line, since both disable exactly the same things for exactly the same
-/// reason. Deliberately drops `↑/↓ topic` and `r refresh` -- both are
-/// disabled in these views (see the guards on their match arms in
-/// `draw_until_quit`), since neither a topic-sidebar selection nor
-/// "refetch this topic's sources" means anything once the list is "every
-/// saved article across every topic" or "every article ever fetched"
-/// instead of one topic's.
-///
-/// Also drops `x`/`s`/`n`/`a`, same reasoning as `KEYBIND_HINTS` above --
-/// covered by the sidebar's always-visible Keys section instead. `S`/`y`
-/// stay off this line for the same reason (they're in Keys too), but
-/// `Esc`/`Tab` remain: they're these views' *own* way back to
-/// `View::Topic`, which the Keys section (a flat list of the main-flow
-/// keys) doesn't document.
-const SAVED_HINTS: &str = "j/k move · Enter open · Esc/Tab back · q quit";
+/// line, since both disable the same keys for the same reason (the sidebar
+/// cursor and `r` refresh mean nothing once the list is "every saved
+/// article" or "every article ever fetched"). `E` is listed because
+/// exporting is done from the saved view; `Esc`/`Tab` are these views' own
+/// way back to `View::Topic`.
+const SAVED_HINTS: &str =
+    "? help · j/k move · Enter open · u un-save · n note · E export · Esc/Tab back · q quit";
 
 /// The footer hint line shown while the note popup (`Mode::EditingNote`)
 /// is open -- every other keybind is suspended while typing a note (see
@@ -240,62 +223,6 @@ const SEARCH_HINTS: &str = "type to filter · Enter confirm · Esc cancel";
 /// it; the full text is always one `n` press away in the same edit popup
 /// already built for editing it.
 const NOTE_PREVIEW_CHARS: usize = 45;
-
-/// The sidebar's "Keys" reference section (`docs/ARCHITECTURE.md` § 3. TUI)
-/// -- the main-flow keybinds, as `(key, action)` pairs, rendered one per
-/// line by `render_keys_section` below. A `const` array (rather than
-/// building this `Vec` fresh inside `render_keys_section` every frame) since
-/// it never changes at runtime -- there's no reason to reallocate the same
-/// pairs on every single draw.
-///
-/// This exists specifically because the person building tuxwire has no
-/// prior Rust/TUI-app experience and shouldn't have to memorize the keybind
-/// table before the app is usable -- the reference lives on screen instead,
-/// in every `View` (see `render_sidebar`, which doesn't take a `View` at
-/// all -- this section renders identically regardless of which one is
-/// showing).
-///
-/// `→`/`l` and `←`/`h` (expanding/collapsing a topic in the sidebar tree,
-/// see `SidebarRow`/`sidebar_rows` below) live here rather than in
-/// `KEYBIND_HINTS` -- they're sidebar navigation, not article-list
-/// navigation, and per ARCHITECTURE.md's keybind table this is their
-/// documented home. `y` (history) and `/` (search) join them here for the
-/// same reason `S` (saved view) already did: a whole-app view/mode switch,
-/// not something scoped to whichever list happens to be on screen, so it
-/// belongs in this always-visible reference rather than a footer hint that
-/// only shows up in one particular view.
-///
-/// `E` (Markdown export -- `docs/ARCHITECTURE.md`'s "Markdown Export")
-/// joins them for the same reason: a whole-app action (regenerating one
-/// combined file from every currently-saved article, not something
-/// scoped to a single row), even though it only actually does anything
-/// while `View::Saved` is showing.
-///
-/// `i` (cycle the icon mode: Nerd → Unicode → ASCII) and `t` (the theme
-/// picker) are listed here too, since they change the whole app's look
-/// rather than one row.
-const KEY_HINTS: [(&str, &str); 20] = [
-    ("s", "save"),
-    ("u", "un-save"),
-    ("x", "close"),
-    ("n", "note"),
-    ("S", "saved view"),
-    ("L", "read later"),
-    ("R", "add to read later"),
-    ("p", "paste a link"),
-    ("y", "history"),
-    ("/", "search"),
-    ("r", "refresh topic"),
-    ("N", "refresh all"),
-    ("a", "add source"),
-    ("E", "export (S view)"),
-    ("c", "sync (optional)"),
-    ("i", "icon mode"),
-    ("t", "theme"),
-    ("g", "stats"),
-    ("→/l", "expand topic"),
-    ("←/h", "collapse topic"),
-];
 
 /// How many rows the sidebar's "Colors" legend has (see
 /// `render_colors_section`). A named constant because two places must
@@ -392,6 +319,13 @@ enum Mode {
     ListPicker {
         selected: usize,
         rows: Vec<ListRow>,
+    },
+
+    /// The `?` Help popup is open, listing every key. `scroll` is how many
+    /// lines it is scrolled down (for short terminals). Its keys are handled
+    /// in `help.rs`.
+    Help {
+        scroll: u16,
     },
 
     /// The `g` Stats screen is open. `stats` is the snapshot taken when it
@@ -672,7 +606,7 @@ fn list_scope(lists: &FeedLists, sources: &[ConfiguredSource]) -> Scope {
 /// to fetch it without restarting. An empty topic shows "No articles yet",
 /// and `r` on it fetches that topic's sources.
 ///
-/// `extend` adds each configured topic, then `sort` + `dedup` (which
+/// `extend` adds each configured topic, then `sort_names` + `dedup` (which
 /// removes *adjacent* duplicates, hence sorting first) keep the list
 /// alphabetical with no repeats, matching `Storage::topics`'s own order.
 fn list_topics(
@@ -684,10 +618,30 @@ fn list_topics(
     let mut topics = storage.topics(scope)?;
     if !lists.is_single() {
         topics.extend(sources.iter().map(|source| source.topic().to_string()));
-        topics.sort();
-        topics.dedup();
     }
+    // Always re-sort here, even with one list: the database sorts by raw
+    // bytes (every capital letter before any lowercase one), but the
+    // sidebar wants a plain A-Z order that ignores case.
+    sort_names(&mut topics);
+    topics.dedup();
     Ok(topics)
+}
+
+/// Sorts `names` A-Z ignoring upper/lower case, so "gaming" comes before
+/// "Linux" instead of after it (a plain `sort()` puts every capital letter
+/// before every lowercase one). Names that differ only by case fall back to
+/// a plain comparison, which keeps equal names next to each other so a
+/// following `dedup()` (which only removes *adjacent* repeats) works.
+///
+/// `names` is `&mut`: the caller's `Vec` is reordered in place.
+fn sort_names(names: &mut [String]) {
+    // `sort_by` takes a closure that compares two items. `then` only runs
+    // its second comparison when the first says they're equal.
+    names.sort_by(|a, b| {
+        a.to_lowercase()
+            .cmp(&b.to_lowercase())
+            .then_with(|| a.cmp(b))
+    });
 }
 
 /// The `f` picker's rows, one per feed list in `lists.toml` order: name,
@@ -739,9 +693,9 @@ fn list_picker_rows(
 /// (`sources.toml`'s "exactly one topic per source" rule -- see
 /// ARCHITECTURE.md's Configuration section), built once from the
 /// `ConfiguredSource` list `main` already loaded at startup. Source names
-/// within a topic keep `sources.toml`'s own order (the order they appear
-/// in the file / the order `sources` iterates in), not re-sorted -- there's
-/// no natural reason to alphabetize them over just matching the config.
+/// within a topic are sorted A-Z ignoring case (`sort_names`), so the
+/// sidebar is easy to scan. This only changes what the sidebar shows;
+/// `sources.toml` itself keeps whatever order the person wrote.
 fn group_sources_by_topic(sources: &[ConfiguredSource]) -> HashMap<String, Vec<String>> {
     let mut grouped: HashMap<String, Vec<String>> = HashMap::new();
     for source in sources {
@@ -749,6 +703,11 @@ fn group_sources_by_topic(sources: &[ConfiguredSource]) -> HashMap<String, Vec<S
             .entry(source.topic().to_string())
             .or_default()
             .push(source.name().to_string());
+    }
+    // Sort each topic's feed names A-Z. `values_mut` hands out a mutable
+    // reference to every `Vec` in the map, so each is reordered in place.
+    for names in grouped.values_mut() {
+        sort_names(names);
     }
     grouped
 }
@@ -786,10 +745,12 @@ fn feed_addresses_of(sources: &[ConfiguredSource]) -> FeedAddresses {
 /// switching topics always reflects whatever's actually in the database
 /// for that topic.
 ///
-/// Also owns the sidebar tree's own state: `expanded_topics` (which topics
-/// currently show their nested source rows) and `selected_source` (`Some`
+/// Also owns the sidebar tree's own state: `collapsed_topics` (which topics
+/// the person has folded *shut* with `Left`/`h`; every other topic shows its
+/// nested source rows, so all topics start open and a brand-new one opens
+/// itself) and `selected_source` (`Some`
 /// when the cursor is actually sitting on one of those source rows rather
-/// than the topic row itself). `expanded_topics` is a `HashSet<String>`
+/// than the topic row itself). `collapsed_topics` is a `HashSet<String>`
 /// keyed by topic *name*, not a `Vec<bool>` parallel to `topics` keyed by
 /// *index* -- the `a` add-source flow can insert a brand-new topic into
 /// `topics` and re-sort the whole `Vec` (see the block handling
@@ -883,7 +844,7 @@ fn draw_until_quit(
     // than on every frame.
     let mut feed_list_display =
         crate::paths::abbreviate_home(&feed_lists.lists()[active_list].path, home.as_deref());
-    let mut expanded_topics: HashSet<String> = HashSet::new();
+    let mut collapsed_topics: HashSet<String> = HashSet::new();
     let mut selected_source: Option<String> = None;
 
     // The *committed* search filter, if any -- `Some(query)` once `/` +
@@ -932,7 +893,7 @@ fn draw_until_quit(
                 &fresh_feeds,
                 topics.as_slice(),
                 sources_by_topic,
-                &expanded_topics,
+                &collapsed_topics,
                 selected_topic,
                 selected_source.as_deref(),
                 &articles,
@@ -1027,7 +988,7 @@ fn draw_until_quit(
                             // view shows the switch happened.
                             topic_index = 0;
                             selected_source = None;
-                            expanded_topics.clear();
+                            collapsed_topics.clear();
                             view = View::Topic;
                             search = None;
                             articles = articles_for_view(
@@ -1431,6 +1392,17 @@ fn draw_until_quit(
             continue;
         }
 
+        // While the Help popup is open, its own handler decides what each key
+        // does (scroll or close) and hands back the next mode. `terminal.size()`
+        // gives the screen size so scrolling stops when the last line shows;
+        // the 2 border rows and the banner/footer rows are subtracted.
+        if let Mode::Help { scroll } = mode {
+            let screen_rows = terminal.size()?.height;
+            let visible = screen_rows.saturating_sub(BANNER.len() as u16 + 2 + 2);
+            mode = help::handle_key(key.code, scroll, !feed_lists.is_single(), visible);
+            continue;
+        }
+
         // While the error popup is open, every keypress dismisses it back
         // to `Mode::Normal` -- there's no text to type or field to navigate,
         // so unlike the note/add-source popups this doesn't need to inspect
@@ -1553,7 +1525,7 @@ fn draw_until_quit(
 
                 // `Up`/`Down` move the sidebar cursor through the flattened
                 // topic tree -- every topic row, plus (for whichever topics
-                // are in `expanded_topics`) their nested source rows right
+                // are *not* in `collapsed_topics`) their nested source rows right
                 // underneath, in the same order `render_topics_section`
                 // draws them -- clamping at either end (same as `j`/`k`
                 // above) rather than wrapping. `move_sidebar_selection`
@@ -1572,7 +1544,7 @@ fn draw_until_quit(
                         -1,
                         topics,
                         sources_by_topic,
-                        &expanded_topics,
+                        &collapsed_topics,
                         &mut topic_index,
                         &mut selected_source,
                     );
@@ -1590,7 +1562,7 @@ fn draw_until_quit(
                         1,
                         topics,
                         sources_by_topic,
-                        &expanded_topics,
+                        &collapsed_topics,
                         &mut topic_index,
                         &mut selected_source,
                     );
@@ -1615,10 +1587,10 @@ fn draw_until_quit(
                 // from one of its source rows, so the cursor being on one
                 // makes this a no-op (falls through to `_ => {}` below). A
                 // topic with no configured sources also has nothing to
-                // reveal, so `expanded_topics` is only touched when
-                // `sources_by_topic` actually has a non-empty entry for it
-                // -- otherwise the indicator in `render_topics_section`
-                // would flip to "expanded" over an empty nested list.
+                // reveal, so `collapsed_topics` is only touched when
+                // `sources_by_topic` actually has a non-empty entry for it.
+                // "Expanding" means taking the topic back *out* of
+                // `collapsed_topics` (topics start open).
                 KeyCode::Right | KeyCode::Char('l')
                     if view == View::Topic && selected_source.is_none() && !topics.is_empty() =>
                 {
@@ -1627,21 +1599,22 @@ fn draw_until_quit(
                             .get(topic)
                             .is_some_and(|sources| !sources.is_empty())
                     {
-                        expanded_topics.insert(topic.clone());
+                        collapsed_topics.remove(topic);
                     }
                 }
 
-                // `Left`/`h` collapses the currently selected topic. From a
+                // `Left`/`h` collapses the currently selected topic (adds its name to
+                // `collapsed_topics`). From a
                 // source row, this first jumps the cursor back up to its
                 // parent topic row (clearing `selected_source` and
                 // reloading the unfiltered per-topic article list) rather
                 // than requiring a separate `Up` press first -- the same
                 // "collapse jumps to parent" convention most file-tree UIs
-                // use. From an already-collapsed topic row, removing a name
-                // that was never in `expanded_topics` is a harmless no-op.
+                // use. From an already-collapsed topic row, inserting a name
+                // that is already in the set is a harmless no-op.
                 KeyCode::Left | KeyCode::Char('h') if view == View::Topic && !topics.is_empty() => {
                     if let Some(topic) = topics.get(topic_index) {
-                        expanded_topics.remove(topic);
+                        collapsed_topics.insert(topic.clone());
                     }
                     if selected_source.take().is_some() {
                         articles = load_articles_for_selection(
@@ -2052,6 +2025,9 @@ fn draw_until_quit(
                 // `g` opens the Stats screen (see `stats.rs`). The numbers are
                 // worked out once, here; if that fails the footer says why
                 // instead of the app stopping.
+                // `?` opens the Help popup with every key (see `help.rs`).
+                KeyCode::Char('?') => mode = Mode::Help { scroll: 0 },
+
                 KeyCode::Char('g') => match stats::open(storage, &feed_lists) {
                     Ok(next) => mode = next,
                     Err(err) => notice = Some(format!("Stats failed: {err}")),
@@ -2726,20 +2702,20 @@ enum SidebarRow<'a> {
 
 /// Builds the sidebar's full flattened row order: every topic in `topics`,
 /// each immediately followed by its source rows (in `sources_by_topic`'s
-/// own order -- `sources.toml`'s order, see `group_sources_by_topic`)
-/// whenever that topic's name is present in `expanded_topics`. A topic
+/// own A-Z order, see `group_sources_by_topic`)
+/// unless that topic's name is present in `collapsed_topics`. A topic
 /// with no entry in `sources_by_topic` at all (nothing configured under
 /// it, or its only sources are of a type still unfetchable) simply
-/// contributes no source rows, expanded or not.
+/// contributes no source rows, collapsed or not.
 fn sidebar_rows<'a>(
     topics: &[String],
     sources_by_topic: &'a HashMap<String, Vec<String>>,
-    expanded_topics: &HashSet<String>,
+    collapsed_topics: &HashSet<String>,
 ) -> Vec<SidebarRow<'a>> {
     let mut rows = Vec::new();
     for (index, topic) in topics.iter().enumerate() {
         rows.push(SidebarRow::Topic(index));
-        if expanded_topics.contains(topic)
+        if !collapsed_topics.contains(topic)
             && let Some(sources) = sources_by_topic.get(topic)
         {
             rows.extend(
@@ -2772,11 +2748,11 @@ fn move_sidebar_selection(
     direction: i32,
     topics: &[String],
     sources_by_topic: &HashMap<String, Vec<String>>,
-    expanded_topics: &HashSet<String>,
+    collapsed_topics: &HashSet<String>,
     topic_index: &mut usize,
     selected_source: &mut Option<String>,
 ) {
-    let rows = sidebar_rows(topics, sources_by_topic, expanded_topics);
+    let rows = sidebar_rows(topics, sources_by_topic, collapsed_topics);
     if rows.is_empty() {
         return;
     }
@@ -3103,7 +3079,7 @@ fn handle_add_source_key(
                     Ok(()) => {
                         if !topics.iter().any(|existing| existing == trimmed_topic) {
                             topics.push(trimmed_topic.to_string());
-                            topics.sort();
+                            sort_names(topics);
                         }
                         // Tell the caller which feed was just saved (through
                         // the `&mut` out-parameter), so it can fetch that
@@ -3195,7 +3171,7 @@ fn found_note(found_by: fetchers::discover::FoundBy) -> Option<String> {
 /// based on `view` -- see the note on `selected_topic` in `draw_until_quit`
 /// for why it keeps showing the last topic selection either way.
 ///
-/// `view` (and now the sidebar tree's `sources_by_topic`/`expanded_topics`/
+/// `view` (and now the sidebar tree's `sources_by_topic`/`collapsed_topics`/
 /// `selected_source`) pushes this well past clippy's default 7-argument
 /// threshold for `too_many_arguments`. Bundling these into a params struct
 /// just to quiet the lint would be an abstraction with no other caller and
@@ -3217,7 +3193,7 @@ fn render(
     fresh_feeds: &HashSet<(String, String)>,
     topics: &[String],
     sources_by_topic: &HashMap<String, Vec<String>>,
-    expanded_topics: &HashSet<String>,
+    collapsed_topics: &HashSet<String>,
     selected_topic: Option<&str>,
     selected_source: Option<&str>,
     articles: &[Article],
@@ -3231,8 +3207,8 @@ fn render(
     // The feed list path (home already shown as `~`), drawn at the right
     // of the footer when there's room.
     feed_list: &str,
-    // Whether to list `f` (feed lists) in the sidebar's Keys section: only
-    // when there's more than one list.
+    // Whether the Help popup lists `f` (feed lists): only when there's more
+    // than one list.
     show_list_key: bool,
 ) {
     // Painting a plain background-colored block across the whole frame
@@ -3258,39 +3234,30 @@ fn render(
         .constraints([
             Constraint::Length(BANNER.len() as u16),
             Constraint::Min(0),
-            Constraint::Length(1),
+            // Two rows: key hints on top, status line (notice + feed list
+            // path) underneath. See `render_footer`.
+            Constraint::Length(2),
         ])
         .areas(frame.area());
 
     // Then split that body horizontally into the sidebar and the article
-    // list. A quarter of the width is plenty for topic names, which tend
-    // to be short (`linux-news`, `gaming`, ...) compared to article
-    // titles.
+    // list. Thirty percent of the width: the sidebar now shows every feed
+    // name (indented under its category) all the time, so it gets a little
+    // more room than the old quarter. Longer names are clipped at the edge.
     let [sidebar_area, articles_area] = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(25), Constraint::Percentage(75)])
+        .constraints([Constraint::Percentage(30), Constraint::Percentage(70)])
         .areas(body);
-
-    // The Keys section's rows: the fixed `KEY_HINTS`, plus `f` when there
-    // are several feed lists. `.then_some(x)` is `Some(x)` when the bool is
-    // true and `None` otherwise, and chaining an `Option` adds zero or one
-    // item.
-    let key_hints: Vec<(&str, &str)> = KEY_HINTS
-        .iter()
-        .copied()
-        .chain(show_list_key.then_some(FEED_LIST_KEY_HINT))
-        .collect();
 
     render_banner(frame, theme, banner_area);
     render_sidebar(
         frame,
         theme,
         icons,
-        &key_hints,
         sidebar_area,
         topics,
         sources_by_topic,
-        expanded_topics,
+        collapsed_topics,
         selected_topic,
         selected_source,
         fresh_feeds,
@@ -3374,6 +3341,10 @@ fn render(
     if let Mode::Stats { stats } = mode {
         stats::render(frame, theme, body, stats);
     }
+    // The Help popup (see `help.rs`).
+    if let Mode::Help { scroll } = mode {
+        help::render(frame, theme, body, *scroll, show_list_key);
+    }
     // The Read Later screens (see `read_later.rs`).
     if let Mode::ReadLater { items, selected } = mode {
         read_later::render_list_popup(frame, theme, icons, body, *selected, items);
@@ -3413,26 +3384,26 @@ fn render_banner(frame: &mut Frame, theme: &Theme, area: Rect) {
     frame.render_widget(banner, area);
 }
 
-/// The left pane, three stacked sections top to bottom (`docs/ARCHITECTURE.md`
-/// § 3. TUI): the topic list itself (interactive, sized to fill whatever
-/// space the other two don't need), then the static "Keys" and "Colors"
-/// reference sections. This function takes no `View` -- unlike
-/// `render_articles`, which shows a genuinely different list/title
-/// depending on `View::Topic` vs `View::Saved`, every part of the sidebar
-/// is identical in both: the topic list keeps showing the last topic
-/// selection either way (see the comment on `selected_topic` in
-/// `draw_until_quit`), and the Keys/Colors sections below don't depend on
-/// `View` at all.
+/// The left pane, two stacked sections top to bottom (`docs/ARCHITECTURE.md`
+/// § 3. TUI): the category/feed tree (interactive, sized to fill all the
+/// space the legend doesn't need), then the static "Colors" legend. The old
+/// "Keys" box is gone: the full key list lives in the `?` Help popup and the
+/// everyday keys in the footer, so the feed tree gets the whole column. This
+/// function takes no `View` -- unlike `render_articles`, which shows a
+/// genuinely different list/title depending on `View::Topic` vs
+/// `View::Saved`, every part of the sidebar is identical in both: the topic
+/// list keeps showing the last topic selection either way (see the comment
+/// on `selected_topic` in `draw_until_quit`), and the Colors legend doesn't
+/// depend on `View` at all.
 ///
-/// `Constraint::Length` for the bottom two sections (rather than
-/// `Constraint::Min`/`Percentage`) is what makes them a fixed height
-/// regardless of terminal size -- one row per `KEY_HINTS` entry and
-/// `LEGEND_ROWS` legend rows, plus two border rows apiece, is always
-/// enough content to show in full, so
-/// there's no reason to let them grow. `Constraint::Min(0)` on the topics
-/// list is what then makes *it* absorb every leftover row instead.
+/// `Constraint::Length` for the legend (rather than `Constraint::Min`/
+/// `Percentage`) makes it a fixed height regardless of terminal size --
+/// `LEGEND_ROWS` rows plus two border rows is always enough to show it in
+/// full. `Constraint::Min(0)` on the tree is what then makes *it* absorb
+/// every leftover row. When there are more feeds than rows, the `List`
+/// scrolls to keep the selected row in view.
 ///
-/// The sidebar tree's `sources_by_topic`/`expanded_topics`/
+/// The sidebar tree's `sources_by_topic`/`collapsed_topics`/
 /// `selected_source`, plus `icons`, push this to 9 arguments, past clippy's default
 /// 7-argument threshold -- same reasoning as the `#[allow]` on `render`
 /// itself (its one call site, `render`, already threads these straight
@@ -3443,20 +3414,18 @@ fn render_sidebar(
     frame: &mut Frame,
     theme: &Theme,
     icons: &IconSettings,
-    key_hints: &[(&str, &str)],
     area: Rect,
     topics: &[String],
     sources_by_topic: &HashMap<String, Vec<String>>,
-    expanded_topics: &HashSet<String>,
+    collapsed_topics: &HashSet<String>,
     selected_topic: Option<&str>,
     selected_source: Option<&str>,
     fresh_feeds: &HashSet<(String, String)>,
 ) {
-    let [topics_area, keys_area, colors_area] = Layout::default()
+    let [topics_area, colors_area] = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(0),
-            Constraint::Length(key_hints.len() as u16 + 2),
             Constraint::Length(LEGEND_ROWS as u16 + 2),
         ])
         .areas(area);
@@ -3468,12 +3437,11 @@ fn render_sidebar(
         topics_area,
         topics,
         sources_by_topic,
-        expanded_topics,
+        collapsed_topics,
         selected_topic,
         selected_source,
         fresh_feeds,
     );
-    render_keys_section(frame, theme, keys_area, key_hints);
     render_colors_section(frame, theme, icons, colors_area);
 }
 
@@ -3540,11 +3508,11 @@ fn clear_fresh_feeds(
 /// The sidebar's top section: the expandable topic tree
 /// (`docs/ARCHITECTURE.md`'s "an expandable tree, not a flat list") -- every
 /// topic in `topics`, each prefixed with `Icon::Collapsed` or
-/// `Icon::Expanded` (per `expanded_topics`) when it actually has configured
+/// `Icon::Expanded` (`Expanded` unless the topic is in `collapsed_topics`) when it actually has configured
 /// sources to show, or a blank cell when it doesn't (nothing to expand
 /// into, so no indicator implying otherwise), then the topic's category
-/// icon (`IconSettings::category_glyph`). Whichever topic is in
-/// `expanded_topics` gets its source names -- from `sources_by_topic`,
+/// icon (`IconSettings::category_glyph`). Every topic *not* in
+/// `collapsed_topics` gets its source names -- from `sources_by_topic`,
 /// indented four cells so they line up under the topic name -- inserted
 /// directly beneath it, and the currently selected row (a
 /// topic, per `selected_topic`, or one of its nested sources, per
@@ -3569,7 +3537,7 @@ fn render_topics_section(
     area: Rect,
     topics: &[String],
     sources_by_topic: &HashMap<String, Vec<String>>,
-    expanded_topics: &HashSet<String>,
+    collapsed_topics: &HashSet<String>,
     selected_topic: Option<&str>,
     selected_source: Option<&str>,
     fresh_feeds: &HashSet<(String, String)>,
@@ -3580,7 +3548,7 @@ fn render_topics_section(
         .style(Style::new().bg(theme.background).fg(theme.text_primary))
         .border_style(Style::new().fg(theme.panel_border));
 
-    let rows = sidebar_rows(topics, sources_by_topic, expanded_topics);
+    let rows = sidebar_rows(topics, sources_by_topic, collapsed_topics);
 
     // Built alongside `items` below rather than searched for afterward --
     // each row already knows whether it's the selected one as it's turned
@@ -3607,7 +3575,7 @@ fn render_topics_section(
                 // topic's icon and name start in the same column.
                 let indicator = if !has_sources {
                     " "
-                } else if expanded_topics.contains(topic) {
+                } else if !collapsed_topics.contains(topic) {
                     icons.glyph(Icon::Expanded)
                 } else {
                     icons.glyph(Icon::Collapsed)
@@ -3665,38 +3633,6 @@ fn render_topics_section(
     );
 
     frame.render_stateful_widget(list, area, &mut state);
-}
-
-/// The sidebar's middle section: a static, non-interactive readout of
-/// `KEY_HINTS`, one `"<key> <action>"` line per row -- see `KEY_HINTS`'s own
-/// doc comment for why this exists. A plain `Paragraph`, not a `List`: there's
-/// nothing here to select or scroll, just fixed reference text, so a `List`'s
-/// selection/highlight machinery would be pure overhead with no behavior
-/// behind it.
-fn render_keys_section(frame: &mut Frame, theme: &Theme, area: Rect, key_hints: &[(&str, &str)]) {
-    let block = Block::new()
-        .title(" Keys ")
-        .borders(Borders::ALL)
-        .style(Style::new().bg(theme.background).fg(theme.text_primary))
-        .border_style(Style::new().fg(theme.panel_border));
-
-    let lines: Vec<Line> = key_hints
-        .iter()
-        .map(|(key, action)| {
-            Line::from(vec![
-                Span::styled(
-                    *key,
-                    Style::new()
-                        .fg(theme.accent_selected)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(format!(" {action}"), Style::new().fg(theme.text_primary)),
-            ])
-        })
-        .collect();
-
-    let paragraph = Paragraph::new(lines).block(block);
-    frame.render_widget(paragraph, area);
 }
 
 /// The sidebar's bottom section: each article state's icon, in that state's
@@ -4095,13 +4031,14 @@ fn truncate_preview(text: &str, max_chars: usize) -> String {
 /// `View::History` share `SAVED_HINTS` (see its own doc comment for why:
 /// both disable the same keys for the same reason).
 ///
-/// `notice` (a one-shot message from `draw_until_quit`) replaces the hint
-/// line when it's `Some`, except during the first-run icon check, whose
-/// `y`/`n` hint is the only way to learn how to answer it.
+/// The footer is two rows. The upper row is always the hint line for the
+/// current mode. The lower row is the status line: `notice` (a one-shot
+/// message from `draw_until_quit`, such as the refresh result) on the left,
+/// empty when there is none, so a message never hides the hints.
 ///
 /// `feed_list` (the active feed list's path, home as `~`) is drawn
-/// right-aligned on the same row, as "Feed List: <path>" (or the file icon
-/// in Nerd mode), in `text_muted`. The hint or notice on the left always
+/// right-aligned on the status row, as "Feed List: <path>" (or the file icon
+/// in Nerd mode), in `text_muted`. The notice on the left always
 /// keeps priority: the path only gets the cells left over after it plus
 /// `FOOTER_GAP`, is shortened from the left to fit (see `fit_feed_list`),
 /// and is hidden when even the file name won't fit, or when the terminal
@@ -4121,14 +4058,22 @@ fn render_footer(
     notice: Option<&str>,
     feed_list: &str,
 ) {
-    // The left side: the notice if there is one (except during the icon
-    // check, see above), otherwise the hint line for the current mode.
-    let left = match notice {
-        Some(notice) if !matches!(mode, Mode::IconCheck) => notice,
-        _ => footer_hints(mode, view),
-    };
-    let footer = Paragraph::new(left).style(Style::new().bg(theme.background).fg(theme.text_muted));
-    frame.render_widget(footer, area);
+    // Split the two footer rows apart: hints on top, status underneath.
+    let [hint_area, status_area] = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Length(1)])
+        .areas(area);
+
+    // The upper row: the hint line for the current mode.
+    let hints = Paragraph::new(footer_hints(mode, view))
+        .style(Style::new().bg(theme.background).fg(theme.text_muted));
+    frame.render_widget(hints, hint_area);
+
+    // The lower row, left side: the notice, or nothing. `unwrap_or("")`
+    // turns "no notice" into an empty string.
+    let left = notice.unwrap_or("");
+    let status = Paragraph::new(left).style(Style::new().bg(theme.background).fg(theme.text_muted));
+    frame.render_widget(status, status_area);
 
     // The right side, only on a wide-enough terminal. `cell_width` counts
     // display cells, not characters, so wide characters in the hint line
@@ -4137,7 +4082,7 @@ fn render_footer(
         return;
     }
     let used = cell_width(left) as u16 + FOOTER_GAP;
-    let available = area.width.saturating_sub(used) as usize;
+    let available = status_area.width.saturating_sub(used) as usize;
     if let Some(text) = fit_feed_list(
         icons.feed_list_label(),
         feed_list,
@@ -4150,8 +4095,8 @@ fn render_footer(
         // `width <= available < area.width`, so this can't underflow.
         let width = cell_width(&text) as u16;
         let strip = Rect {
-            x: area.x + area.width - width,
-            y: area.y,
+            x: status_area.x + status_area.width - width,
+            y: status_area.y,
             width,
             height: 1,
         };
@@ -4260,6 +4205,7 @@ fn footer_hints(mode: &Mode, view: View) -> &'static str {
         Mode::ThemePicker { .. } => THEME_PICKER_HINTS,
         Mode::ListPicker { .. } => LIST_PICKER_HINTS,
         Mode::Stats { .. } => stats::HINTS,
+        Mode::Help { .. } => help::HINTS,
         Mode::ReadLater { .. } => read_later::LIST_HINTS,
         Mode::PasteLink { .. } => read_later::PASTE_HINTS,
         Mode::LinkChoice { .. } => read_later::CHOICE_HINTS,
@@ -4879,6 +4825,37 @@ fn centered_rect(area: Rect, width_percent: u16, height: u16) -> Rect {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Names sort A-Z ignoring case, so a lowercase name is not pushed
+    /// behind every capitalized one, and names that differ only by case
+    /// stay next to each other (so `dedup` can remove exact repeats).
+    #[test]
+    fn sort_names_ignores_case_and_keeps_repeats_adjacent() {
+        // `to_string` turns each `&str` literal into an owned `String`.
+        let mut names: Vec<String> = ["Zed", "apple", "Banana", "apple", "Apple"]
+            .iter()
+            .map(|name| name.to_string())
+            .collect();
+        sort_names(&mut names);
+        assert_eq!(names, ["Apple", "apple", "apple", "Banana", "Zed"]);
+        names.dedup();
+        assert_eq!(names, ["Apple", "apple", "Banana", "Zed"]);
+    }
+
+    /// Topics start open: a topic is hidden only when it is in the
+    /// collapsed set, and its feeds then disappear from the row list.
+    #[test]
+    fn topics_are_open_unless_collapsed() {
+        let topics = vec!["linux".to_string()];
+        let mut sources = HashMap::new();
+        sources.insert("linux".to_string(), vec!["LWN".to_string()]);
+        let mut collapsed = HashSet::new();
+        // One topic row plus one feed row while open.
+        assert_eq!(sidebar_rows(&topics, &sources, &collapsed).len(), 2);
+        // Collapsing it leaves just the topic row.
+        collapsed.insert("linux".to_string());
+        assert_eq!(sidebar_rows(&topics, &sources, &collapsed).len(), 1);
+    }
 
     /// Text shorter than the limit comes back untouched, with no `…`
     /// appended -- there was nothing to cut off.
