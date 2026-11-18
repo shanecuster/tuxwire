@@ -423,6 +423,14 @@ accent_breaking = "#ed8796"  # red
 accent_selected = "#8aadf4"  # blue
 ```
 
+A twelfth slot, **`accent_new`** (a blue, different from `accent_selected`),
+colors the titles of new articles and the new-feed marker. It was added after
+this file was first written, so an old `theme.toml` without it takes the
+base theme's value (an old-style file therefore matches Macchiato in the other
+eleven slots). The built-ins' values are checked in `core/src/theme.rs` to
+contrast with the background and to differ clearly (ΔE ≥ 20) from the other
+state colors.
+
 **Palette history:** Catppuccin Macchiato was the original (and only)
 palette, chosen for being colorful without being chaotic. It is now one of
 the eight built-ins, and Everforest is the default. All built-ins are dark.

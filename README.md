@@ -414,7 +414,9 @@ accent_unread = "#f5a97f"
 - Anything in `[theme]` replaces that one color in *every* built-in. The
   slots are `background`, `panel_border`, `text_primary`, `text_muted`,
   `text_dim`, `accent_unread`, `accent_read`, `accent_skipped`,
-  `accent_saved`, `accent_breaking`, and `accent_selected`, each `"#rrggbb"`.
+  `accent_saved`, `accent_breaking`, `accent_selected`, and `accent_new`
+  (the blue for new articles, added later; a `theme.toml` without it just
+  uses the base theme's), each `"#rrggbb"`.
 - **Upgrading:** a `theme.toml` from before the picker (a full `[theme]`
   table, no `base`) still works and looks exactly the same. Because it sets
   all 11 colors, though, picking a theme won't visibly change anything; the

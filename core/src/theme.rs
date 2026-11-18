@@ -76,7 +76,7 @@ impl Rgb {
 /// Every field is a ready-to-use [`Rgb`], never a hex string. Hex parsing
 /// happens once, at load time, so no draw call can fail on a bad colour.
 ///
-/// `Clone, Copy` because the whole struct is 11 small colours. The theme
+/// `Clone, Copy` because the whole struct is 12 small colours. The theme
 /// picker copies a built-in's colours and then applies overrides on top,
 /// which is simplest when a palette is copied by value. `PartialEq` lets
 /// tests compare whole palettes, and `Debug` lets them print one.
@@ -106,6 +106,10 @@ pub struct Palette {
     /// The selected row's highlight background, key labels, focused fields,
     /// and popup borders.
     pub accent_selected: Rgb,
+    /// New articles (fetched by a refresh since the app opened and still
+    /// unread): their titles and the new-feed marker. A blue, so it stands
+    /// apart from unread (orange in most themes).
+    pub accent_new: Rgb,
 }
 
 /// One entry in the built-in theme table: a display name plus a full set
@@ -175,6 +179,7 @@ pub const BUILTIN_THEMES: &[BuiltinTheme] = &[
             accent_saved: rgb(0xdbbc7f),
             accent_breaking: rgb(0xe67e80),
             accent_selected: rgb(0x7fbbb3),
+            accent_new: rgb(0x5aa9ff),
         },
     },
     // https://draculatheme.com/contribute
@@ -192,6 +197,7 @@ pub const BUILTIN_THEMES: &[BuiltinTheme] = &[
             accent_saved: rgb(0xf1fa8c),
             accent_breaking: rgb(0xff5555),
             accent_selected: rgb(0xff79c6),
+            accent_new: rgb(0x6d9cff),
         },
     },
     // https://github.com/morhetz/gruvbox (dark, medium)
@@ -209,6 +215,7 @@ pub const BUILTIN_THEMES: &[BuiltinTheme] = &[
             accent_saved: rgb(0xfabd2f),
             accent_breaking: rgb(0xfb4934),
             accent_selected: rgb(0x83a598),
+            accent_new: rgb(0x5d9cec),
         },
     },
     // https://catppuccin.com/palette (Mocha flavor)
@@ -226,6 +233,7 @@ pub const BUILTIN_THEMES: &[BuiltinTheme] = &[
             accent_saved: rgb(0xf9e2af),
             accent_breaking: rgb(0xf38ba8),
             accent_selected: rgb(0x89b4fa),
+            accent_new: rgb(0x3f8cf0),
         },
     },
     // https://www.nordtheme.com/docs/colors-and-palettes
@@ -249,6 +257,7 @@ pub const BUILTIN_THEMES: &[BuiltinTheme] = &[
             accent_saved: rgb(0xebcb8b),
             accent_breaking: rgb(0xbf616a),
             accent_selected: rgb(0x88c0d0),
+            accent_new: rgb(0x6f9bff),
         },
     },
     // https://ethanschoonover.com/solarized/ (dark)
@@ -266,6 +275,7 @@ pub const BUILTIN_THEMES: &[BuiltinTheme] = &[
             accent_saved: rgb(0xb58900),
             accent_breaking: rgb(0xdc322f),
             accent_selected: rgb(0x268bd2),
+            accent_new: rgb(0x7fd0ff),
         },
     },
     // https://github.com/folke/tokyonight.nvim (night)
@@ -283,6 +293,7 @@ pub const BUILTIN_THEMES: &[BuiltinTheme] = &[
             accent_saved: rgb(0xe0af68),
             accent_breaking: rgb(0xf7768e),
             accent_selected: rgb(0x7aa2f7),
+            accent_new: rgb(0x2f7bf0),
         },
     },
     // https://catppuccin.com/palette (Macchiato flavor). tuxwire's original
@@ -302,6 +313,7 @@ pub const BUILTIN_THEMES: &[BuiltinTheme] = &[
             accent_saved: rgb(0xeed49f),
             accent_breaking: rgb(0xed8796),
             accent_selected: rgb(0x8aadf4),
+            accent_new: rgb(0x3f8cf0),
         },
     },
 ];
@@ -519,6 +531,7 @@ mod tests {
                 ("accent_saved", t.accent_saved, 3.0),
                 ("accent_breaking", t.accent_breaking, 3.0),
                 ("accent_selected", t.accent_selected, 3.0),
+                ("accent_new", t.accent_new, 3.0),
                 ("panel_border", t.panel_border, 1.25),
                 ("text_dim", t.text_dim, 1.5),
             ];
@@ -547,6 +560,7 @@ mod tests {
                 ("skipped", t.accent_skipped),
                 ("saved", t.accent_saved),
                 ("selected", t.accent_selected),
+                ("new", t.accent_new),
             ];
             // Every pair once: `i` walks the list, `j` only the entries
             // after it, so (a, b) is checked but (b, a) isn't repeated.

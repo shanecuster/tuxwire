@@ -35,10 +35,10 @@ pub use tuxwire_core::theme::{builtin_index, default_index, picker_order};
 /// no draw call can fail on a bad color.
 ///
 /// This is the terminal-side twin of the core crate's [`Palette`]: the same
-/// eleven slots, but as ratatui `Color`s instead of plain RGB bytes. Convert
+/// twelve slots, but as ratatui `Color`s instead of plain RGB bytes. Convert
 /// with `Theme::from(palette)`.
 ///
-/// `Clone, Copy` because the whole struct is 11 small `Color` values. The
+/// `Clone, Copy` because the whole struct is 12 small `Color` values. The
 /// theme picker copies a built-in's colors and then applies overrides on
 /// top, which is simplest when `Theme` is copied by value. `PartialEq` lets
 /// tests compare whole themes, and `Debug` lets them print one.
@@ -69,6 +69,10 @@ pub struct Theme {
     /// The selected row's highlight background, key labels, focused fields,
     /// and popup borders.
     pub accent_selected: Color,
+    /// New articles (fetched by a refresh since the app opened and still
+    /// unread): their titles and the new-feed marker. A blue, so they stand
+    /// apart from unread.
+    pub accent_new: Color,
 }
 
 /// Converts a plain core [`Rgb`] into ratatui's 24-bit `Color::Rgb`.
@@ -97,6 +101,7 @@ impl From<Palette> for Theme {
             accent_saved: to_color(p.accent_saved),
             accent_breaking: to_color(p.accent_breaking),
             accent_selected: to_color(p.accent_selected),
+            accent_new: to_color(p.accent_new),
         }
     }
 }
@@ -161,6 +166,8 @@ struct ThemeOverrides {
     accent_breaking: Option<Color>,
     /// Override for [`Theme::accent_selected`].
     accent_selected: Option<Color>,
+    /// Override for [`Theme::accent_new`].
+    accent_new: Option<Color>,
 }
 
 /// The shape `theme.toml` deserializes into. Everything is optional, so
@@ -206,6 +213,8 @@ struct RawThemeColors {
     accent_breaking: Option<String>,
     /// `accent_selected = "#rrggbb"`.
     accent_selected: Option<String>,
+    /// `accent_new = "#rrggbb"`.
+    accent_new: Option<String>,
 }
 
 /// The default `theme.toml`, compiled into the binary with `include_str!`
@@ -282,6 +291,7 @@ impl ThemeSettings {
             accent_saved: parse_slot(t.accent_saved, "theme.accent_saved")?,
             accent_breaking: parse_slot(t.accent_breaking, "theme.accent_breaking")?,
             accent_selected: parse_slot(t.accent_selected, "theme.accent_selected")?,
+            accent_new: parse_slot(t.accent_new, "theme.accent_new")?,
         };
 
         Ok(ThemeSettings { base, overrides })
@@ -308,6 +318,7 @@ impl ThemeSettings {
         theme.accent_saved = o.accent_saved.unwrap_or(theme.accent_saved);
         theme.accent_breaking = o.accent_breaking.unwrap_or(theme.accent_breaking);
         theme.accent_selected = o.accent_selected.unwrap_or(theme.accent_selected);
+        theme.accent_new = o.accent_new.unwrap_or(theme.accent_new);
         theme
     }
 
@@ -316,7 +327,7 @@ impl ThemeSettings {
         BUILTIN_THEMES[self.base].name
     }
 
-    /// How many slots the user's `[theme]` table overrides (0–11). The
+    /// How many slots the user's `[theme]` table overrides (0–12). The
     /// picker shows this, because overrides apply on top of *every*
     /// built-in, and a full old-style `[theme]` table makes the picker
     /// look like it does nothing.
@@ -337,6 +348,7 @@ impl ThemeSettings {
             o.accent_saved.is_some(),
             o.accent_breaking.is_some(),
             o.accent_selected.is_some(),
+            o.accent_new.is_some(),
         ]
         .iter()
         .filter(|set| **set)
@@ -516,11 +528,17 @@ accent_selected = "#8aadf4"
         assert_eq!(theme.background, Color::Rgb(0x24, 0x27, 0x3a));
         assert_eq!(theme.accent_selected, Color::Rgb(0x8a, 0xad, 0xf4));
 
-        // ...and those are exactly the Catppuccin Macchiato built-in, so a
-        // user can delete their 11 override lines, pick Macchiato, and see
-        // no difference at all.
+        // ...and those are exactly the Catppuccin Macchiato built-in, apart
+        // from `accent_new`: that slot did not exist when such a file was
+        // written, so the file cannot set it and it comes from the base
+        // theme instead (the default, Everforest). The expected value below
+        // takes that one slot from the resolved theme and compares the other
+        // eleven, so a user can delete their 11 override lines, pick
+        // Macchiato, and see no difference except the new blue.
         let macchiato = builtin_index("Catppuccin Macchiato").unwrap();
-        assert_eq!(theme, Theme::from(BUILTIN_THEMES[macchiato].colors));
+        let mut expected = Theme::from(BUILTIN_THEMES[macchiato].colors);
+        expected.accent_new = theme.accent_new;
+        assert_eq!(theme, expected);
     }
 
     /// A partial `[theme]` table overrides only the slots it sets, and those
