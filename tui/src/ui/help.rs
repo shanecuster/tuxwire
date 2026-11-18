@@ -36,10 +36,9 @@ const SECTIONS: [Section; 5] = [
         "Moving around",
         &[
             ("j/k", "move in the article list"),
-            ("↑/↓", "move in the sidebar"),
-            ("Tab", "jump to the next category"),
-            ("→/l", "open a category (show its feeds)"),
-            ("←/h", "close a category"),
+            ("↑/↓", "move through the feed list"),
+            ("Tab", "filter feeds by category (all → each → all)"),
+            ("S-Tab", "same, going backwards"),
             ("Enter", "open the article"),
             ("Esc", "go back"),
             ("q", "quit"),
@@ -69,7 +68,7 @@ const SECTIONS: [Section; 5] = [
     (
         "Feeds",
         &[
-            ("r", "refresh this category or feed"),
+            ("r", "refresh the selected feed, category or all"),
             ("N", "refresh everything"),
             ("a", "add a feed"),
             ("c", "sync (optional)"),

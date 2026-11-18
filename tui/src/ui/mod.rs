@@ -27,16 +27,17 @@
 //! the note popup is open, and now `View`, which tracks whether that list
 //! is a topic's articles or the saved-articles view.
 //!
-//! The topic sidebar is now an expandable tree, not a flat list of topics
-//! (`docs/ARCHITECTURE.md`'s "Topics" bullet): `Right`/`l` expands the
-//! selected topic, revealing its individual sources -- names pulled from
+//! The sidebar is a flat feed list, laid out like the Android app's home
+//! screen (`docs/ARCHITECTURE.md`'s "Left pane" bullet): an "All feeds" row,
+//! then every feed A-Z, each drawn as its name, its unread count and its
+//! `[category]` (`render_feeds_section`). Feed names come from
 //! `sources_by_topic`, grouped once from the `ConfiguredSource` list `main`
-//! already loaded, no new `sources.toml` read or DB query -- indented
-//! underneath it; `Left`/`h` collapses it back down. `Up`/`Down` walk that
-//! same flattened topic-then-sources order (`sidebar_rows`,
-//! `move_sidebar_selection`); landing on a source row filters the article
-//! list to just that source (`Storage::articles_by_topic_and_source`, via
-//! `load_articles_for_selection`) instead of the whole topic.
+//! already loaded, no new `sources.toml` read. `Up`/`Down` walk the rows
+//! (`sidebar_rows`, `move_sidebar_selection`); `Tab`/`Shift+Tab` cycle a
+//! category filter (`next_category_filter`) that keeps only one category's
+//! feeds and turns the first row into "All [category]". The row the cursor
+//! is on decides the article list: every article, a category's, or one
+//! feed's (`load_articles_for_selection`, `selection_topic`).
 //!
 //! Notes retrieval & search (`docs/ARCHITECTURE.md`'s "Notes Retrieval &
 //! Search"): `View::Saved`'s meta line now shows `saved_at` (falling back
@@ -66,7 +67,7 @@
 //! restores the original.
 //!
 //! Icons (`crate::icons`): every symbol this module draws comes from an
-//! `IconSettings` by name (`Icon::Unread`, `Icon::Collapsed`, a topic's
+//! `IconSettings` by name (`Icon::Unread`, `Icon::New`, a topic's
 //! category icon, ...), never a hard-coded glyph. Article rows get a state
 //! icon (`article_state_icon`), topic rows get a category icon, the
 //! "Colors" legend shows each state's icon, and refresh/error/offline/new
@@ -90,7 +91,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use tuxwire_core::fetch_report::FetchReport;
 use tuxwire_core::models::Article;
-use tuxwire_core::storage::{ReadLaterItem, Scope, Storage};
+use tuxwire_core::storage::{FeedUnread, ReadLaterItem, Scope, Storage};
 
 mod help;
 mod read_later;
@@ -162,10 +163,10 @@ const ICON_CHECK_HINTS: &str =
 ///
 /// This is the short list of everyday keys. The full list (including rarer
 /// ones like `i` for icon mode and `t` for the theme) is in the `?` Help
-/// popup (`help.rs`), which is why `? help` comes first: if the terminal is
-/// too narrow for the whole line, the end is cut off, and the way to the
-/// full list must never be the part that disappears.
-const KEYBIND_HINTS: &str = "? help · Enter open · s save · x close · n note · r refresh · a add · p paste · / search · S saved · c sync · q quit";
+/// popup (`help.rs`), which is why `? help` and `q quit` come first: if the
+/// terminal is too narrow for the whole line, the end is cut off, and the way
+/// to the full list (and the way out) must never be the part that disappears.
+const KEYBIND_HINTS: &str = "? help · q quit · Tab category · Enter open · s save · x close · n note · r refresh · a add · p paste · / search · S saved · c sync";
 
 /// The footer hint line shown while `View::Saved` or `View::History` is
 /// showing (and no popup is open) -- both non-`Topic` views share this one
@@ -534,9 +535,9 @@ enum ConfirmField {
 /// `sources: &[ConfiguredSource]` is `main`'s own already-loaded,
 /// already-fetched-from list (the same one it built via
 /// `fetchers::configured_sources()` before ever opening the TUI) -- passed
-/// in and grouped by topic once, right here, so the sidebar's expandable
-/// topic tree (see `SidebarRow`/`sidebar_rows`) can list each topic's
-/// sources with no new `sources.toml` read and no new database query.
+/// in and grouped by topic once, right here, so the sidebar's feed list
+/// (see `SidebarRow`/`sidebar_rows`) can list every feed with no new
+/// `sources.toml` read and no new database query.
 pub fn run(
     storage: &Storage,
     sources: &[ConfiguredSource],
@@ -551,7 +552,7 @@ pub fn run(
     // What the topic views cover: everything with one feed list (exactly
     // as before lists existed), or just the active list's feeds.
     let scope = list_scope(&session.feed_lists, sources);
-    let mut topics = list_topics(storage, &scope, &session.feed_lists, sources)?;
+    let mut topics = list_topics(storage, &scope, sources)?;
     // `mut`: switching lists (and adding a source to a list) replaces
     // this with the new list's sources.
     let mut sources_by_topic = group_sources_by_topic(sources);
@@ -596,29 +597,26 @@ fn list_scope(lists: &FeedLists, sources: &[ConfiguredSource]) -> Scope {
     }
 }
 
-/// The sidebar's topics for the active list.
+/// The sidebar's topics for the active list: every topic that has articles
+/// (`Storage::topics`) plus every topic the list's sources are configured
+/// with, even ones with no articles yet.
 ///
-/// With one feed list this is just `Storage::topics` over everything,
-/// exactly as before lists existed. With several, it also includes every
-/// topic the list's sources are configured with, even ones with no articles
-/// yet. Otherwise a list that has never been fetched would have an empty
-/// sidebar, and since `r` refreshes the selected topic, there'd be no way
-/// to fetch it without restarting. An empty topic shows "No articles yet",
-/// and `r` on it fetches that topic's sources.
+/// The configured ones must be included because the feed list shows every
+/// configured feed (like the Android home screen). Otherwise a feed that has
+/// never fetched anything, or keeps failing, would be missing and could not
+/// be selected to refresh. A feed with no articles shows "0 unread" and an
+/// empty article list.
 ///
 /// `extend` adds each configured topic, then `sort_names` + `dedup` (which
 /// removes *adjacent* duplicates, hence sorting first) keep the list
-/// alphabetical with no repeats, matching `Storage::topics`'s own order.
+/// alphabetical (ignoring case) with no repeats.
 fn list_topics(
     storage: &Storage,
     scope: &Scope,
-    lists: &FeedLists,
     sources: &[ConfiguredSource],
 ) -> anyhow::Result<Vec<String>> {
     let mut topics = storage.topics(scope)?;
-    if !lists.is_single() {
-        topics.extend(sources.iter().map(|source| source.topic().to_string()));
-    }
+    topics.extend(sources.iter().map(|source| source.topic().to_string()));
     // Always re-sort here, even with one list: the database sorts by raw
     // bytes (every capital letter before any lowercase one), but the
     // sidebar wants a plain A-Z order that ignores case.
@@ -745,18 +743,18 @@ fn feed_addresses_of(sources: &[ConfiguredSource]) -> FeedAddresses {
 /// switching topics always reflects whatever's actually in the database
 /// for that topic.
 ///
-/// Also owns the sidebar tree's own state: `collapsed_topics` (which topics
-/// the person has folded *shut* with `Left`/`h`; every other topic shows its
-/// nested source rows, so all topics start open and a brand-new one opens
-/// itself) and `selected_source` (`Some`
-/// when the cursor is actually sitting on one of those source rows rather
-/// than the topic row itself). `collapsed_topics` is a `HashSet<String>`
-/// keyed by topic *name*, not a `Vec<bool>` parallel to `topics` keyed by
-/// *index* -- the `a` add-source flow can insert a brand-new topic into
-/// `topics` and re-sort the whole `Vec` (see the block handling
-/// `Mode::AddSource` finishing, below), which would silently scramble any
-/// index-based parallel `Vec`; a name-keyed set stays correct no matter how
-/// `topics` gets reordered.
+/// Also owns the sidebar's selection state, which is three values:
+/// `category_filter` (`None` lists every feed; `Some(name)` only that
+/// category's), `selected_source` (`Some(feed name)` when the cursor is on a
+/// feed row, `None` when it is on the first "All" row) and `topic_index`
+/// (which topic that feed, or the filtered category, belongs to). Together
+/// they say which of three article lists is showing: every article ("All
+/// feeds": no filter and no feed), one category's ("All [category]"), or one
+/// feed's. `category_filter` is a topic *name*, not an index -- the `a`
+/// add-source flow can insert a brand-new topic into `topics` and re-sort
+/// the whole `Vec` (see the block handling `Mode::AddSource` finishing,
+/// below), which would silently invalidate an index; a name stays correct no
+/// matter how `topics` gets reordered.
 fn draw_until_quit(
     terminal: &mut ratatui::DefaultTerminal,
     storage: &Storage,
@@ -774,10 +772,9 @@ fn draw_until_quit(
 ) -> anyhow::Result<()> {
     let mut topic_index: usize = 0;
     let mut article_index: usize = 0;
-    let mut articles: Vec<Article> = match topics.first() {
-        Some(topic) => storage.articles_by_topic(&scope, topic)?,
-        None => Vec::new(),
-    };
+    // The sidebar opens on its "All feeds" row, so the list starts as every
+    // article in scope, whatever its topic.
+    let mut articles: Vec<Article> = storage.articles_in_scope(&scope)?;
     // Open on the first-run icon check if `icons.toml` doesn't exist yet,
     // otherwise straight into ordinary browsing.
     let mut mode = if session.show_icon_check {
@@ -844,7 +841,11 @@ fn draw_until_quit(
     // than on every frame.
     let mut feed_list_display =
         crate::paths::abbreviate_home(&feed_lists.lists()[active_list].path, home.as_deref());
-    let mut collapsed_topics: HashSet<String> = HashSet::new();
+    // The sidebar's category filter: `None` lists every feed, `Some(name)`
+    // only that category's. `Tab` / `Shift+Tab` cycle it. Kept by name, not
+    // index, so it survives the topic list being re-sorted. While it is
+    // `Some`, `topic_index` always points at that category.
+    let mut category_filter: Option<String> = None;
     let mut selected_source: Option<String> = None;
 
     // The *committed* search filter, if any -- `Some(query)` once `/` +
@@ -884,6 +885,14 @@ fn draw_until_quit(
             Some(article_index)
         };
 
+        // Every feed's unread count for the sidebar, from one grouped query.
+        // A database error just means the counts show as 0 for this frame
+        // (`unwrap_or_default` gives an empty list on `Err`).
+        let unread_by_feed = feed_unread_map(
+            &storage.unread_by_feed(&scope).unwrap_or_default(),
+            &*feed_addresses,
+        );
+
         terminal.draw(|frame| {
             render(
                 frame,
@@ -891,9 +900,10 @@ fn draw_until_quit(
                 &icons,
                 &new_article_ids,
                 &fresh_feeds,
+                &unread_by_feed,
                 topics.as_slice(),
                 sources_by_topic,
-                &collapsed_topics,
+                category_filter.as_deref(),
                 selected_topic,
                 selected_source.as_deref(),
                 &articles,
@@ -919,7 +929,12 @@ fn draw_until_quit(
                 &*feed_addresses,
                 &scope,
                 &feed_lists.lists()[active_list].path,
-                &topics[topic_index],
+                selection_topic(
+                    topics,
+                    topic_index,
+                    selected_source.as_deref(),
+                    category_filter.as_deref(),
+                ),
                 selected_source.as_deref(),
             )?;
             articles = refreshed;
@@ -980,7 +995,7 @@ fn draw_until_quit(
                             *sources_by_topic = group_sources_by_topic(&loaded);
                             *feed_addresses = feed_addresses_of(&loaded);
                             scope = list_scope(&feed_lists, &loaded);
-                            *topics = list_topics(storage, &scope, &feed_lists, &loaded)?;
+                            *topics = list_topics(storage, &scope, &loaded)?;
 
                             // A different list means a different sidebar, so
                             // start from its first topic. Saved, History, and
@@ -988,7 +1003,7 @@ fn draw_until_quit(
                             // view shows the switch happened.
                             topic_index = 0;
                             selected_source = None;
-                            collapsed_topics.clear();
+                            category_filter = None;
                             view = View::Topic;
                             search = None;
                             articles = articles_for_view(
@@ -999,6 +1014,7 @@ fn draw_until_quit(
                                 topics,
                                 topic_index,
                                 None,
+                                category_filter.as_deref(),
                             )?;
                             article_index = 0;
 
@@ -1090,6 +1106,7 @@ fn draw_until_quit(
                     topics,
                     topic_index,
                     selected_source.as_deref(),
+                    category_filter.as_deref(),
                 )?;
                 article_index = article_index.min(articles.len().saturating_sub(1));
             }
@@ -1238,30 +1255,26 @@ fn draw_until_quit(
             // right away instead of staying on the "no articles yet"
             // placeholder against a still-empty topic list.
             if matches!(mode, Mode::Normal) {
-                // With several lists, re-read the active list's file so a
-                // newly added source's feed joins `scope`. Otherwise its
-                // articles wouldn't appear in this list after the next `r`.
-                // With a single list, `scope` is `All` and the sidebar tree
-                // stays as it was, exactly as before lists existed.
-                if !feed_lists.is_single() {
-                    match fetchers::configured_sources_at(&feed_lists.lists()[active_list].path) {
-                        Ok(sources) => {
-                            *sources_by_topic = group_sources_by_topic(&sources);
-                            *feed_addresses = feed_addresses_of(&sources);
-                            scope = list_scope(&feed_lists, &sources);
-                        }
-                        Err(err) => {
-                            notice = Some(format!(
-                                "{} Couldn't re-read the feed list: {err:#}",
-                                icons.glyph(Icon::Error)
-                            ));
-                        }
+                // Re-read the active list's file so a newly added source
+                // joins the sidebar's feed list (and, with several lists, its
+                // `scope`, otherwise its articles wouldn't appear in this
+                // list after the next `r`). `reread` keeps the sources for
+                // rebuilding the topic list below.
+                let mut reread: Option<Vec<ConfiguredSource>> = None;
+                match fetchers::configured_sources_at(&feed_lists.lists()[active_list].path) {
+                    Ok(sources) => {
+                        *sources_by_topic = group_sources_by_topic(&sources);
+                        *feed_addresses = feed_addresses_of(&sources);
+                        scope = list_scope(&feed_lists, &sources);
+                        reread = Some(sources);
+                    }
+                    Err(err) => {
+                        notice = Some(format!(
+                            "{} Couldn't re-read the feed list: {err:#}",
+                            icons.glyph(Icon::Error)
+                        ));
                     }
                 }
-
-                topic_index = previously_selected_topic
-                    .and_then(|name| topics.iter().position(|t| *t == name))
-                    .unwrap_or(0);
 
                 // A source was just saved: fetch its articles now, so the person
                 // is not left looking at a feed with nothing in it and thinking
@@ -1285,16 +1298,38 @@ fn draw_until_quit(
                     }
                 }
 
-                // The add-source flow has nothing to do with a source-row
+                // Rebuild the topic list now that the file was re-read and the
+                // new feed's first articles are stored, so a brand-new category
+                // appears at once. If the file couldn't be re-read, keep the
+                // list `handle_add_source_key` already updated.
+                if let Some(sources) = &reread {
+                    *topics = list_topics(storage, &scope, sources)?;
+                }
+
+                // Topics may have been re-sorted or added, so find the
+                // selection again by *name*: the category filter's if there is
+                // one, otherwise the previously selected topic's.
+                let wanted = category_filter.clone().or(previously_selected_topic);
+                topic_index = wanted
+                    .and_then(|name| topics.iter().position(|t| *t == name))
+                    .unwrap_or(0);
+
+                // The add-source flow has nothing to do with a feed-row
                 // selection that may have been active before it opened --
-                // always land back on the plain topic-level list rather
-                // than trying to re-derive whether that source selection
+                // always land back on the "All" row (of the filter, if any)
+                // rather than trying to re-derive whether that feed selection
                 // still makes sense.
                 selected_source = None;
-                articles = match topics.get(topic_index) {
-                    Some(topic) => storage.articles_by_topic(&scope, topic)?,
-                    None => Vec::new(),
-                };
+                articles = articles_for_view(
+                    storage,
+                    &*feed_addresses,
+                    &scope,
+                    view,
+                    topics,
+                    topic_index,
+                    None,
+                    category_filter.as_deref(),
+                )?;
                 article_index = article_index.min(articles.len().saturating_sub(1));
             }
             continue;
@@ -1437,6 +1472,7 @@ fn draw_until_quit(
                         topics,
                         topic_index,
                         selected_source.as_deref(),
+                        category_filter.as_deref(),
                     )?;
                     article_index = 0;
                 }
@@ -1460,6 +1496,7 @@ fn draw_until_quit(
                             topics,
                             topic_index,
                             selected_source.as_deref(),
+                            category_filter.as_deref(),
                         )?;
                     } else {
                         search = Some(trimmed.to_string());
@@ -1508,146 +1545,70 @@ fn draw_until_quit(
                 // `0 - 1` would otherwise panic).
                 KeyCode::Char('j') if !articles.is_empty() => {
                     article_index = (article_index + 1).min(articles.len() - 1);
-                    clear_fresh_feeds(
+                    clear_fresh_for_selection(
                         &mut fresh_feeds,
-                        topics.get(topic_index),
+                        topics,
+                        topic_index,
                         selected_source.as_deref(),
+                        category_filter.as_deref(),
                     );
                 }
                 KeyCode::Char('k') if !articles.is_empty() => {
                     article_index = article_index.saturating_sub(1);
-                    clear_fresh_feeds(
+                    clear_fresh_for_selection(
                         &mut fresh_feeds,
-                        topics.get(topic_index),
+                        topics,
+                        topic_index,
                         selected_source.as_deref(),
+                        category_filter.as_deref(),
                     );
                 }
 
-                // `Up`/`Down` move the sidebar cursor through the flattened
-                // topic tree -- every topic row, plus (for whichever topics
-                // are *not* in `collapsed_topics`) their nested source rows right
-                // underneath, in the same order `render_topics_section`
-                // draws them -- clamping at either end (same as `j`/`k`
+                // `Up`/`Down` move the sidebar cursor through the feed list --
+                // the "All" row first, then every feed A-Z (see
+                // `sidebar_rows`) -- clamping at either end (same as `j`/`k`
                 // above) rather than wrapping. `move_sidebar_selection`
                 // rewrites `topic_index`/`selected_source` in place to
-                // wherever the cursor lands; `load_articles_for_selection`
-                // then reloads `articles` from *that*, which is either a
-                // plain per-topic query (landed on a topic row) or the
-                // same query with a source-name filter added (landed on
-                // one of that topic's source rows) -- see its own doc
-                // comment. Guarded to `View::Topic` only -- there's no
-                // sidebar cursor to move while `View::Saved` is showing,
-                // and reloading `articles` here would silently clobber the
-                // saved list with a topic's instead.
-                KeyCode::Up if view == View::Topic && !topics.is_empty() => {
+                // wherever the cursor lands, and `articles_for_view` then
+                // reloads `articles` from *that*: every article ("All"), a
+                // category's, or one feed's. Guarded to `View::Topic` only --
+                // there's no sidebar cursor to move while `View::Saved` is
+                // showing, and reloading `articles` here would silently
+                // clobber the saved list with a feed's instead.
+                KeyCode::Up | KeyCode::Down if view == View::Topic && !topics.is_empty() => {
+                    // `-1` moves up, `1` moves down.
+                    let direction = if key.code == KeyCode::Up { -1 } else { 1 };
                     move_sidebar_selection(
-                        -1,
+                        direction,
                         topics,
                         sources_by_topic,
-                        &collapsed_topics,
+                        category_filter.as_deref(),
                         &mut topic_index,
                         &mut selected_source,
                     );
-                    articles = load_articles_for_selection(
+                    articles = articles_for_view(
                         storage,
                         &*feed_addresses,
                         &scope,
-                        &topics[topic_index],
-                        selected_source.as_deref(),
-                    )?;
-                    article_index = 0;
-                }
-                KeyCode::Down if view == View::Topic && !topics.is_empty() => {
-                    move_sidebar_selection(
-                        1,
+                        view,
                         topics,
-                        sources_by_topic,
-                        &collapsed_topics,
-                        &mut topic_index,
-                        &mut selected_source,
-                    );
-                    articles = load_articles_for_selection(
-                        storage,
-                        &*feed_addresses,
-                        &scope,
-                        &topics[topic_index],
+                        topic_index,
                         selected_source.as_deref(),
+                        category_filter.as_deref(),
                     )?;
                     article_index = 0;
                 }
 
-                // `Right`/`l` expands the currently selected topic, per
-                // ARCHITECTURE.md's sidebar spec -- revealing its nested
-                // source rows (pulled from `sources_by_topic`, already
-                // grouped from `sources.toml` at startup -- see
-                // `group_sources_by_topic`, no new TOML read or DB query
-                // needed here) for `Up`/`Down` to walk into next. Guarded
-                // to `selected_source.is_none()`: this only makes sense
-                // from a *topic* row -- there's no deeper level to expand
-                // from one of its source rows, so the cursor being on one
-                // makes this a no-op (falls through to `_ => {}` below). A
-                // topic with no configured sources also has nothing to
-                // reveal, so `collapsed_topics` is only touched when
-                // `sources_by_topic` actually has a non-empty entry for it.
-                // "Expanding" means taking the topic back *out* of
-                // `collapsed_topics` (topics start open).
-                KeyCode::Right | KeyCode::Char('l')
-                    if view == View::Topic && selected_source.is_none() && !topics.is_empty() =>
-                {
-                    if let Some(topic) = topics.get(topic_index)
-                        && sources_by_topic
-                            .get(topic)
-                            .is_some_and(|sources| !sources.is_empty())
-                    {
-                        collapsed_topics.remove(topic);
-                    }
-                }
-
-                // `Left`/`h` collapses the currently selected topic (adds its name to
-                // `collapsed_topics`). From a
-                // source row, this first jumps the cursor back up to its
-                // parent topic row (clearing `selected_source` and
-                // reloading the unfiltered per-topic article list) rather
-                // than requiring a separate `Up` press first -- the same
-                // "collapse jumps to parent" convention most file-tree UIs
-                // use. From an already-collapsed topic row, inserting a name
-                // that is already in the set is a harmless no-op.
-                KeyCode::Left | KeyCode::Char('h') if view == View::Topic && !topics.is_empty() => {
-                    if let Some(topic) = topics.get(topic_index) {
-                        collapsed_topics.insert(topic.clone());
-                    }
-                    if selected_source.take().is_some() {
-                        articles = load_articles_for_selection(
-                            storage,
-                            &*feed_addresses,
-                            &scope,
-                            &topics[topic_index],
-                            None,
-                        )?;
-                        article_index = 0;
-                    }
-                }
-
-                // `Tab` does double duty depending on `view`: in `View::Topic`
-                // it's just another way to move the topic sidebar forward
-                // (same as `Down` above, clamping at the last topic rather
-                // than wrapping); in `View::Saved` or `View::History` it
-                // instead exits back to the topic view, per
-                // ARCHITECTURE.md's "pressing S again (or Esc, or Tab)
+                // `Tab` and `Shift+Tab` (`BackTab`) do double duty depending
+                // on `view`. In `View::Topic` they cycle the sidebar's
+                // category filter: all feeds, then each category A-Z, then
+                // back to all feeds (`next_category_filter`), landing on the
+                // "All" row of the new filter. In `View::Saved` or
+                // `View::History` they instead exit back to the topic view,
+                // per ARCHITECTURE.md's "pressing S again (or Esc, or Tab)
                 // returns to the normal topic view" (the same holds for
-                // `y`/History). Splitting this into its own arm (rather
-                // than folding it into the `Down` arm above the way it
-                // used to be) is what makes that second behavior possible
-                // -- the two keys now genuinely do different things
-                // depending on `view`.
-                //
-                // Deliberately a flat "next topic row" jump, not a walk
-                // through `Up`/`Down`'s expanded-tree order -- `Tab` is the
-                // quick "next topic" shortcut, so it always lands on a bare
-                // topic row (clearing any active `selected_source`) rather
-                // than stepping into whichever topic's source rows happen
-                // to be expanded.
-                KeyCode::Tab => {
+                // `y`/History).
+                KeyCode::Tab | KeyCode::BackTab => {
                     if view != View::Topic {
                         view = View::Topic;
                         selected_source = None;
@@ -1660,12 +1621,35 @@ fn draw_until_quit(
                             topics,
                             topic_index,
                             None,
+                            category_filter.as_deref(),
                         )?;
                         article_index = 0;
                     } else if !topics.is_empty() {
-                        topic_index = (topic_index + 1).min(topics.len() - 1);
+                        // `Tab` goes forward, `Shift+Tab` backward.
+                        category_filter = next_category_filter(
+                            topics,
+                            category_filter.as_deref(),
+                            key.code == KeyCode::Tab,
+                        );
+                        // Back on the "All" row of whatever the filter is now.
                         selected_source = None;
-                        articles = storage.articles_by_topic(&scope, &topics[topic_index])?;
+                        // With a filter, `topic_index` must point at that
+                        // category so "All [category]" loads its articles.
+                        if let Some(name) = &category_filter
+                            && let Some(index) = topics.iter().position(|topic| topic == name)
+                        {
+                            topic_index = index;
+                        }
+                        articles = articles_for_view(
+                            storage,
+                            &*feed_addresses,
+                            &scope,
+                            view,
+                            topics,
+                            topic_index,
+                            None,
+                            category_filter.as_deref(),
+                        )?;
                         article_index = 0;
                     }
                 }
@@ -1687,6 +1671,7 @@ fn draw_until_quit(
                         topics,
                         topic_index,
                         None,
+                        category_filter.as_deref(),
                     )?;
                     article_index = 0;
                 }
@@ -1712,10 +1697,12 @@ fn draw_until_quit(
                 // has actually opened; the `Mode::Error` branch leaves
                 // `read` untouched, since nothing was.
                 KeyCode::Enter => {
-                    clear_fresh_feeds(
+                    clear_fresh_for_selection(
                         &mut fresh_feeds,
-                        topics.get(topic_index),
+                        topics,
+                        topic_index,
                         selected_source.as_deref(),
+                        category_filter.as_deref(),
                     );
                     if let Some(article) = articles.get_mut(article_index) {
                         if w3m_available() {
@@ -1829,6 +1816,27 @@ fn draw_until_quit(
                 // article across every topic", and would otherwise silently
                 // swap the saved view out for a single topic's list without
                 // actually leaving `View::Saved`.
+                //
+                // What `r` refreshes depends on the sidebar row: one feed row
+                // refreshes just that feed (handy for a feed that fails and
+                // needs another try), "All [category]" refreshes that whole
+                // category, and the "All feeds" row refreshes everything,
+                // exactly like `N`.
+                KeyCode::Char('r')
+                    if view == View::Topic
+                        && !topics.is_empty()
+                        && category_filter.is_none()
+                        && selected_source.is_none() =>
+                {
+                    // Same as `N`: say what is about to happen and let the
+                    // check after the next frame run the download.
+                    let feeds: usize = sources_by_topic.values().map(Vec::len).sum();
+                    notice = Some(format!(
+                        "{} Refreshing {feeds} feed(s)...",
+                        icons.glyph(Icon::Refresh)
+                    ));
+                    refresh_all_pending = true;
+                }
                 KeyCode::Char('r') if view == View::Topic && !topics.is_empty() => {
                     // `refresh_topic` returns two things as a tuple, and
                     // `let (a, b) = ...` unpacks it into two variables.
@@ -1909,6 +1917,7 @@ fn draw_until_quit(
                         topics,
                         topic_index,
                         None,
+                        category_filter.as_deref(),
                     )?;
                     article_index = 0;
                 }
@@ -1945,6 +1954,7 @@ fn draw_until_quit(
                         topics,
                         topic_index,
                         None,
+                        category_filter.as_deref(),
                     )?;
                     article_index = 0;
                 }
@@ -2136,6 +2146,7 @@ fn draw_until_quit(
                         topics,
                         topic_index,
                         selected_source.as_deref(),
+                        category_filter.as_deref(),
                     )?;
                     article_index = article_index.min(articles.len().saturating_sub(1));
                 }
@@ -2353,7 +2364,7 @@ fn refresh_all(
     addresses: &FeedAddresses,
     scope: &Scope,
     list_path: &Path,
-    topic: &str,
+    topic: Option<&str>,
     source: Option<&str>,
 ) -> anyhow::Result<(Vec<Article>, FetchReport)> {
     let mut report = FetchReport::default();
@@ -2386,8 +2397,9 @@ fn refresh_all(
     ))
 }
 
-/// Re-fetches every source in `fetchers::configured_sources` filed under
-/// `topic`, inserts whatever comes back into `storage` (idempotently, on
+/// Re-fetches the sources in `fetchers::configured_sources` filed under
+/// `topic` (just the one named `source`, when a feed row is selected),
+/// inserts whatever comes back into `storage` (idempotently, on
 /// `url` -- see `Storage::insert_article`), and returns the reloaded
 /// article list for `topic` -- the `r` keybind. `source`, when `Some`, is
 /// forwarded straight to `load_articles_for_selection` so a refresh
@@ -2426,9 +2438,13 @@ fn refresh_topic(
 ) -> anyhow::Result<(Vec<Article>, FetchReport)> {
     let mut report = FetchReport::default();
 
+    // `source`, when `Some`, narrows the refresh to that one feed (a feed row
+    // was selected); otherwise every feed in the topic is fetched.
+    let wanted_feed = source;
     for configured_source in fetchers::configured_sources_at(list_path)?
         .into_iter()
         .filter(|source| source.topic() == topic)
+        .filter(|source| wanted_feed.is_none_or(|name| source.name() == name))
     {
         // `fetch_one` (shared with the startup fetch and the Android app)
         // does the network call and returns the answer as a `FetchOutcome`.
@@ -2451,7 +2467,7 @@ fn refresh_topic(
     }
 
     Ok((
-        load_articles_for_selection(storage, addresses, scope, topic, source)?,
+        load_articles_for_selection(storage, addresses, scope, Some(topic), source)?,
         report,
     ))
 }
@@ -2607,26 +2623,31 @@ fn save_icon_mode_notice(icons: &IconSettings) -> String {
 }
 
 /// Loads the article list a sidebar row's selection actually implies:
-/// every article in `topic` (`Storage::articles_by_topic`) when `source`
-/// is `None` -- the topic row itself was selected -- or, when `source` is
-/// `Some`, the same topic further filtered down to just that one source's
-/// articles (`Storage::articles_by_topic_and_source`) -- one of that
-/// topic's nested source rows was selected instead. Both are the *same*
-/// topic-scoped query under the hood (per ARCHITECTURE.md: "articles in
-/// X's topic, further filtered by source name" -- not a new query path),
-/// so every call site that needs to reload `articles` from the current
-/// sidebar selection goes through this one function instead of
-/// re-deriving the `if source.is_some() { ... } else { ... }` split itself.
 ///
-/// `scope` limits both queries to the active feed list's feeds when there
-/// are several lists (see `storage::Scope`).
+/// - `topic` is `None`: the "All feeds" row, every article in `scope`
+///   whatever its topic (`Storage::articles_in_scope`);
+/// - `topic` is `Some` and `source` is `None`: the "All [topic]" row, every
+///   article in that topic (`Storage::articles_by_topic`);
+/// - both are `Some`: one feed row, that topic's articles further filtered
+///   to just that feed (`Storage::articles_by_feed_or_name`).
+///
+/// Every call site that needs to reload `articles` from the current sidebar
+/// selection goes through this one function instead of re-deriving the
+/// three-way split itself.
+///
+/// `scope` limits all three queries to the active feed list's feeds when
+/// there are several lists (see `storage::Scope`).
 fn load_articles_for_selection(
     storage: &Storage,
     addresses: &FeedAddresses,
     scope: &Scope,
-    topic: &str,
+    topic: Option<&str>,
     source: Option<&str>,
 ) -> anyhow::Result<Vec<Article>> {
+    // No topic at all means "All feeds". (A feed row always has a topic.)
+    let Some(topic) = topic else {
+        return storage.articles_in_scope(scope);
+    };
     match source {
         // A feed row is found by the feed's address when `sources.toml` gives
         // one, so renaming the feed does not strand its older articles (see
@@ -2645,21 +2666,27 @@ fn load_articles_for_selection(
 /// Loads whichever article list `view`'s *own* ordinary (unfiltered by
 /// search) list actually is -- `storage.saved_articles()` for
 /// `View::Saved`, `storage.all_articles()` for `View::History`, or the
-/// current sidebar selection's topic-scoped list (via
-/// `load_articles_for_selection`, same as any other topic-row/source-row
-/// change) for `View::Topic`.
+/// current sidebar selection's list (via `load_articles_for_selection`,
+/// same as any other row change) for `View::Topic`.
 ///
 /// This is the one place every "switch to/return to this view" call site
 /// goes through -- the `S`/`y`/`Tab`/`Esc` handlers in `draw_until_quit`,
 /// the initial load in `draw_until_quit` itself, and the `Mode::Searching`
-/// handlers' "restore the full list" path (`Esc`, or confirming an empty
-/// query) -- instead of each one re-deriving its own `match view { ... }`.
-/// Before this existed, every one of those call sites duplicated that
-/// three-way split; a fourth view (or a future fifth) would otherwise mean
-/// hunting down and updating every one of them individually.
+/// handlers' "restore the full list" path -- instead of each one
+/// re-deriving its own `match view { ... }`.
+///
+/// `category_filter` is the sidebar's category filter (`None` = all
+/// feeds); together with `selected_source` it decides which of the three
+/// sidebar selections applies (see `selection_topic`).
 ///
 /// `scope` only applies to `View::Topic`: Saved and History always cover
 /// every feed list.
+///
+/// Eight parameters, one past clippy's default limit of seven: the sidebar
+/// selection is three values (`topic_index`, `selected_source`,
+/// `category_filter`) that every caller already holds as loose variables, so
+/// a params struct would only move the same eight values one layer.
+#[allow(clippy::too_many_arguments)]
 fn articles_for_view(
     storage: &Storage,
     addresses: &FeedAddresses,
@@ -2668,100 +2695,156 @@ fn articles_for_view(
     topics: &[String],
     topic_index: usize,
     selected_source: Option<&str>,
+    category_filter: Option<&str>,
 ) -> anyhow::Result<Vec<Article>> {
     match view {
         View::Saved => storage.saved_articles(),
         View::History => storage.all_articles(),
-        View::Topic => match topics.get(topic_index) {
-            Some(topic) => {
-                load_articles_for_selection(storage, addresses, scope, topic, selected_source)
-            }
-            None => Ok(Vec::new()),
-        },
+        View::Topic => {
+            let topic = selection_topic(topics, topic_index, selected_source, category_filter);
+            load_articles_for_selection(storage, addresses, scope, topic, selected_source)
+        }
     }
 }
 
-/// One row of the sidebar's topic tree, flattened into a single ordered
-/// list -- what `Up`/`Down` step through (`move_sidebar_selection`) and
-/// what `render_topics_section` actually draws, both built from the same
-/// `sidebar_rows` function below so the two can never disagree about
-/// what's on screen versus what the cursor lands on.
+/// The topic the sidebar selection means for loading articles, or `None`
+/// for the "All feeds" row.
 ///
-/// Holds indices/borrowed names rather than owned topic/source `String`s:
-/// this is rebuilt fresh on every keypress and every frame (`topics` and
-/// `sources_by_topic` are both small -- a handful of topics, a source list
-/// per topic -- so there's no real cost to that, and it means this can
-/// never itself go stale the way a cached copy could).
-enum SidebarRow<'a> {
-    /// Index into `topics`.
-    Topic(usize),
-    /// `(index into topics, that topic's source name)` -- the source name
-    /// is borrowed out of `sources_by_topic`, hence the lifetime.
-    Source(usize, &'a str),
+/// "All feeds" is the cursor on the first row while no category filter is
+/// set: `category_filter` is `None` and `selected_source` is `None`. In
+/// every other case the selection lives inside one topic, `topics[topic_index]`
+/// (the filtered category, or the topic of the selected feed).
+///
+/// The returned `&str` borrows from `topics`, which is why it carries the
+/// lifetime `'a`: it can't outlive that slice.
+fn selection_topic<'a>(
+    topics: &'a [String],
+    topic_index: usize,
+    selected_source: Option<&str>,
+    category_filter: Option<&str>,
+) -> Option<&'a str> {
+    if category_filter.is_none() && selected_source.is_none() {
+        None
+    } else {
+        topics.get(topic_index).map(String::as_str)
+    }
 }
 
-/// Builds the sidebar's full flattened row order: every topic in `topics`,
-/// each immediately followed by its source rows (in `sources_by_topic`'s
-/// own A-Z order, see `group_sources_by_topic`)
-/// unless that topic's name is present in `collapsed_topics`. A topic
-/// with no entry in `sources_by_topic` at all (nothing configured under
-/// it, or its only sources are of a type still unfetchable) simply
-/// contributes no source rows, collapsed or not.
+/// Clears the new-feed markers for what the article list is showing, the
+/// same moment `clear_fresh_feeds` always did (the person acts in the list).
+/// On the "All feeds" row the list shows every feed together, so every
+/// marker is cleared; otherwise it defers to `clear_fresh_feeds`.
+fn clear_fresh_for_selection(
+    fresh: &mut HashSet<(String, String)>,
+    topics: &[String],
+    topic_index: usize,
+    selected_source: Option<&str>,
+    category_filter: Option<&str>,
+) {
+    if category_filter.is_none() && selected_source.is_none() {
+        fresh.clear();
+    } else {
+        clear_fresh_feeds(fresh, topics.get(topic_index), selected_source);
+    }
+}
+
+/// One row of the sidebar's feed list, in the order it is drawn and the
+/// order `Up`/`Down` step through (`move_sidebar_selection`). Both are built
+/// from `sidebar_rows` so what is on screen and what the cursor lands on can
+/// never disagree.
+///
+/// Holds an index and a borrowed name rather than owned `String`s: the list
+/// is rebuilt on every keypress and every frame, which is cheap for a few
+/// dozen feeds and means it can never go stale.
+enum SidebarRow<'a> {
+    /// The first row: "All feeds", or "All [category]" while a category
+    /// filter is set. Shows every article in that set.
+    All,
+    /// `(index into topics, the feed's name)`; the name is borrowed out of
+    /// `sources_by_topic`, hence the lifetime.
+    Feed(usize, &'a str),
+}
+
+/// Builds the sidebar's rows: the `All` row, then every feed sorted A-Z
+/// ignoring case (ties broken by category name, then exact spelling), like
+/// the Android home screen. With a `category_filter`, only that category's
+/// feeds are included.
+///
+/// Feeds come from `sources_by_topic`, grouped from the config, so a feed
+/// that has never fetched an article still appears. A category in
+/// `topics` with no configured feeds simply contributes none.
 fn sidebar_rows<'a>(
     topics: &[String],
     sources_by_topic: &'a HashMap<String, Vec<String>>,
-    collapsed_topics: &HashSet<String>,
+    category_filter: Option<&str>,
 ) -> Vec<SidebarRow<'a>> {
-    let mut rows = Vec::new();
+    // Collect `(topic index, feed name)` for every feed that passes the filter.
+    let mut feeds: Vec<(usize, &str)> = Vec::new();
     for (index, topic) in topics.iter().enumerate() {
-        rows.push(SidebarRow::Topic(index));
-        if !collapsed_topics.contains(topic)
-            && let Some(sources) = sources_by_topic.get(topic)
-        {
-            rows.extend(
-                sources
-                    .iter()
-                    .map(|name| SidebarRow::Source(index, name.as_str())),
-            );
+        // `is_some_and` is false for `None`, so with no filter nothing is skipped.
+        if category_filter.is_some_and(|wanted| wanted != topic) {
+            continue;
+        }
+        if let Some(names) = sources_by_topic.get(topic) {
+            feeds.extend(names.iter().map(|name| (index, name.as_str())));
         }
     }
+
+    // Sort by name ignoring case. `then_with` only runs the next comparison
+    // when the previous one says "equal", so the same name in two categories
+    // stays in a fixed order.
+    feeds.sort_by(|(topic_a, name_a), (topic_b, name_b)| {
+        name_a
+            .to_lowercase()
+            .cmp(&name_b.to_lowercase())
+            .then_with(|| {
+                topics[*topic_a]
+                    .to_lowercase()
+                    .cmp(&topics[*topic_b].to_lowercase())
+            })
+            .then_with(|| name_a.cmp(name_b))
+    });
+
+    let mut rows = vec![SidebarRow::All];
+    rows.extend(
+        feeds
+            .into_iter()
+            .map(|(index, name)| SidebarRow::Feed(index, name)),
+    );
     rows
 }
 
 /// Moves the sidebar cursor one row up (`direction < 0`) or down
-/// (`direction > 0`) through `sidebar_rows`' flattened order, clamping at
-/// either end rather than wrapping -- same convention as every other list
-/// in this sidebar (`j`/`k` on the article list, the old flat `Up`/`Down`
-/// topic movement this replaces). `topic_index`/`selected_source` are the
-/// two pieces of state that together *are* "which row is selected" (see
-/// the doc comment on `draw_until_quit`'s own copies of them); this
-/// function is the one place that decides where they point next, rewriting
-/// both in place rather than handing back a new pair for the caller to
-/// unpack and reassign itself.
+/// (`direction > 0`) through `sidebar_rows`, clamping at either end rather
+/// than wrapping -- same convention as every other list here.
+/// `topic_index`/`selected_source` are the two pieces of state that together
+/// *are* "which row is selected"; this is the one place that decides where
+/// they point next, rewriting both in place.
 ///
-/// Locates the current row by re-deriving it from `topic_index`/
-/// `selected_source` (rather than tracking a raw row index as the primary
-/// state) specifically so expanding/collapsing a topic elsewhere -- which
-/// changes how many rows exist above/below the cursor -- can never leave a
-/// stale numeric position pointing at the wrong row afterward.
+/// The current row is re-derived from `topic_index`/`selected_source`
+/// (rather than tracking a raw row number) so changing the category filter
+/// elsewhere, which changes how many rows exist, can never leave a stale
+/// position pointing at the wrong row.
+///
+/// Landing on the `All` row clears `selected_source`; with a category filter
+/// it also points `topic_index` back at that category, so "All [linux]" loads
+/// linux's articles.
 fn move_sidebar_selection(
     direction: i32,
     topics: &[String],
     sources_by_topic: &HashMap<String, Vec<String>>,
-    collapsed_topics: &HashSet<String>,
+    category_filter: Option<&str>,
     topic_index: &mut usize,
     selected_source: &mut Option<String>,
 ) {
-    let rows = sidebar_rows(topics, sources_by_topic, collapsed_topics);
-    if rows.is_empty() {
-        return;
-    }
+    let rows = sidebar_rows(topics, sources_by_topic, category_filter);
 
+    // Which row is the cursor on now? No feed selected means the `All` row.
     let current = rows
         .iter()
         .position(|row| match row {
-            SidebarRow::Topic(index) => *index == *topic_index && selected_source.is_none(),
-            SidebarRow::Source(index, name) => {
+            SidebarRow::All => selected_source.is_none(),
+            SidebarRow::Feed(index, name) => {
                 *index == *topic_index && selected_source.as_deref() == Some(*name)
             }
         })
@@ -2774,15 +2857,74 @@ fn move_sidebar_selection(
     };
 
     match rows[next] {
-        SidebarRow::Topic(index) => {
-            *topic_index = index;
+        SidebarRow::All => {
             *selected_source = None;
+            // With a filter, "All [category]" belongs to that category.
+            if let Some(wanted) = category_filter
+                && let Some(index) = topics.iter().position(|topic| topic == wanted)
+            {
+                *topic_index = index;
+            }
         }
-        SidebarRow::Source(index, name) => {
+        SidebarRow::Feed(index, name) => {
             *topic_index = index;
             *selected_source = Some(name.to_string());
         }
     }
+}
+
+/// The next category filter when `Tab` (`forward`) or `Shift+Tab` is pressed:
+/// the cycle is `All feeds`, then each category A-Z, then back to `All feeds`.
+/// `None` stands for "no filter" and sits at the start of the cycle.
+fn next_category_filter(topics: &[String], current: Option<&str>, forward: bool) -> Option<String> {
+    // Position in the cycle: 0 is "no filter", 1.. are the categories.
+    let position = match current {
+        None => 0,
+        Some(name) => topics
+            .iter()
+            .position(|topic| topic == name)
+            .map_or(0, |index| index + 1),
+    };
+    let length = topics.len() + 1;
+    let next = if forward {
+        (position + 1) % length
+    } else {
+        (position + length - 1) % length
+    };
+    // 0 means back to "no filter"; otherwise the category at `next - 1`.
+    next.checked_sub(1).map(|index| topics[index].clone())
+}
+
+/// How many unread articles each configured feed has, keyed like the
+/// sidebar: `(category, feed name)`. Built from the grouped counts
+/// `Storage::unread_by_feed` returns.
+///
+/// A count is matched to its feed by address first (so a renamed feed keeps
+/// its count), and otherwise by the category and name stored on the
+/// articles (older articles have no address).
+fn feed_unread_map(
+    counts: &[FeedUnread],
+    addresses: &FeedAddresses,
+) -> HashMap<(String, String), u32> {
+    // Flip `(topic, name) -> address` around into `address -> (topic, name)`.
+    let by_address: HashMap<&str, &(String, String)> = addresses
+        .iter()
+        .map(|(key, address)| (address.as_str(), key))
+        .collect();
+
+    let mut map: HashMap<(String, String), u32> = HashMap::new();
+    for count in counts {
+        // Prefer the configured feed this address belongs to; fall back to
+        // the names stored on the articles themselves.
+        let key = count
+            .feed_url
+            .as_deref()
+            .and_then(|url| by_address.get(url))
+            .map(|key| (*key).clone())
+            .unwrap_or_else(|| (count.topic.clone(), count.source.clone()));
+        *map.entry(key).or_insert(0) += count.unread;
+    }
+    map
 }
 
 /// Advances the `a` add-source flow by one keypress: `step` is the state
@@ -3171,7 +3313,7 @@ fn found_note(found_by: fetchers::discover::FoundBy) -> Option<String> {
 /// based on `view` -- see the note on `selected_topic` in `draw_until_quit`
 /// for why it keeps showing the last topic selection either way.
 ///
-/// `view` (and now the sidebar tree's `sources_by_topic`/`collapsed_topics`/
+/// `view` (and now the sidebar's `sources_by_topic`/`category_filter`/
 /// `selected_source`) pushes this well past clippy's default 7-argument
 /// threshold for `too_many_arguments`. Bundling these into a params struct
 /// just to quiet the lint would be an abstraction with no other caller and
@@ -3191,9 +3333,13 @@ fn render(
     // Feeds with new articles not yet looked at; the sidebar marks them. See
     // `draw_until_quit`'s `fresh_feeds`.
     fresh_feeds: &HashSet<(String, String)>,
+    // How many unread articles each feed has, keyed `(category, feed name)`;
+    // shown under each feed's name in the sidebar.
+    unread_by_feed: &HashMap<(String, String), u32>,
     topics: &[String],
     sources_by_topic: &HashMap<String, Vec<String>>,
-    collapsed_topics: &HashSet<String>,
+    // The sidebar's category filter (`None` = all feeds).
+    category_filter: Option<&str>,
     selected_topic: Option<&str>,
     selected_source: Option<&str>,
     articles: &[Article],
@@ -3257,11 +3403,19 @@ fn render(
         sidebar_area,
         topics,
         sources_by_topic,
-        collapsed_topics,
+        category_filter,
         selected_topic,
         selected_source,
         fresh_feeds,
+        unread_by_feed,
     );
+    // The article pane's title names what is listed: "all feeds" on the
+    // "All feeds" row, otherwise the topic of the selection.
+    let articles_label = if category_filter.is_none() && selected_source.is_none() {
+        Some("all feeds")
+    } else {
+        selected_topic
+    };
     // What (if anything) `render_articles` should show about search --
     // computed once, here, rather than each of its three call sites (there
     // is only one, but the same reasoning as `articles_for_view` applies:
@@ -3285,7 +3439,7 @@ fn render(
         icons,
         new_article_ids,
         articles_area,
-        selected_topic,
+        articles_label,
         articles,
         selected_article,
         view,
@@ -3385,30 +3539,22 @@ fn render_banner(frame: &mut Frame, theme: &Theme, area: Rect) {
 }
 
 /// The left pane, two stacked sections top to bottom (`docs/ARCHITECTURE.md`
-/// § 3. TUI): the category/feed tree (interactive, sized to fill all the
-/// space the legend doesn't need), then the static "Colors" legend. The old
-/// "Keys" box is gone: the full key list lives in the `?` Help popup and the
-/// everyday keys in the footer, so the feed tree gets the whole column. This
-/// function takes no `View` -- unlike `render_articles`, which shows a
-/// genuinely different list/title depending on `View::Topic` vs
-/// `View::Saved`, every part of the sidebar is identical in both: the topic
-/// list keeps showing the last topic selection either way (see the comment
-/// on `selected_topic` in `draw_until_quit`), and the Colors legend doesn't
-/// depend on `View` at all.
+/// § 3. TUI): the feed list (interactive, sized to fill all the space the
+/// legend doesn't need), then the static "Colors" legend. There is no
+/// permanent Keys box: the full key list lives in the `?` Help popup and the
+/// everyday keys in the footer, so the feeds get the whole column. This
+/// function takes no `View`: the sidebar is identical in every view (the
+/// list keeps showing the last selection, see the comment on
+/// `selected_topic` in `draw_until_quit`).
 ///
-/// `Constraint::Length` for the legend (rather than `Constraint::Min`/
-/// `Percentage`) makes it a fixed height regardless of terminal size --
-/// `LEGEND_ROWS` rows plus two border rows is always enough to show it in
-/// full. `Constraint::Min(0)` on the tree is what then makes *it* absorb
-/// every leftover row. When there are more feeds than rows, the `List`
-/// scrolls to keep the selected row in view.
+/// `Constraint::Length` for the legend makes it a fixed height regardless
+/// of terminal size; `Constraint::Min(0)` on the feed list then makes *it*
+/// absorb every leftover row. When there are more feeds than rows, the
+/// `List` scrolls to keep the selected row in view.
 ///
-/// The sidebar tree's `sources_by_topic`/`collapsed_topics`/
-/// `selected_source`, plus `icons`, push this to 9 arguments, past clippy's default
-/// 7-argument threshold -- same reasoning as the `#[allow]` on `render`
-/// itself (its one call site, `render`, already threads these straight
-/// through from `draw_until_quit`'s own loop state, so a params struct here
-/// would just be `render`'s params struct again, one layer down).
+/// Too many arguments for clippy's default threshold, for the same reason
+/// as `render` itself: one call site, with everything already in the
+/// caller's hands.
 #[allow(clippy::too_many_arguments)]
 fn render_sidebar(
     frame: &mut Frame,
@@ -3417,12 +3563,13 @@ fn render_sidebar(
     area: Rect,
     topics: &[String],
     sources_by_topic: &HashMap<String, Vec<String>>,
-    collapsed_topics: &HashSet<String>,
+    category_filter: Option<&str>,
     selected_topic: Option<&str>,
     selected_source: Option<&str>,
     fresh_feeds: &HashSet<(String, String)>,
+    unread_by_feed: &HashMap<(String, String), u32>,
 ) {
-    let [topics_area, colors_area] = Layout::default()
+    let [feeds_area, colors_area] = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(0),
@@ -3430,38 +3577,20 @@ fn render_sidebar(
         ])
         .areas(area);
 
-    render_topics_section(
+    render_feeds_section(
         frame,
         theme,
         icons,
-        topics_area,
+        feeds_area,
         topics,
         sources_by_topic,
-        collapsed_topics,
+        category_filter,
         selected_topic,
         selected_source,
         fresh_feeds,
+        unread_by_feed,
     );
     render_colors_section(frame, theme, icons, colors_area);
-}
-
-/// The marker drawn after a sidebar row's name when that row has new articles
-/// the person has not looked at: a space and `Icon::New` in the same accent as
-/// the article list's new marker, or nothing at all (an empty `Span`) when the
-/// row is not fresh. No glyph or color is hard-coded: both come from the icon
-/// settings and the theme.
-///
-/// `fresh` is `true` when the row should be marked. A `Span` is one
-/// differently-styled piece of a `Line`.
-fn fresh_marker<'a>(theme: &Theme, icons: &'a IconSettings, fresh: bool) -> Span<'a> {
-    if fresh {
-        Span::styled(
-            format!(" {}", icons.glyph(Icon::New)),
-            Style::new().fg(theme.accent_unread),
-        )
-    } else {
-        Span::raw("")
-    }
 }
 
 /// Records which feeds the just-added articles belong to, so the sidebar can
@@ -3488,9 +3617,11 @@ fn note_fresh_feeds(
 /// moving the sidebar cursor shows a feed's articles at once, so clearing on
 /// that would erase the markers while scanning the list for them.
 ///
-/// With a feed row selected, only that feed is cleared. With a topic row
-/// selected, the list shows every feed in the topic together, so all of that
-/// topic's feeds are cleared. `topic` is `None` only when there are no topics.
+/// With a feed row selected, only that feed is cleared. With an "All
+/// [category]" row selected, the list shows every feed in the category
+/// together, so all of that category's feeds are cleared. `topic` is `None`
+/// only when there are no topics. (`clear_fresh_for_selection` handles the
+/// "All feeds" row, which clears everything.)
 fn clear_fresh_feeds(
     fresh: &mut HashSet<(String, String)>,
     topic: Option<&String>,
@@ -3505,134 +3636,174 @@ fn clear_fresh_feeds(
     }
 }
 
-/// The sidebar's top section: the expandable topic tree
-/// (`docs/ARCHITECTURE.md`'s "an expandable tree, not a flat list") -- every
-/// topic in `topics`, each prefixed with `Icon::Collapsed` or
-/// `Icon::Expanded` (`Expanded` unless the topic is in `collapsed_topics`) when it actually has configured
-/// sources to show, or a blank cell when it doesn't (nothing to expand
-/// into, so no indicator implying otherwise), then the topic's category
-/// icon (`IconSettings::category_glyph`). Every topic *not* in
-/// `collapsed_topics` gets its source names -- from `sources_by_topic`,
-/// indented four cells so they line up under the topic name -- inserted
-/// directly beneath it, and the currently selected row (a
-/// topic, per `selected_topic`, or one of its nested sources, per
-/// `selected_source`) is highlighted using `theme.accent_selected`. Split
-/// out of `render_sidebar` itself once that function grew two more sections
-/// below this one -- keeps each section's rendering logic self-contained
-/// instead of one long function juggling three `Block`s at once.
+/// The sidebar's top section: the feed list, laid out like the Android app's
+/// home screen. First an "All feeds" row (or "All [category]" while a
+/// category filter is set), then every feed A-Z, each one drawn as
 ///
-/// Walks the exact same `sidebar_rows` flattened order `Up`/`Down`
-/// navigation (`move_sidebar_selection`, in `draw_until_quit`) steps
-/// through -- built from the same function specifically so what's drawn
-/// here and what the cursor actually lands on can never drift apart.
+/// ```text
+/// Feed name              <- bold; orange if it has unread articles, green if not
+/// 3 unread ✦             <- muted; the new-article icon in blue after a refresh found some
+/// [category]             <- the selection color
+/// (blank line)
+/// ```
 ///
-/// Same 9-argument `#[allow]` as `render_sidebar` just above, for the same
-/// reason -- one call site, all nine already live in the caller's own
-/// state.
+/// The selected row is painted as one block (background `accent_selected`,
+/// text in the background color), so its `[category]` stays readable even
+/// though that text is normally the selection color. Colors and the icon all
+/// come from `theme` and `icons`; nothing is hard-coded.
+///
+/// `unread_by_feed` has each feed's unread count (a missing entry means 0).
+/// The "All" row's count is the sum over the feeds currently listed.
+/// `fresh_feeds` holds the feeds a refresh found new articles for.
+///
+/// Walks the same `sidebar_rows` order `Up`/`Down` use, so what is drawn and
+/// what the cursor lands on cannot drift apart. Same many-arguments `#[allow]`
+/// as `render_sidebar`.
 #[allow(clippy::too_many_arguments)]
-fn render_topics_section(
+fn render_feeds_section(
     frame: &mut Frame,
     theme: &Theme,
     icons: &IconSettings,
     area: Rect,
     topics: &[String],
     sources_by_topic: &HashMap<String, Vec<String>>,
-    collapsed_topics: &HashSet<String>,
+    category_filter: Option<&str>,
     selected_topic: Option<&str>,
     selected_source: Option<&str>,
     fresh_feeds: &HashSet<(String, String)>,
+    unread_by_feed: &HashMap<(String, String), u32>,
 ) {
+    // The box title says which set of feeds is listed.
+    let title = match category_filter {
+        Some(category) => format!(" Feeds — [{category}] "),
+        None => " Feeds — all ".to_string(),
+    };
     let block = Block::new()
-        .title(" Topics ")
+        .title(title)
         .borders(Borders::ALL)
         .style(Style::new().bg(theme.background).fg(theme.text_primary))
         .border_style(Style::new().fg(theme.panel_border));
 
-    let rows = sidebar_rows(topics, sources_by_topic, collapsed_topics);
+    let rows = sidebar_rows(topics, sources_by_topic, category_filter);
 
-    // Built alongside `items` below rather than searched for afterward --
-    // each row already knows whether it's the selected one as it's turned
-    // into a `ListItem`, so recording that row's position here (there's
-    // exactly one match, since `topic_index`/`selected_source` can only
-    // ever describe a single row) is simpler than re-deriving it with a
-    // second pass over `rows`.
+    // The unread count of one feed: a missing entry means none are unread.
+    let unread_of = |topic: &str, name: &str| -> u32 {
+        unread_by_feed
+            .get(&(topic.to_string(), name.to_string()))
+            .copied()
+            .unwrap_or(0)
+    };
+
+    // The "All" row's totals, summed over every feed currently listed
+    // (`rows` already respects the category filter). `skip(1)` leaves out the
+    // `All` row itself, which is always first.
+    let mut total_unread = 0;
+    let mut any_fresh = false;
+    for row in rows.iter().skip(1) {
+        if let SidebarRow::Feed(index, name) = row {
+            total_unread += unread_of(&topics[*index], name);
+            any_fresh |= fresh_feeds.contains(&(topics[*index].clone(), name.to_string()));
+        }
+    }
+
+    // Built alongside `items` below: each row knows whether it is the
+    // selected one as it is turned into a `ListItem`, so its position is
+    // recorded then instead of searched for afterwards.
     let mut selected_row_index = None;
     let items: Vec<ListItem> = rows
         .iter()
         .enumerate()
-        .map(|(row_index, row)| match *row {
-            SidebarRow::Topic(topic_index) => {
-                let topic = &topics[topic_index];
-                if Some(topic.as_str()) == selected_topic && selected_source.is_none() {
-                    selected_row_index = Some(row_index);
+        .map(|(row_index, row)| {
+            // What this row shows: its name, unread count, new marker, and
+            // (feeds only) its category tag.
+            let (name, unread, fresh, tag, selected) = match *row {
+                SidebarRow::All => {
+                    let label = match category_filter {
+                        Some(category) => format!("All [{category}]"),
+                        None => "All feeds".to_string(),
+                    };
+                    (
+                        label,
+                        total_unread,
+                        any_fresh,
+                        None,
+                        selected_source.is_none(),
+                    )
                 }
-
-                let has_sources = sources_by_topic
-                    .get(topic)
-                    .is_some_and(|sources| !sources.is_empty());
-                // The expand/collapse marker, or a blank of the same
-                // one-cell width when there's nothing to expand, so every
-                // topic's icon and name start in the same column.
-                let indicator = if !has_sources {
-                    " "
-                } else if !collapsed_topics.contains(topic) {
-                    icons.glyph(Icon::Expanded)
-                } else {
-                    icons.glyph(Icon::Collapsed)
-                };
-                // The topic's category icon: the user's `[categories]`
-                // entry, a built-in one, or the generic folder (see
-                // `IconSettings::category_glyph`).
-                let category = icons.category_glyph(topic);
-                // A topic is marked while any of its feeds is fresh.
-                let marker = fresh_marker(
-                    theme,
-                    icons,
-                    fresh_feeds
-                        .iter()
-                        .any(|(fresh_topic, _)| fresh_topic == topic),
-                );
-                ListItem::new(Line::from(vec![
-                    Span::raw(format!("{indicator} {category} {topic}")),
-                    marker,
-                ]))
+                SidebarRow::Feed(index, name) => (
+                    name.to_string(),
+                    unread_of(&topics[index], name),
+                    fresh_feeds.contains(&(topics[index].clone(), name.to_string())),
+                    Some(format!("[{}]", topics[index])),
+                    Some(topics[index].as_str()) == selected_topic && selected_source == Some(name),
+                ),
+            };
+            if selected {
+                selected_row_index = Some(row_index);
             }
-            SidebarRow::Source(topic_index, name) => {
-                if Some(topics[topic_index].as_str()) == selected_topic
-                    && selected_source == Some(name)
-                {
-                    selected_row_index = Some(row_index);
-                }
-                // Four spaces: the marker, a space, the category icon, and
-                // a space above (all one cell each), so a source name lines
-                // up under its topic's name.
-                let marker = fresh_marker(
-                    theme,
-                    icons,
-                    fresh_feeds.contains(&(topics[topic_index].clone(), name.to_string())),
-                );
-                ListItem::new(Line::from(vec![Span::raw(format!("    {name}")), marker]))
+
+            // On the selected row every piece of text uses the background
+            // color (it sits on a `accent_selected` block); otherwise each
+            // piece has its own color.
+            let color = |normal| if selected { theme.background } else { normal };
+
+            // Line 1: the name, bold; unread feeds in the unread color,
+            // fully read ones in the read color (as on Android).
+            let name_color = if unread > 0 {
+                theme.accent_unread
+            } else {
+                theme.accent_read
+            };
+            let mut lines = vec![Line::from(Span::styled(
+                name,
+                Style::new()
+                    .fg(color(name_color))
+                    .add_modifier(Modifier::BOLD),
+            ))];
+
+            // Line 2: "N unread", plus the new-article icon in blue when a
+            // refresh found something here.
+            let mut count_line = vec![Span::styled(
+                format!("{unread} unread"),
+                Style::new().fg(color(theme.text_muted)),
+            )];
+            if fresh {
+                count_line.push(Span::styled(
+                    format!(" {}", icons.glyph(Icon::New)),
+                    Style::new().fg(color(theme.accent_new)),
+                ));
+            }
+            lines.push(Line::from(count_line));
+
+            // Line 3 (feeds only): the category tag.
+            if let Some(tag) = tag {
+                lines.push(Line::from(Span::styled(
+                    tag,
+                    Style::new().fg(color(theme.accent_selected)),
+                )));
+            }
+
+            // A blank spacer line, explicitly in the normal background so a
+            // selected row's block does not run on into the gap.
+            lines.push(Line::styled("", Style::new().bg(theme.background)));
+
+            // The selected row's block color goes on the whole item.
+            let item = ListItem::new(lines);
+            if selected {
+                item.style(Style::new().bg(theme.accent_selected))
+            } else {
+                item
             }
         })
         .collect();
 
     // `List` is a `StatefulWidget`: rendering it takes a `&mut ListState`
-    // that records which row (if any) is highlighted. `state` is rebuilt
-    // fresh every frame from whatever row `draw_until_quit` currently has
-    // selected -- there's no need to persist a `ListState` across frames
-    // when the source of truth (`selected_topic`/`selected_source`)
-    // already lives in the caller's loop state.
+    // that records which row is selected (so the list scrolls to keep it in
+    // view). It is rebuilt every frame from the caller's own selection state.
     let mut state = ListState::default();
     state.select(selected_row_index);
 
-    let list = List::new(items).block(block).highlight_style(
-        Style::new()
-            .bg(theme.accent_selected)
-            .fg(theme.background)
-            .add_modifier(Modifier::BOLD),
-    );
-
-    frame.render_stateful_widget(list, area, &mut state);
+    frame.render_stateful_widget(List::new(items).block(block), area, &mut state);
 }
 
 /// The sidebar's bottom section: each article state's icon, in that state's
@@ -4842,19 +5013,123 @@ mod tests {
         assert_eq!(names, ["Apple", "apple", "Banana", "Zed"]);
     }
 
-    /// Topics start open: a topic is hidden only when it is in the
-    /// collapsed set, and its feeds then disappear from the row list.
+    /// The sidebar rows are the "All" row, then every feed A-Z ignoring case
+    /// across categories; a category filter keeps just that category's feeds.
     #[test]
-    fn topics_are_open_unless_collapsed() {
-        let topics = vec!["linux".to_string()];
+    fn sidebar_rows_are_all_then_feeds_sorted_az() {
+        let topics = vec!["gaming".to_string(), "linux".to_string()];
         let mut sources = HashMap::new();
-        sources.insert("linux".to_string(), vec!["LWN".to_string()]);
-        let mut collapsed = HashSet::new();
-        // One topic row plus one feed row while open.
-        assert_eq!(sidebar_rows(&topics, &sources, &collapsed).len(), 2);
-        // Collapsing it leaves just the topic row.
-        collapsed.insert("linux".to_string());
-        assert_eq!(sidebar_rows(&topics, &sources, &collapsed).len(), 1);
+        sources.insert(
+            "linux".to_string(),
+            vec!["Zeta".to_string(), "alpha".to_string()],
+        );
+        sources.insert("gaming".to_string(), vec!["Beta".to_string()]);
+
+        // Turn rows into readable text: "All", or "topic/feed".
+        let describe = |rows: Vec<SidebarRow>| -> Vec<String> {
+            rows.iter()
+                .map(|row| match row {
+                    SidebarRow::All => "All".to_string(),
+                    SidebarRow::Feed(index, name) => format!("{}/{name}", topics[*index]),
+                })
+                .collect()
+        };
+
+        assert_eq!(
+            describe(sidebar_rows(&topics, &sources, None)),
+            ["All", "linux/alpha", "gaming/Beta", "linux/Zeta"]
+        );
+        assert_eq!(
+            describe(sidebar_rows(&topics, &sources, Some("linux"))),
+            ["All", "linux/alpha", "linux/Zeta"]
+        );
+    }
+
+    /// `Tab` cycles all feeds -> each category -> all feeds; `Shift+Tab`
+    /// goes the other way round.
+    #[test]
+    fn category_filter_cycles_both_ways() {
+        let topics = vec!["gaming".to_string(), "linux".to_string()];
+        assert_eq!(
+            next_category_filter(&topics, None, true).as_deref(),
+            Some("gaming")
+        );
+        assert_eq!(
+            next_category_filter(&topics, Some("gaming"), true).as_deref(),
+            Some("linux")
+        );
+        assert_eq!(next_category_filter(&topics, Some("linux"), true), None);
+        // Backward from "all feeds" lands on the last category.
+        assert_eq!(
+            next_category_filter(&topics, None, false).as_deref(),
+            Some("linux")
+        );
+        assert_eq!(next_category_filter(&topics, Some("gaming"), false), None);
+    }
+
+    /// Moving down then up walks the rows and clamps at both ends; landing
+    /// on "All" clears the feed selection and, with a filter, re-points
+    /// `topic_index` at that category.
+    #[test]
+    fn moving_the_sidebar_cursor_clamps_and_returns_to_all() {
+        let topics = vec!["gaming".to_string(), "linux".to_string()];
+        let mut sources = HashMap::new();
+        sources.insert("linux".to_string(), vec!["alpha".to_string()]);
+        sources.insert("gaming".to_string(), vec!["Beta".to_string()]);
+
+        let mut topic_index = 0;
+        let mut selected: Option<String> = None;
+        // Down: first feed A-Z is "alpha" (linux).
+        move_sidebar_selection(1, &topics, &sources, None, &mut topic_index, &mut selected);
+        assert_eq!((topic_index, selected.as_deref()), (1, Some("alpha")));
+        move_sidebar_selection(1, &topics, &sources, None, &mut topic_index, &mut selected);
+        assert_eq!((topic_index, selected.as_deref()), (0, Some("Beta")));
+        // Past the last row stays put.
+        move_sidebar_selection(1, &topics, &sources, None, &mut topic_index, &mut selected);
+        assert_eq!(selected.as_deref(), Some("Beta"));
+
+        // Filter to linux, standing on its only feed, then up to "All [linux]".
+        topic_index = 1;
+        selected = Some("alpha".to_string());
+        move_sidebar_selection(
+            -1,
+            &topics,
+            &sources,
+            Some("linux"),
+            &mut topic_index,
+            &mut selected,
+        );
+        assert_eq!((topic_index, selected), (1, None));
+    }
+
+    /// Unread counts are matched to a configured feed by address first (so a
+    /// rename keeps its count), then by the stored category and name.
+    #[test]
+    fn unread_counts_follow_the_feed_address() {
+        let mut addresses: FeedAddresses = HashMap::new();
+        addresses.insert(
+            ("linux".to_string(), "New Name".to_string()),
+            "https://e/feed".to_string(),
+        );
+        let counts = vec![
+            // Stored under the feed's old name, but with its address.
+            FeedUnread {
+                topic: "linux".to_string(),
+                source: "Old Name".to_string(),
+                feed_url: Some("https://e/feed".to_string()),
+                unread: 3,
+            },
+            // No address: matched by category and name.
+            FeedUnread {
+                topic: "news".to_string(),
+                source: "Other".to_string(),
+                feed_url: None,
+                unread: 2,
+            },
+        ];
+        let map = feed_unread_map(&counts, &addresses);
+        assert_eq!(map[&("linux".to_string(), "New Name".to_string())], 3);
+        assert_eq!(map[&("news".to_string(), "Other".to_string())], 2);
     }
 
     /// Text shorter than the limit comes back untouched, with no `…`
@@ -5130,21 +5405,28 @@ mod tests {
             &storage,
             &addresses,
             &Scope::All,
-            "news",
+            Some("news"),
             Some("New Name"),
         )
         .unwrap();
         assert_eq!(shown.len(), 1);
 
         // A name nobody configured has no address and matches nothing.
-        let none =
-            load_articles_for_selection(&storage, &addresses, &Scope::All, "news", Some("Other"))
-                .unwrap();
+        let none = load_articles_for_selection(
+            &storage,
+            &addresses,
+            &Scope::All,
+            Some("news"),
+            Some("Other"),
+        )
+        .unwrap();
         assert!(none.is_empty());
     }
 
+    /// A topic that only exists in the config (nothing fetched yet) is still
+    /// listed, with one list or several, so its feeds show in the sidebar.
     #[test]
-    fn list_topics_include_configured_topics_only_with_several_lists() {
+    fn list_topics_include_configured_topics() {
         let storage = Storage::open_in_memory().unwrap();
         let sources = vec![ConfiguredSource::Rss(fetchers::rss::RssFetcher {
             name: "LWN".to_string(),
@@ -5152,13 +5434,13 @@ mod tests {
             topic: "kernel".to_string(),
         })];
 
-        let single = FeedLists::single(std::path::PathBuf::from("/x/sources.toml"));
-        assert!(
-            list_topics(&storage, &Scope::All, &single, &sources)
-                .unwrap()
-                .is_empty()
+        // Single list: scope is everything.
+        assert_eq!(
+            list_topics(&storage, &Scope::All, &sources).unwrap(),
+            ["kernel"]
         );
 
+        // A feed list's scope gives the same answer.
         let several = feedlists::config::parse(
             "[[list]]\nname = \"main\"\npath = \"a.toml\"\n[[list]]\nname = \"casual\"\npath = \"b.toml\"",
             Path::new("/cfg"),
@@ -5167,10 +5449,7 @@ mod tests {
         )
         .unwrap();
         let scope = list_scope(&several, &sources);
-        assert_eq!(
-            list_topics(&storage, &scope, &several, &sources).unwrap(),
-            ["kernel"]
-        );
+        assert_eq!(list_topics(&storage, &scope, &sources).unwrap(), ["kernel"]);
     }
 
     /// Writes a one-source `sources.toml` into a fresh temporary folder and
@@ -5335,8 +5614,15 @@ mod tests {
         let addresses = feed_addresses_of(&sources);
 
         // Refreshing while looking at topic "alpha" still fetches "beta" too.
-        let (shown, report) =
-            refresh_all(&storage, &addresses, &Scope::All, &list, "alpha", None).unwrap();
+        let (shown, report) = refresh_all(
+            &storage,
+            &addresses,
+            &Scope::All,
+            &list,
+            Some("alpha"),
+            None,
+        )
+        .unwrap();
         assert_eq!(report.attempted, 2);
         assert_eq!(report.new_article_ids.len(), 2);
         // The list on screen is the selected topic's.
@@ -5350,8 +5636,15 @@ mod tests {
         );
 
         // Nothing changed in the files, so a second refresh finds nothing new.
-        let (_, again) =
-            refresh_all(&storage, &addresses, &Scope::All, &list, "alpha", None).unwrap();
+        let (_, again) = refresh_all(
+            &storage,
+            &addresses,
+            &Scope::All,
+            &list,
+            Some("alpha"),
+            None,
+        )
+        .unwrap();
         assert_eq!(again.attempted, 2);
         assert!(again.new_article_ids.is_empty());
     }
