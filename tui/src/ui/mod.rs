@@ -145,11 +145,6 @@ const FOOTER_GAP: u16 = 2;
 /// (`Mode::ListPicker`) is open.
 const LIST_PICKER_HINTS: &str = "j/k or ↑/↓ choose · Enter switch · Esc cancel";
 
-/// The sidebar Keys entry for `f`, shown only when there's more than one
-/// feed list. With a single list, the Keys section looks exactly as it did
-/// before lists existed. Kept out of `KEY_HINTS` for that reason.
-const FEED_LIST_KEY_HINT: (&str, &str) = ("f", "feed lists");
-
 /// The footer hint line shown while the `t` theme picker
 /// (`Mode::ThemePicker`) is open.
 const THEME_PICKER_HINTS: &str = "j/k or ↑/↓ preview · Enter keep · Esc cancel";
@@ -159,41 +154,28 @@ const THEME_PICKER_HINTS: &str = "j/k or ↑/↓ preview · Enter keep · Esc ca
 const ICON_CHECK_HINTS: &str =
     "y yes, use Nerd Font icons · n no, use plain symbols · Esc ask next time";
 
-/// Keybind hints for the footer, for the normal (not editing-a-note,
-/// not adding-a-source) state while `View::Topic` is showing -- see
-/// `SAVED_HINTS` below for the saved view's own hint line,
-/// `EDITING_NOTE_HINTS` for the note popup's, and
-/// `ADD_SOURCE_URL_HINTS`/`ADD_SOURCE_CONFIRM_HINTS` for the add-source
-/// flow's. Kept as one `const` (rather than inlined into `render_footer`
-/// below) so there's exactly one place this has to stay in sync with the
-/// `Mode::Normal` match arm in `draw_until_quit` below.
+/// Keybind hints for the footer's upper line, for the normal (not
+/// editing-a-note, not adding-a-source) state while `View::Topic` is
+/// showing. Kept as one `const` (rather than inlined into `footer_hints`)
+/// so there is exactly one place to keep in sync with the `Mode::Normal`
+/// match arms in `draw_until_quit`.
 ///
-/// Deliberately drops `x`/`s`/`n`/`r`/`S`/`a`/`Right`+`l`/`Left`+`h` --
-/// those now have a permanent home in the sidebar's own "Keys" section
-/// (see `render_keys_section`), which is on screen at all times rather
-/// than only in the footer, so repeating them here would just be the same
-/// reference living in two places. What's left is exactly the keys the
-/// Keys section *doesn't* cover: raw navigation (`j`/`k`, `↑`/`↓`/`Tab`,
-/// `Enter`) and `q` to quit.
-const KEYBIND_HINTS: &str = "j/k move · ↑/↓/Tab topic · Enter open · q quit";
+/// This is the short list of everyday keys. The full list (including rarer
+/// ones like `i` for icon mode and `t` for the theme) is in the `?` Help
+/// popup (`help.rs`), which is why `? help` comes first: if the terminal is
+/// too narrow for the whole line, the end is cut off, and the way to the
+/// full list must never be the part that disappears.
+const KEYBIND_HINTS: &str = "? help · Enter open · s save · x close · n note · r refresh · a add · p paste · / search · S saved · c sync · q quit";
 
 /// The footer hint line shown while `View::Saved` or `View::History` is
 /// showing (and no popup is open) -- both non-`Topic` views share this one
-/// line, since both disable exactly the same things for exactly the same
-/// reason. Deliberately drops `↑/↓ topic` and `r refresh` -- both are
-/// disabled in these views (see the guards on their match arms in
-/// `draw_until_quit`), since neither a topic-sidebar selection nor
-/// "refetch this topic's sources" means anything once the list is "every
-/// saved article across every topic" or "every article ever fetched"
-/// instead of one topic's.
-///
-/// Also drops `x`/`s`/`n`/`a`, same reasoning as `KEYBIND_HINTS` above --
-/// covered by the sidebar's always-visible Keys section instead. `S`/`y`
-/// stay off this line for the same reason (they're in Keys too), but
-/// `Esc`/`Tab` remain: they're these views' *own* way back to
-/// `View::Topic`, which the Keys section (a flat list of the main-flow
-/// keys) doesn't document.
-const SAVED_HINTS: &str = "j/k move · Enter open · Esc/Tab back · q quit";
+/// line, since both disable the same keys for the same reason (the sidebar
+/// cursor and `r` refresh mean nothing once the list is "every saved
+/// article" or "every article ever fetched"). `E` is listed because
+/// exporting is done from the saved view; `Esc`/`Tab` are these views' own
+/// way back to `View::Topic`.
+const SAVED_HINTS: &str =
+    "? help · j/k move · Enter open · u un-save · n note · E export · Esc/Tab back · q quit";
 
 /// The footer hint line shown while the note popup (`Mode::EditingNote`)
 /// is open -- every other keybind is suspended while typing a note (see
@@ -241,62 +223,6 @@ const SEARCH_HINTS: &str = "type to filter · Enter confirm · Esc cancel";
 /// it; the full text is always one `n` press away in the same edit popup
 /// already built for editing it.
 const NOTE_PREVIEW_CHARS: usize = 45;
-
-/// The sidebar's "Keys" reference section (`docs/ARCHITECTURE.md` § 3. TUI)
-/// -- the main-flow keybinds, as `(key, action)` pairs, rendered one per
-/// line by `render_keys_section` below. A `const` array (rather than
-/// building this `Vec` fresh inside `render_keys_section` every frame) since
-/// it never changes at runtime -- there's no reason to reallocate the same
-/// pairs on every single draw.
-///
-/// This exists specifically because the person building tuxwire has no
-/// prior Rust/TUI-app experience and shouldn't have to memorize the keybind
-/// table before the app is usable -- the reference lives on screen instead,
-/// in every `View` (see `render_sidebar`, which doesn't take a `View` at
-/// all -- this section renders identically regardless of which one is
-/// showing).
-///
-/// `→`/`l` and `←`/`h` (expanding/collapsing a topic in the sidebar tree,
-/// see `SidebarRow`/`sidebar_rows` below) live here rather than in
-/// `KEYBIND_HINTS` -- they're sidebar navigation, not article-list
-/// navigation, and per ARCHITECTURE.md's keybind table this is their
-/// documented home. `y` (history) and `/` (search) join them here for the
-/// same reason `S` (saved view) already did: a whole-app view/mode switch,
-/// not something scoped to whichever list happens to be on screen, so it
-/// belongs in this always-visible reference rather than a footer hint that
-/// only shows up in one particular view.
-///
-/// `E` (Markdown export -- `docs/ARCHITECTURE.md`'s "Markdown Export")
-/// joins them for the same reason: a whole-app action (regenerating one
-/// combined file from every currently-saved article, not something
-/// scoped to a single row), even though it only actually does anything
-/// while `View::Saved` is showing.
-///
-/// `i` (cycle the icon mode: Nerd → Unicode → ASCII) and `t` (the theme
-/// picker) are listed here too, since they change the whole app's look
-/// rather than one row.
-const KEY_HINTS: [(&str, &str); 20] = [
-    ("s", "save"),
-    ("u", "un-save"),
-    ("x", "close"),
-    ("n", "note"),
-    ("S", "saved view"),
-    ("L", "read later"),
-    ("R", "add to read later"),
-    ("p", "paste a link"),
-    ("y", "history"),
-    ("/", "search"),
-    ("r", "refresh topic"),
-    ("N", "refresh all"),
-    ("a", "add source"),
-    ("E", "export (S view)"),
-    ("c", "sync (optional)"),
-    ("i", "icon mode"),
-    ("t", "theme"),
-    ("g", "stats"),
-    ("→/l", "expand topic"),
-    ("←/h", "collapse topic"),
-];
 
 /// How many rows the sidebar's "Colors" legend has (see
 /// `render_colors_section`). A named constant because two places must
@@ -3281,8 +3207,8 @@ fn render(
     // The feed list path (home already shown as `~`), drawn at the right
     // of the footer when there's room.
     feed_list: &str,
-    // Whether to list `f` (feed lists) in the sidebar's Keys section: only
-    // when there's more than one list.
+    // Whether the Help popup lists `f` (feed lists): only when there's more
+    // than one list.
     show_list_key: bool,
 ) {
     // Painting a plain background-colored block across the whole frame
@@ -3308,35 +3234,26 @@ fn render(
         .constraints([
             Constraint::Length(BANNER.len() as u16),
             Constraint::Min(0),
-            Constraint::Length(1),
+            // Two rows: key hints on top, status line (notice + feed list
+            // path) underneath. See `render_footer`.
+            Constraint::Length(2),
         ])
         .areas(frame.area());
 
     // Then split that body horizontally into the sidebar and the article
-    // list. A quarter of the width is plenty for topic names, which tend
-    // to be short (`linux-news`, `gaming`, ...) compared to article
-    // titles.
+    // list. Thirty percent of the width: the sidebar now shows every feed
+    // name (indented under its category) all the time, so it gets a little
+    // more room than the old quarter. Longer names are clipped at the edge.
     let [sidebar_area, articles_area] = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(25), Constraint::Percentage(75)])
+        .constraints([Constraint::Percentage(30), Constraint::Percentage(70)])
         .areas(body);
-
-    // The Keys section's rows: the fixed `KEY_HINTS`, plus `f` when there
-    // are several feed lists. `.then_some(x)` is `Some(x)` when the bool is
-    // true and `None` otherwise, and chaining an `Option` adds zero or one
-    // item.
-    let key_hints: Vec<(&str, &str)> = KEY_HINTS
-        .iter()
-        .copied()
-        .chain(show_list_key.then_some(FEED_LIST_KEY_HINT))
-        .collect();
 
     render_banner(frame, theme, banner_area);
     render_sidebar(
         frame,
         theme,
         icons,
-        &key_hints,
         sidebar_area,
         topics,
         sources_by_topic,
@@ -3467,24 +3384,24 @@ fn render_banner(frame: &mut Frame, theme: &Theme, area: Rect) {
     frame.render_widget(banner, area);
 }
 
-/// The left pane, three stacked sections top to bottom (`docs/ARCHITECTURE.md`
-/// § 3. TUI): the topic list itself (interactive, sized to fill whatever
-/// space the other two don't need), then the static "Keys" and "Colors"
-/// reference sections. This function takes no `View` -- unlike
-/// `render_articles`, which shows a genuinely different list/title
-/// depending on `View::Topic` vs `View::Saved`, every part of the sidebar
-/// is identical in both: the topic list keeps showing the last topic
-/// selection either way (see the comment on `selected_topic` in
-/// `draw_until_quit`), and the Keys/Colors sections below don't depend on
-/// `View` at all.
+/// The left pane, two stacked sections top to bottom (`docs/ARCHITECTURE.md`
+/// § 3. TUI): the category/feed tree (interactive, sized to fill all the
+/// space the legend doesn't need), then the static "Colors" legend. The old
+/// "Keys" box is gone: the full key list lives in the `?` Help popup and the
+/// everyday keys in the footer, so the feed tree gets the whole column. This
+/// function takes no `View` -- unlike `render_articles`, which shows a
+/// genuinely different list/title depending on `View::Topic` vs
+/// `View::Saved`, every part of the sidebar is identical in both: the topic
+/// list keeps showing the last topic selection either way (see the comment
+/// on `selected_topic` in `draw_until_quit`), and the Colors legend doesn't
+/// depend on `View` at all.
 ///
-/// `Constraint::Length` for the bottom two sections (rather than
-/// `Constraint::Min`/`Percentage`) is what makes them a fixed height
-/// regardless of terminal size -- one row per `KEY_HINTS` entry and
-/// `LEGEND_ROWS` legend rows, plus two border rows apiece, is always
-/// enough content to show in full, so
-/// there's no reason to let them grow. `Constraint::Min(0)` on the topics
-/// list is what then makes *it* absorb every leftover row instead.
+/// `Constraint::Length` for the legend (rather than `Constraint::Min`/
+/// `Percentage`) makes it a fixed height regardless of terminal size --
+/// `LEGEND_ROWS` rows plus two border rows is always enough to show it in
+/// full. `Constraint::Min(0)` on the tree is what then makes *it* absorb
+/// every leftover row. When there are more feeds than rows, the `List`
+/// scrolls to keep the selected row in view.
 ///
 /// The sidebar tree's `sources_by_topic`/`collapsed_topics`/
 /// `selected_source`, plus `icons`, push this to 9 arguments, past clippy's default
@@ -3497,7 +3414,6 @@ fn render_sidebar(
     frame: &mut Frame,
     theme: &Theme,
     icons: &IconSettings,
-    key_hints: &[(&str, &str)],
     area: Rect,
     topics: &[String],
     sources_by_topic: &HashMap<String, Vec<String>>,
@@ -3506,11 +3422,10 @@ fn render_sidebar(
     selected_source: Option<&str>,
     fresh_feeds: &HashSet<(String, String)>,
 ) {
-    let [topics_area, keys_area, colors_area] = Layout::default()
+    let [topics_area, colors_area] = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(0),
-            Constraint::Length(key_hints.len() as u16 + 2),
             Constraint::Length(LEGEND_ROWS as u16 + 2),
         ])
         .areas(area);
@@ -3527,7 +3442,6 @@ fn render_sidebar(
         selected_source,
         fresh_feeds,
     );
-    render_keys_section(frame, theme, keys_area, key_hints);
     render_colors_section(frame, theme, icons, colors_area);
 }
 
@@ -3719,38 +3633,6 @@ fn render_topics_section(
     );
 
     frame.render_stateful_widget(list, area, &mut state);
-}
-
-/// The sidebar's middle section: a static, non-interactive readout of
-/// `KEY_HINTS`, one `"<key> <action>"` line per row -- see `KEY_HINTS`'s own
-/// doc comment for why this exists. A plain `Paragraph`, not a `List`: there's
-/// nothing here to select or scroll, just fixed reference text, so a `List`'s
-/// selection/highlight machinery would be pure overhead with no behavior
-/// behind it.
-fn render_keys_section(frame: &mut Frame, theme: &Theme, area: Rect, key_hints: &[(&str, &str)]) {
-    let block = Block::new()
-        .title(" Keys ")
-        .borders(Borders::ALL)
-        .style(Style::new().bg(theme.background).fg(theme.text_primary))
-        .border_style(Style::new().fg(theme.panel_border));
-
-    let lines: Vec<Line> = key_hints
-        .iter()
-        .map(|(key, action)| {
-            Line::from(vec![
-                Span::styled(
-                    *key,
-                    Style::new()
-                        .fg(theme.accent_selected)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(format!(" {action}"), Style::new().fg(theme.text_primary)),
-            ])
-        })
-        .collect();
-
-    let paragraph = Paragraph::new(lines).block(block);
-    frame.render_widget(paragraph, area);
 }
 
 /// The sidebar's bottom section: each article state's icon, in that state's
@@ -4149,13 +4031,14 @@ fn truncate_preview(text: &str, max_chars: usize) -> String {
 /// `View::History` share `SAVED_HINTS` (see its own doc comment for why:
 /// both disable the same keys for the same reason).
 ///
-/// `notice` (a one-shot message from `draw_until_quit`) replaces the hint
-/// line when it's `Some`, except during the first-run icon check, whose
-/// `y`/`n` hint is the only way to learn how to answer it.
+/// The footer is two rows. The upper row is always the hint line for the
+/// current mode. The lower row is the status line: `notice` (a one-shot
+/// message from `draw_until_quit`, such as the refresh result) on the left,
+/// empty when there is none, so a message never hides the hints.
 ///
 /// `feed_list` (the active feed list's path, home as `~`) is drawn
-/// right-aligned on the same row, as "Feed List: <path>" (or the file icon
-/// in Nerd mode), in `text_muted`. The hint or notice on the left always
+/// right-aligned on the status row, as "Feed List: <path>" (or the file icon
+/// in Nerd mode), in `text_muted`. The notice on the left always
 /// keeps priority: the path only gets the cells left over after it plus
 /// `FOOTER_GAP`, is shortened from the left to fit (see `fit_feed_list`),
 /// and is hidden when even the file name won't fit, or when the terminal
@@ -4175,14 +4058,22 @@ fn render_footer(
     notice: Option<&str>,
     feed_list: &str,
 ) {
-    // The left side: the notice if there is one (except during the icon
-    // check, see above), otherwise the hint line for the current mode.
-    let left = match notice {
-        Some(notice) if !matches!(mode, Mode::IconCheck) => notice,
-        _ => footer_hints(mode, view),
-    };
-    let footer = Paragraph::new(left).style(Style::new().bg(theme.background).fg(theme.text_muted));
-    frame.render_widget(footer, area);
+    // Split the two footer rows apart: hints on top, status underneath.
+    let [hint_area, status_area] = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Length(1)])
+        .areas(area);
+
+    // The upper row: the hint line for the current mode.
+    let hints = Paragraph::new(footer_hints(mode, view))
+        .style(Style::new().bg(theme.background).fg(theme.text_muted));
+    frame.render_widget(hints, hint_area);
+
+    // The lower row, left side: the notice, or nothing. `unwrap_or("")`
+    // turns "no notice" into an empty string.
+    let left = notice.unwrap_or("");
+    let status = Paragraph::new(left).style(Style::new().bg(theme.background).fg(theme.text_muted));
+    frame.render_widget(status, status_area);
 
     // The right side, only on a wide-enough terminal. `cell_width` counts
     // display cells, not characters, so wide characters in the hint line
@@ -4191,7 +4082,7 @@ fn render_footer(
         return;
     }
     let used = cell_width(left) as u16 + FOOTER_GAP;
-    let available = area.width.saturating_sub(used) as usize;
+    let available = status_area.width.saturating_sub(used) as usize;
     if let Some(text) = fit_feed_list(
         icons.feed_list_label(),
         feed_list,
@@ -4204,8 +4095,8 @@ fn render_footer(
         // `width <= available < area.width`, so this can't underflow.
         let width = cell_width(&text) as u16;
         let strip = Rect {
-            x: area.x + area.width - width,
-            y: area.y,
+            x: status_area.x + status_area.width - width,
+            y: status_area.y,
             width,
             height: 1,
         };

@@ -158,7 +158,7 @@ pub(super) fn render(
     frame.render_widget(Clear, popup);
 
     let block = Block::new()
-        .title(" Keys ")
+        .title(" Help ")
         .borders(Borders::ALL)
         .style(Style::new().bg(theme.background).fg(theme.text_primary))
         .border_style(Style::new().fg(theme.panel_border));
