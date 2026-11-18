@@ -3980,12 +3980,13 @@ fn render_articles(
         .map(|article| article_item(theme, icons, new_article_ids, article, view))
         .collect();
 
-    // Each `ListItem` here is two lines (title + source/timestamp, see
-    // `article_item` below), so highlighting needs to cover both rather
-    // than just the title line -- `highlight_spacing` isn't enough on its
-    // own for that, but the default `HighlightSpacing::WhenSelected`
-    // behavior already highlights every line of the selected item, which
-    // is what's wanted here.
+    // Each `ListItem` here is several lines (title, source/timestamp, an
+    // optional note preview, and a blank spacer; see `article_item` below),
+    // so highlighting needs to cover the text lines rather than just the
+    // title line -- `highlight_spacing` isn't enough on its own for that,
+    // but the default `HighlightSpacing::WhenSelected` behavior already
+    // highlights every line of the selected item, which is what's wanted
+    // here (the spacer line opts out by setting its own background).
     let mut state = ListState::default();
     state.select(selected_article);
 
@@ -4082,6 +4083,13 @@ fn article_item<'a>(
         ));
         lines.push(preview_line);
     }
+
+    // A blank spacer line closes every article, so neighbouring articles
+    // read as separate entries (the same breathing room the feed list
+    // has). It is given the normal background explicitly: the selection
+    // highlight is applied to every line of an item, and without this the
+    // selected block would run on into the gap and touch the next article.
+    lines.push(Line::styled("", Style::new().bg(theme.background)));
 
     ListItem::new(lines)
 }
@@ -5217,6 +5225,30 @@ mod tests {
         assert_eq!(
             article_title_color(&theme, &article, &new_ids),
             theme.accent_read
+        );
+    }
+
+    /// Every article ends in a blank spacer line: three lines (title, meta,
+    /// spacer) normally, four in the Saved view when the article has a note
+    /// (title, meta, note preview, spacer).
+    #[test]
+    fn articles_are_separated_by_a_blank_line() {
+        let theme = crate::theme::ThemeSettings::default().resolve();
+        let icons = IconSettings::new(IconMode::Ascii, HashMap::new());
+        let new_ids = HashSet::new();
+
+        let plain = test_article(1);
+        assert_eq!(
+            article_item(&theme, &icons, &new_ids, &plain, View::Topic).height(),
+            3
+        );
+
+        let mut noted = test_article(2);
+        noted.saved = true;
+        noted.note = Some("remember this".to_string());
+        assert_eq!(
+            article_item(&theme, &icons, &new_ids, &noted, View::Saved).height(),
+            4
         );
     }
 

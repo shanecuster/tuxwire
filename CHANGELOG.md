@@ -7,6 +7,12 @@ messages — what changed and why, not just what.
 
 ### Changed
 
+- **A blank line separates the articles.** Every article in the list (topic,
+  Saved, History and search views) now ends in an empty spacer line, like the
+  feed list, so neighbouring entries are easier to tell apart. An article takes
+  three lines (four in Saved when it has a note), so fewer fit on screen and
+  the list scrolls a little sooner. The selection highlight stops before the
+  gap.
 - **The sidebar is a flat feed list, like the Android app.** Every feed is
   listed A-Z (ignoring case) as its name, `N unread`, and its `[category]`, with
   an **All feeds** row on top. A feed with unread articles is drawn in the unread
