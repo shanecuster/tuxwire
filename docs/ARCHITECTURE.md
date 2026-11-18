@@ -191,16 +191,21 @@ underneath.
   ASCII banner (37 chars, `standard` font) fits comfortably with room to
   spare, no need for a cramped/narrow substitute. This region never
   changes regardless of topic, view, or selection state.
-- **Left pane (topic sidebar), below the banner bar:** three stacked
-  sections, always visible regardless of topic or view selected:
-  1. **Topics** — an expandable tree, not a flat list:
+- **Left pane (topic sidebar, 30% of the width), below the banner bar:** two
+  stacked sections, always visible regardless of topic or view selected:
+  1. **Topics** — an expandable tree, not a flat list, filling all the
+     height the Colors legend leaves:
+     - Topics are sorted A–Z ignoring case, and the feeds under each topic
+       are too (display only; `sources.toml` keeps the order it was written
+       in).
      - Each topic shows an indicator (`▸` collapsed / `▾` expanded).
-     - `Right` / `l` expands the selected topic, revealing its individual
-       sources indented underneath (source names come from the already
-       -loaded `sources.toml` config, grouped by topic — no new query
-       needed, since one-topic-per-source means the grouping is already
-       known).
-     - `Left` / `h` collapses it back down.
+     - **Every topic starts expanded**, so all feeds are visible at once
+       (the app tracks the topics the person *collapsed*, so a brand-new
+       topic opens itself). Feed names come from the already-loaded
+       `sources.toml` config, grouped by topic — no new query needed, since
+       one-topic-per-source means the grouping is already known.
+     - `Left` / `h` collapses the selected topic; `Right` / `l` opens it
+       again.
      - `Up`/`Down` flow naturally through topic rows and, when a topic is
        expanded, its nested source rows.
      - Selecting a **topic row** shows all articles across every source in
@@ -211,25 +216,25 @@ underneath.
        a new query path — a source's topic is already fixed, so
        "articles from source X" is just "articles in X's topic, further
        filtered by source name."
-  2. **Keys** — a static reference list of the active v1 keybinds (`s`
-     save, `x` close, `n` note, `S` saved view, `r` refresh, `a` add
-     source). Exists specifically because the person using this has no
-     prior Rust/TUI-app experience and shouldn't need to memorize the
-     keybind table before the app is usable — the reference lives right
-     on screen instead.
-  3. **Colors** — a small colored square next to each state label
+  2. **Colors** — a small colored square next to each state label
      (unread/read/saved/skipped), color values pulled live from the
      loaded `theme.toml` rather than hardcoded, so the legend always
      matches whatever's actually rendering in the article list.
-  The Keys and Colors sections are purely static — no interactivity, no
-  state — and render identically in both the Topic view and the Saved
-  view.
+  The Colors legend is purely static — no interactivity, no state — and
+  renders identically in both the Topic view and the Saved view. There is no
+  longer a permanent Keys box: it used about twenty rows the feed tree needs.
+  Every key is listed in the `?` **Help popup** (`Mode::Help`,
+  `tui/src/ui/help.rs`, scrolls with `j`/`k`, closes with `Esc`/`q`/`?`), and
+  the footer carries the everyday ones.
 - **Right pane, below the banner bar:** article list for the selected
   topic (or saved articles, in Saved view), sorted by recency
-- **Footer:** remaining hints not already covered by the sidebar's Keys
-  section (or a one-shot notice), plus the active feed list's file,
-  right-aligned: "Feed List: <path>" (the file icon in Nerd mode), home as
-  `~`, `text_muted`. Hints/notices keep priority; the path gets the cells
+- **Footer (two rows):** the upper row is the hint line for the current mode
+  (in the normal view the everyday keys, starting with `? help` so the way to
+  the full list is never the part cut off on a narrow terminal). The lower row
+  is the status line: a one-shot notice on the left, plus the active feed
+  list's file, right-aligned: "Feed List: <path>" (the file icon in Nerd
+  mode), home as `~`, `text_muted`. A notice never hides the hints; the
+  notice keeps priority over the path, and the path gets the cells
   left over after them plus a 2-cell gap, is cut from the left by display
   cells keeping `/<filename>`, and is hidden when even the label plus file
   name won't fit, or below 60 columns (`NARROW_FOOTER_WIDTH`)
@@ -465,7 +470,7 @@ folder. Names are unique ignoring case. A malformed `lists.toml` is a
 startup error, like the other config files.
 
 - **One list (no file, no `[[list]]`, or one entry):** identical to before.
-  Topic queries use `Scope::All`, `f` isn't in Keys (pressing it only shows
+  Topic queries use `Scope::All`, `f` isn't in the Help popup (pressing it only shows
   a hint), and a broken `sources.toml` is still a clean startup error.
 - **Shared storage, shared state.** One database. Migration **005** adds
   a nullable `articles.feed_url` (the `[[source]]` url) plus an index. It's

@@ -76,7 +76,7 @@ live with `i`. On first run tuxwire shows a test glyph and asks whether
 you can see it, falling back to Unicode if not.
 
 <p align="center">
-  <img src="docs/screenshots/sidebar.png" alt="Sidebar showing Topics / Keys / Colors sections" width="400">
+  <img src="docs/screenshots/sidebar.png" alt="Sidebar showing Topics / Colors sections" width="400">
 </p>
 
 ### Multiple feed lists

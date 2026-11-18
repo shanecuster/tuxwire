@@ -329,7 +329,7 @@ commit.
 
 | Situation | Result |
 |---|---|
-| No `lists.toml` | Single list on `sources.toml`; no `f` in Keys; `f` shows a hint about `lists.toml` |
+| No `lists.toml` | Single list on `sources.toml`; no `f` in the Help popup; `f` shows a hint about `lists.toml` |
 | Several lists, remembered one loads | That list; only it is fetched |
 | Remembered list's file missing/broken | Footer: `✗ Feed list "x" couldn't be loaded (~/…: reason); using "main"` |
 | `active` names no list | Footer says so; first list used |

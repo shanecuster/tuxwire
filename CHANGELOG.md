@@ -5,6 +5,25 @@ messages — what changed and why, not just what.
 
 ## Unreleased
 
+### Changed
+
+- **Every feed is visible in the sidebar, all the time.** The permanent Keys box
+  is gone, so the category/feed tree gets the whole left column (30% wide, up
+  from 25%) with only the Colors legend below it. Categories start expanded and
+  are sorted A-Z ignoring case, with the feeds under each also A-Z (display
+  only; `sources.toml` keeps its order). `Left`/`h` still folds a category shut
+  and `Right`/`l` opens it again; a newly added category opens itself.
+- **Two-line footer.** The upper line lists the everyday keys (`? help` first),
+  the lower line keeps the refresh/notice message and the feed list path. A
+  notice no longer replaces the hints.
+
+### Added
+
+- **`?` opens a Help popup listing every key**, grouped (moving around,
+  articles, views, feeds, look and files), including the ones that left the
+  front screen such as `i` (icon mode) and `t` (theme). `j`/`k` scroll it in a
+  short terminal; `Esc`, `q` or `?` closes it.
+
 ### Fixed
 
 - **Renaming a feed no longer hides its older articles.** A feed row in the
