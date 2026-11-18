@@ -7,13 +7,26 @@ messages — what changed and why, not just what.
 
 ### Changed
 
-- **Every feed is visible in the sidebar, all the time.** The permanent Keys box
-  is gone, so the category/feed tree gets the whole left column (30% wide, up
-  from 25%) with only the Colors legend below it. Categories start expanded and
-  are sorted A-Z ignoring case, with the feeds under each also A-Z (display
-  only; `sources.toml` keeps its order). `Left`/`h` still folds a category shut
-  and `Right`/`l` opens it again; a newly added category opens itself.
-- **Two-line footer.** The upper line lists the everyday keys (`? help` first),
+- **The sidebar is a flat feed list, like the Android app.** Every feed is
+  listed A-Z (ignoring case) as its name, `N unread`, and its `[category]`, with
+  an **All feeds** row on top. A feed with unread articles is drawn in the unread
+  color, a fully read one in the read color. `Tab` / `Shift+Tab` filter the list
+  to one category (the top row becomes **All [category]**) and cycle back to all
+  feeds. This replaces the expandable category tree, so `Left`/`Right`/`h`/`l`
+  no longer expand or collapse anything. The permanent Keys box is gone, so the
+  list gets the whole left column (30% wide, up from 25%) above the Colors
+  legend. Every configured feed is listed, even one that has never fetched an
+  article, and a feed or category added with `a` appears straight away (no
+  restart). `sources.toml` keeps its own order.
+- **`r` refreshes what is selected.** On a feed row it refreshes just that feed
+  (handy for one that fails and needs another try), on **All [category]** the
+  whole category, and on **All feeds** everything, like `N`.
+- **New articles are blue.** A new color slot, `accent_new` (a blue for each
+  built-in theme, optional in `theme.toml`), colors the titles of articles a
+  refresh just found, until they are read, and the `✦` marker. The shared
+  `tuxwire-core` palette gains this slot, so the Android glue needs one matching
+  line when it updates core.
+- **Two-line footer.** The upper line lists the everyday keys (`? help` and `q quit` first),
   the lower line keeps the refresh/notice message and the feed list path. A
   notice no longer replaces the hints.
 

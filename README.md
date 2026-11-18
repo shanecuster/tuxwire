@@ -33,14 +33,15 @@ inside the app (paste a feed URL or just a blog's address, tuxwire finds
 and validates the feed, pick or type a topic), or edit `~/.config/tuxwire/sources.toml` directly in a text
 editor. Either way, the file is yours to read and change at any time.
 
-### Expandable topic tree
-The sidebar isn't a flat list — each topic can be expanded to show the
-individual sources feeding it. Select a topic to see everything in that
-category, or drill into one specific source to see just its articles.
-
-<p align="center">
-  <img src="docs/screenshots/category_tree.png" alt="Expanded topic tree showing nested sources" width="500">
-</p>
+### Feed list, like the Android app
+The sidebar lists every feed A–Z, the same layout as the Android home screen:
+the feed's name, how many articles are unread, and its `[category]` underneath.
+A feed with unread articles is drawn in the unread color, a fully read one in
+the read color, and a `✦` in blue appears after the count when a refresh found
+something new there. The first row, **All feeds**, shows every article.
+`Tab` / `Shift+Tab` filter the list to one category (the first row then reads
+**All [category]**) and cycle back to all feeds. Titles of new articles are
+drawn in blue until you read them. Press `?` for every key.
 
 ### Save articles with notes
 Press `s` to save an article permanently (it also marks it read). Press
@@ -334,14 +335,14 @@ tuxwire
 | Key | Action |
 |---|---|
 | `j` / `k` | Navigate the article list |
-| `Up` / `Down` / `Tab` | Navigate the topic sidebar |
-| `Right` / `l` | Expand the selected topic (show its sources) |
-| `Left` / `h` | Collapse the selected topic |
+| `Up` / `Down` | Move through the feed list |
+| `Tab` / `Shift+Tab` | Filter the feed list by category (all feeds → each category → all feeds) |
+| `?` | Show every key |
 | `Enter` | Open the selected article (`w3m`, or your browser as fallback) |
 | `s` | Save the current article (also marks it read) |
 | `n` | Add or edit a note on a saved article |
 | `x` | Mark an article as skipped |
-| `r` | Refresh the current topic's sources |
+| `r` | Refresh the selected feed, or the selected category (on "All [category]"), or everything (on "All feeds") |
 | `N` | Refresh every feed in the active list, all topics at once (the footer shows "Refreshing...", then the result) |
 | `S` | View saved articles |
 | `y` | View history (every article ever fetched) |

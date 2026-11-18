@@ -191,31 +191,38 @@ underneath.
   ASCII banner (37 chars, `standard` font) fits comfortably with room to
   spare, no need for a cramped/narrow substitute. This region never
   changes regardless of topic, view, or selection state.
-- **Left pane (topic sidebar, 30% of the width), below the banner bar:** two
+- **Left pane (feed list, 30% of the width), below the banner bar:** two
   stacked sections, always visible regardless of topic or view selected:
-  1. **Topics** — an expandable tree, not a flat list, filling all the
-     height the Colors legend leaves:
-     - Topics are sorted A–Z ignoring case, and the feeds under each topic
-       are too (display only; `sources.toml` keeps the order it was written
-       in).
-     - Each topic shows an indicator (`▸` collapsed / `▾` expanded).
-     - **Every topic starts expanded**, so all feeds are visible at once
-       (the app tracks the topics the person *collapsed*, so a brand-new
-       topic opens itself). Feed names come from the already-loaded
-       `sources.toml` config, grouped by topic — no new query needed, since
-       one-topic-per-source means the grouping is already known.
-     - `Left` / `h` collapses the selected topic; `Right` / `l` opens it
-       again.
-     - `Up`/`Down` flow naturally through topic rows and, when a topic is
-       expanded, its nested source rows.
-     - Selecting a **topic row** shows all articles across every source in
-       that topic — unchanged existing behavior.
-     - Selecting a **source row** (only reachable when its parent topic is
-       expanded) filters the article list to just that one source. This
-       is an additional filter layered on the existing topic filter, not
-       a new query path — a source's topic is already fixed, so
-       "articles from source X" is just "articles in X's topic, further
-       filtered by source name."
+  1. **Feeds** — a flat list laid out like the Android app's home screen
+     (decided 2026-11-18; it replaced the expandable topic tree, which the
+     owner found messy), filling all the height the Colors legend leaves:
+     - The first row is **All feeds** (or **All [category]** while a category
+       filter is set), followed by every configured feed sorted A–Z ignoring
+       case (display only; `sources.toml` keeps the order it was written in).
+       Every configured feed is listed, even one that has never fetched an
+       article, so a feed that keeps failing can still be selected and
+       refreshed. Feed names come from the already-loaded `sources.toml`
+       config; no new query is needed.
+     - Each feed is three lines plus a blank one: its **name** (bold; the
+       unread color when it has unread articles, the read color when not),
+       **`N unread`** (muted, then the new-article icon in `accent_new` when
+       a refresh found new articles there and the feed has not been looked at
+       since), and **`[category]`** (the selection color). The first row shows
+       the name, the total unread across the feeds listed, and the new icon.
+       The selected row is one block of `accent_selected` with text in the
+       background color.
+     - `Up`/`Down` move through the rows. `Tab` / `Shift+Tab` cycle a
+       **category filter**: all feeds → each category A–Z → all feeds. With a
+       filter, only that category's feeds are listed and the box title reads
+       `Feeds — [category]`.
+     - The row decides the article list: **All feeds** shows every article in
+       scope (`Storage::articles_in_scope`), **All [category]** shows the
+       category's articles (`articles_by_topic`), and a **feed row** shows just
+       that feed's (found by address, `articles_by_feed_or_name`).
+     - Unread counts come from one grouped query per frame
+       (`Storage::unread_by_feed`), matched to feeds by address first so a
+       renamed feed keeps its count.
+     - There is no expand/collapse.
   2. **Colors** — a small colored square next to each state label
      (unread/read/saved/skipped), color values pulled live from the
      loaded `theme.toml` rather than hardcoded, so the legend always
@@ -229,8 +236,9 @@ underneath.
 - **Right pane, below the banner bar:** article list for the selected
   topic (or saved articles, in Saved view), sorted by recency
 - **Footer (two rows):** the upper row is the hint line for the current mode
-  (in the normal view the everyday keys, starting with `? help` so the way to
-  the full list is never the part cut off on a narrow terminal). The lower row
+  (in the normal view the everyday keys, starting with `? help` and `q quit`
+  so the way to the full list is never the part cut off on a narrow
+  terminal). The lower row
   is the status line: a one-shot notice on the left, plus the active feed
   list's file, right-aligned: "Feed List: <path>" (the file icon in Nerd
   mode), home as `~`, `text_muted`. A notice never hides the hints; the
@@ -246,14 +254,15 @@ underneath.
 | Key       | Action                          |
 |-----------|----------------------------------|
 | `j` / `k` | navigate list                   |
-| `Right` / `l` | expand selected topic (show its sources) |
-| `Left` / `h`  | collapse selected topic          |
+| `Up` / `Down` | move through the feed list      |
+| `Tab` / `Shift+Tab` | filter the feed list by category (all → each → all) |
+| `?`       | open the Help popup (every key)  |
 | `Enter`   | open article in `w3m` (falls back to `$BROWSER`/`xdg-open` if `w3m` isn't installed) |
 | `x`       | skip article (recolors, no keyword-learning behind it — see below) |
 | `s`       | save article (auto-marks as read) |
 | `u`       | un-save the selected article, after a yes/no question (an article with a note loses the note too -- see "Un-save and the note lock") |
 | `n`       | write or edit a note (a real note also saves the article; emptying the box asks before deleting an existing note) |
-| `r`       | refresh the selected topic        |
+| `r`       | refresh the selected feed (a feed row), the category (All [category]), or everything (All feeds) |
 | `N`       | refresh every feed in the active list (decided 2026-10-30; downloads run a few at a time via `fetch_all`) |
 | `S`       | view saved articles               |
 | `y`       | view history (every article ever fetched) |
