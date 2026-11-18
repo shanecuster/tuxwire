@@ -542,6 +542,53 @@ impl Storage {
             .map_err(Into::into)
     }
 
+    /// Unread article counts for every feed in `scope`, from one query.
+    ///
+    /// Each [`FeedUnread`] is one distinct feed: its `topic`, its stored
+    /// `source` name, its `feed_url` (when the article rows have one), and
+    /// how many of its articles are unread (not read and not skipped, the
+    /// same rule as [`Storage::unread_count`]). A feed with no unread
+    /// articles has no entry; callers treat "missing" as zero.
+    ///
+    /// The terminal sidebar shows a count under every feed on every redraw,
+    /// so it needs all the counts at once. One grouped query is much cheaper
+    /// than one `unread_count` call per feed.
+    pub fn unread_by_feed(&self, scope: &Scope) -> anyhow::Result<Vec<FeedUnread>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT topic, source, feed_url, COUNT(*) FROM articles
+             WHERE read = 0 AND skipped = 0{} GROUP BY topic, source, feed_url",
+            scope.clause()
+        ))?;
+
+        let rows = stmt.query_map(params_from_iter(scope.feed_urls()), |row| {
+            Ok(FeedUnread {
+                topic: row.get(0)?,
+                source: row.get(1)?,
+                feed_url: row.get(2)?,
+                unread: row.get::<_, i64>(3)? as u32,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<FeedUnread>>>()
+            .map_err(Into::into)
+    }
+
+    /// Every article in `scope`, whatever its topic, most recent first --
+    /// what the terminal's "All feeds" sidebar row shows. With
+    /// `Scope::All` this is every article stored for the topic views; with a
+    /// feed list's scope, just that list's feeds.
+    pub fn articles_in_scope(&self, scope: &Scope) -> anyhow::Result<Vec<Article>> {
+        // `WHERE 1` is always true, so the scope's `AND ...` clause (or
+        // nothing) can be appended the same way as in `articles_by_topic`.
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT id, title, url, source, topic, timestamp, read, skipped, saved, note, saved_at, noted_at, feed_url, summary
+             FROM articles WHERE 1{} ORDER BY timestamp DESC",
+            scope.clause()
+        ))?;
+        let rows = stmt.query_map(params_from_iter(scope.feed_urls()), row_to_article)?;
+        rows.collect::<rusqlite::Result<Vec<Article>>>()
+            .map_err(Into::into)
+    }
+
     /// Marks an article read -- the `Enter` keybind (open in `$BROWSER`).
     ///
     /// The moment it was opened is remembered in `read_at` (milliseconds since
@@ -1002,6 +1049,24 @@ impl Feed {
 /// global. Articles with no `feed_url` yet (stored before migration 005 and
 /// not backfilled) fall outside every `Feeds` scope but remain in those
 /// global views.
+/// How many unread articles one feed has, from [`Storage::unread_by_feed`].
+///
+/// A feed is identified the way the sidebar identifies it: by `topic` and
+/// `source` (its name), plus `feed_url` when the stored articles have one.
+/// Older articles may have no `feed_url`, so the sidebar matches by address
+/// first and falls back to topic and name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FeedUnread {
+    /// The topic the articles are filed under.
+    pub topic: String,
+    /// The feed's name as stored on its articles.
+    pub source: String,
+    /// The feed's address, when the articles recorded one.
+    pub feed_url: Option<String>,
+    /// How many of its articles are unread.
+    pub unread: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Scope {
     /// No filtering.
@@ -2028,6 +2093,50 @@ mod tests {
         let nothing = Scope::Feeds(Vec::new());
         assert!(storage.topics(&nothing).unwrap().is_empty());
         assert_eq!(storage.unread_count(&nothing).unwrap(), 0);
+    }
+
+    /// `unread_by_feed` counts only unread articles, one entry per feed, and
+    /// honours the scope; `articles_in_scope` returns every topic's articles.
+    #[test]
+    fn unread_counts_and_all_articles_follow_the_scope() {
+        let storage = test_storage();
+        storage
+            .insert_article(&from_feed("https://e/1", "linux", "https://main/feed"))
+            .unwrap();
+        storage
+            .insert_article(&from_feed("https://e/2", "linux", "https://main/feed"))
+            .unwrap();
+        let read_id = storage
+            .insert_article(&from_feed("https://e/3", "gaming", "https://casual/feed"))
+            .unwrap();
+        storage.mark_read(read_id).unwrap();
+        storage
+            .insert_article(&from_feed("https://e/4", "gaming", "https://casual/feed"))
+            .unwrap();
+
+        // Everything: two feeds, each with its unread count (the read
+        // article is not counted).
+        let mut all = storage.unread_by_feed(&Scope::All).unwrap();
+        all.sort_by(|a, b| a.topic.cmp(&b.topic));
+        assert_eq!(all.len(), 2);
+        assert_eq!((all[0].topic.as_str(), all[0].unread), ("gaming", 1));
+        assert_eq!((all[1].topic.as_str(), all[1].unread), ("linux", 2));
+        assert_eq!(all[1].feed_url.as_deref(), Some("https://main/feed"));
+
+        // A narrower scope drops the other feed.
+        let main = Scope::Feeds(vec!["https://main/feed".to_string()]);
+        assert_eq!(storage.unread_by_feed(&main).unwrap().len(), 1);
+
+        // `articles_in_scope` ignores topics: all four with `All`, two
+        // with `main`, none with an empty list.
+        assert_eq!(storage.articles_in_scope(&Scope::All).unwrap().len(), 4);
+        assert_eq!(storage.articles_in_scope(&main).unwrap().len(), 2);
+        assert!(
+            storage
+                .articles_in_scope(&Scope::Feeds(Vec::new()))
+                .unwrap()
+                .is_empty()
+        );
     }
 
     /// A fresh database has the `summary` column (migration 007), and a
